@@ -1,11 +1,17 @@
+image: docker:stable
+
 stages:
 - test
+- build
 - push
 
 variables:
-  DOCKER_PREFIX: registry.gitlab.com/atlantic-crypto/kubevirt
+  DOCKER_PREFIX: registry.gitlab.com
+  IMAGE_PREFIX: atlantic-crypto/kubevirt/
+  JOB_NAME: ${CI_COMMIT_SHA}
   DOCKER_TAG: ${CI_COMMIT_SHA}
-  
+before_script:
+  - apk add bash make git rsync
 
 test:
   stage: test
@@ -13,7 +19,16 @@ test:
     refs:
     - coreweave
   script:
-  - make test
+  - hack/dockerized-cw "hack/bazel-fmt.sh && CI=${CI} ARTIFACTS=${ARTIFACTS} hack/bazel-test.sh"
+  
+build:
+  stage: build
+  only:
+    refs:
+    - coreweave
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - hack/dockerized-cw "export BUILD_ARCH=${BUILD_ARCH} && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} DOCKER_TAG_ALT=${DOCKER_TAG_ALT} IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT} ./hack/bazel-build-images.sh"
 
 push:
   stage: push
@@ -22,4 +37,4 @@ push:
     - coreweave
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - make push
+    - hack/dockerized-cw "export BUILD_ARCH=${BUILD_ARCH} && hack/bazel-fmt.sh && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} DOCKER_TAG_ALT=${DOCKER_TAG_ALT} IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT} KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} PUSH_TARGETS='${PUSH_TARGETS}' ./hack/bazel-push-images.sh"
