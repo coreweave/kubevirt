@@ -1,0 +1,7 @@
+#!/bin/bash
+
+ARGS="$@"
+
+ARGS=$(printf "%s" "$ARGS" | sed -Ee 's/cache=[a-z]+,?//g')
+
+exec /usr/libexec/virtiofsd.bin -o cache=auto  $ARGS
