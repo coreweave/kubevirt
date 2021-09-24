@@ -28,6 +28,7 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/vcpu"
 
 	"kubevirt.io/kubevirt/pkg/util/net/dns"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -61,7 +62,7 @@ func createDomainInterfaces(vmi *v1.VirtualMachineInstance, domain *api.Domain, 
 			Alias: api.NewUserDefinedAlias(iface.Name),
 		}
 
-		// if UseEmulation unset and at least one NIC model is virtio,
+		// if AllowEmulation unset and at least one NIC model is virtio,
 		// /dev/vhost-net must be present as we should have asked for it.
 		var virtioNetMQRequested bool
 		if mq := vmi.Spec.Domain.Devices.NetworkInterfaceMultiQueue; mq != nil {
@@ -186,7 +187,7 @@ func createSlirpNetwork(iface v1.Interface, network v1.Network, domain *api.Doma
 
 func CalculateNetworkQueues(vmi *v1.VirtualMachineInstance) uint32 {
 	cpuTopology := getCPUTopology(vmi)
-	queueNumber := calculateRequestedVCPUs(cpuTopology)
+	queueNumber := vcpu.CalculateRequestedVCPUs(cpuTopology)
 
 	if queueNumber > multiQueueMaxQueues {
 		log.Log.V(3).Infof("Capped the number of queues to be the current maximum of tap device queues: %d", multiQueueMaxQueues)

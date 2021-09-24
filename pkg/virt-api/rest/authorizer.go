@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	authorizationclient "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"kubevirt.io/client-go/kubecli"
 )
@@ -40,8 +41,6 @@ const (
 	userHeader            = "X-Remote-User"
 	groupHeader           = "X-Remote-Group"
 	userExtraHeaderPrefix = "X-Remote-Extra-"
-	clientQPS             = 200
-	clientBurst           = 400
 )
 
 type VirtApiAuthorizor interface {
@@ -230,8 +229,25 @@ func isInfoOrHealthEndpoint(req *restful.Request) bool {
 	// /apis/subresources.kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi/console
 	// The /apis/<group>/<version> part of the urls should be accessible without needing authorization
 	pathSplit := strings.Split(httpRequest.URL.Path, "/")
-	if len(pathSplit) <= 4 || (len(pathSplit) > 4 && (pathSplit[4] == "version" || pathSplit[4] == "healthz" || pathSplit[4] == "guestfs")) {
+	if len(pathSplit) <= 4 {
 		return true
+	}
+
+	noAuthEndpoints := []string{
+		"version",
+		"healthz",
+		"guestfs",
+		// the profiler endpoints are blocked by a feature gate
+		// to restrict the usage to development environments
+		"start-cluster-profiler",
+		"stop-cluster-profiler",
+		"dump-cluster-profiler",
+	}
+
+	for _, endpoint := range noAuthEndpoints {
+		if pathSplit[4] == endpoint {
+			return true
+		}
 	}
 
 	return false
@@ -302,13 +318,12 @@ func NewAuthorizorFromConfig(config *restclient.Config) (VirtApiAuthorizor, erro
 	return a, nil
 }
 
-func NewAuthorizor() (VirtApiAuthorizor, error) {
-	config, err := kubecli.GetConfig()
+func NewAuthorizor(rateLimiter flowcontrol.RateLimiter) (VirtApiAuthorizor, error) {
+	config, err := kubecli.GetKubevirtClientConfig()
 	if err != nil {
 		return nil, err
 	}
-	config.QPS = clientQPS
-	config.Burst = clientBurst
+	config.RateLimiter = rateLimiter
 
 	return NewAuthorizorFromConfig(config)
 }

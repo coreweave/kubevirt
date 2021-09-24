@@ -41,10 +41,14 @@ import (
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/flowcontrol"
+
+	"kubevirt.io/kubevirt/pkg/util/ratelimiter"
 
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
 
 	"kubevirt.io/kubevirt/pkg/healthz"
+	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
 
 	snapshotv1 "kubevirt.io/client-go/apis/snapshot/v1alpha1"
 	"kubevirt.io/client-go/kubecli"
@@ -145,6 +149,8 @@ type VirtControllerApp struct {
 	vmController *VMController
 	vmInformer   cache.SharedIndexInformer
 
+	controllerRevisionInformer cache.SharedIndexInformer
+
 	dataVolumeInformer cache.SharedIndexInformer
 
 	migrationController *MigrationController
@@ -203,6 +209,7 @@ type VirtControllerApp struct {
 	promKeyFilePath          string
 	nodeTopologyUpdater      topology.NodeTopologyUpdater
 	nodeTopologyUpdatePeriod time.Duration
+	reloadableRateLimiter    *ratelimiter.ReloadableRateLimiter
 }
 
 var _ service.Service = &VirtControllerApp{}
@@ -227,8 +234,13 @@ func Execute() {
 
 	log.InitializeLogging("virt-controller")
 
-	app.clientSet, err = kubecli.GetKubevirtClient()
-
+	app.reloadableRateLimiter = ratelimiter.NewReloadableRateLimiter(flowcontrol.NewTokenBucketRateLimiter(virtconfig.DefaultVirtControllerQPS, virtconfig.DefaultVirtControllerBurst))
+	clientConfig, err := kubecli.GetKubevirtClientConfig()
+	if err != nil {
+		panic(err)
+	}
+	clientConfig.RateLimiter = app.reloadableRateLimiter
+	app.clientSet, err = kubecli.GetKubevirtClientFromRESTConfig(clientConfig)
 	if err != nil {
 		golog.Fatal(err)
 	}
@@ -271,11 +283,18 @@ func Execute() {
 	app.hasCDI = app.clusterConfig.HasDataVolumeAPI()
 	app.clusterConfig.SetConfigModifiedCallback(app.configModificationCallback)
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
+	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeRateLimiter)
 
 	webService := new(restful.WebService)
 	webService.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
 	webService.Route(webService.GET("/healthz").To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig, apiHealthVersion)).Doc("Health endpoint"))
 	webService.Route(webService.GET("/leader").To(app.leaderProbe).Doc("Leader endpoint"))
+
+	componentProfiler := profiler.NewProfileManager(app.clusterConfig)
+	webService.Route(webService.GET("/start-profiler").To(componentProfiler.HandleStartProfiler).Doc("start profiler endpoint"))
+	webService.Route(webService.GET("/stop-profiler").To(componentProfiler.HandleStopProfiler).Doc("stop profiler endpoint"))
+	webService.Route(webService.GET("/dump-profiler").To(componentProfiler.HandleDumpProfiler).Doc("dump profiler results endpoint"))
+
 	restful.Add(webService)
 
 	app.vmiInformer = app.informerFactory.VMI()
@@ -295,6 +314,8 @@ func Execute() {
 	app.vmInformer = app.informerFactory.VirtualMachine()
 
 	app.migrationInformer = app.informerFactory.VirtualMachineInstanceMigration()
+
+	app.controllerRevisionInformer = app.informerFactory.ControllerRevision()
 
 	app.vmSnapshotInformer = app.informerFactory.VirtualMachineSnapshot()
 	app.vmSnapshotContentInformer = app.informerFactory.VirtualMachineSnapshotContent()
@@ -339,6 +360,15 @@ func (vca *VirtControllerApp) configModificationCallback() {
 		}
 		vca.reInitChan <- "reinit"
 	}
+}
+
+// Update virt-controller rate limiter
+func (app *VirtControllerApp) shouldChangeRateLimiter() {
+	config := app.clusterConfig.GetConfig()
+	qps := config.ControllerConfiguration.RestClient.RateLimiter.TokenBucketRateLimiter.QPS
+	burst := config.ControllerConfiguration.RestClient.RateLimiter.TokenBucketRateLimiter.Burst
+	app.reloadableRateLimiter.Set(flowcontrol.NewTokenBucketRateLimiter(qps, burst))
+	log.Log.V(2).Infof("setting rate limiter to %v QPS and %v Burst", qps, burst)
 }
 
 // Update virt-controller log verbosity on relevant config changes
@@ -511,6 +541,7 @@ func (vca *VirtControllerApp) initVirtualMachines() {
 		vca.vmInformer,
 		vca.dataVolumeInformer,
 		vca.persistentVolumeClaimInformer,
+		vca.controllerRevisionInformer,
 		recorder,
 		vca.clientSet)
 }
@@ -567,6 +598,7 @@ func (vca *VirtControllerApp) initSnapshotController() {
 		CRDInformer:               vca.crdInformer,
 		PodInformer:               vca.allPodInformer,
 		DVInformer:                vca.dataVolumeInformer,
+		CRInformer:                vca.controllerRevisionInformer,
 		Recorder:                  recorder,
 		ResyncPeriod:              vca.snapshotControllerResyncPeriod,
 	}

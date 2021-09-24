@@ -200,7 +200,7 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 	causes = append(causes, validateGPUsWithPassthroughEnabled(field, spec, config)...)
 	causes = append(causes, validateFilesystemsWithVirtIOFSEnabled(field, spec, config)...)
 	causes = append(causes, validateHostDevicesWithPassthroughEnabled(field, spec, config)...)
-	causes = append(causes, validatePermittedHostDevices(field, spec, config)...)
+
 	return causes
 }
 
@@ -760,38 +760,6 @@ func validateHostDevicesWithPassthroughEnabled(field *k8sfield.Path, spec *v1.Vi
 	return causes
 }
 
-func validatePermittedHostDevices(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) (causes []metav1.StatusCause) {
-	if hostDevs := config.GetPermittedHostDevices(); hostDevs != nil {
-		// build a map of all permitted host devices
-		supportedHostDevicesMap := make(map[string]bool)
-		for _, dev := range hostDevs.PciHostDevices {
-			supportedHostDevicesMap[dev.ResourceName] = true
-		}
-		for _, dev := range hostDevs.MediatedDevices {
-			supportedHostDevicesMap[dev.ResourceName] = true
-		}
-		for _, hostDev := range spec.Domain.Devices.GPUs {
-			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueInvalid,
-					Message: fmt.Sprintf("GPU %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName),
-					Field:   field.Child("GPUs").String(),
-				})
-			}
-		}
-		for _, hostDev := range spec.Domain.Devices.HostDevices {
-			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueInvalid,
-					Message: fmt.Sprintf("HostDevice %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName),
-					Field:   field.Child("HostDevices").String(),
-				})
-			}
-		}
-	}
-	return causes
-}
-
 func appendStatusCauseForPodNetworkDefinedWithMultusDefaultNetworkDefined(field *k8sfield.Path, causes []metav1.StatusCause) []metav1.StatusCause {
 	return append(causes, metav1.StatusCause{
 		Type:    metav1.CauseTypeFieldValueInvalid,
@@ -1013,6 +981,7 @@ func validateCpuPinning(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpe
 		causes = append(causes, validateRequestLimitOrCoresProvidedOnDedicatedCPUPlacement(field, spec)...)
 		causes = append(causes, validateRequestEqualsLimitOnDedicatedCPUPlacement(field, spec)...)
 		causes = append(causes, validateRequestOrLimitWithCoresProvidedOnDedicatedCPUPlacement(field, spec)...)
+		causes = append(causes, validateThreadCountOnDedicatedCPUPlacement(field, spec)...)
 	}
 	return causes
 }
@@ -1047,6 +1016,20 @@ func validateNUMA(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, con
 				Field: field.Child("domain", "cpu", "numa", "guestMappingPassthrough").String(),
 			})
 		}
+	}
+	return causes
+}
+
+func validateThreadCountOnDedicatedCPUPlacement(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec) (causes []metav1.StatusCause) {
+	if spec.Domain.CPU != nil && spec.Domain.CPU.Threads > 2 {
+		causes = append(causes, metav1.StatusCause{
+			Type: metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("Not more than two threads must be provided at %v (got %v) when DedicatedCPUPlacement is true",
+				field.Child("domain", "cpu", "threads").String(),
+				spec.Domain.CPU.Threads,
+			),
+			Field: field.Child("domain", "cpu", "dedicatedCpuPlacement").String(),
+		})
 	}
 	return causes
 }

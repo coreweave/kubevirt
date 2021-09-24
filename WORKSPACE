@@ -18,10 +18,10 @@ load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 http_archive(
     name = "rules_python",
-    sha256 = "778197e26c5fbeb07ac2a2c5ae405b30f6cb7ad1f5510ea6fdac03bded96cc6f",
+    sha256 = "934c9ceb552e84577b0faf1e5a2f0450314985b4d8712b2b70717dc679fdc01b",
     urls = [
-        "https://github.com/bazelbuild/rules_python/releases/download/0.2.0/rules_python-0.2.0.tar.gz",
-        "https://storage.googleapis.com/builddeps/778197e26c5fbeb07ac2a2c5ae405b30f6cb7ad1f5510ea6fdac03bded96cc6f",
+        "https://github.com/bazelbuild/rules_python/releases/download/0.3.0/rules_python-0.3.0.tar.gz",
+        "https://storage.googleapis.com/builddeps/934c9ceb552e84577b0faf1e5a2f0450314985b4d8712b2b70717dc679fdc01b",
     ],
 )
 
@@ -118,21 +118,6 @@ http_file(
     urls = [
         "https://download.cirros-cloud.net/0.5.0/cirros-0.5.0-aarch64-disk.img",
         "https://storage.googleapis.com/builddeps/46c4bd31c1b39152bafe3265c8e3551dd6bc672dfee6713dc736f5e20a348e63",
-    ],
-)
-
-http_file(
-    name = "fedora_image",
-    sha256 = "423a4ce32fa32c50c11e3d3ff392db97a762533b81bef9d00599de518a7469c8",
-    urls = ["https://storage.googleapis.com/builddeps/423a4ce32fa32c50c11e3d3ff392db97a762533b81bef9d00599de518a7469c8"],
-)
-
-http_file(
-    name = "fedora_image_aarch64",
-    sha256 = "b367755c664a2d7a26955bbfff985855adfa2ca15e908baf15b4b176d68d3967",
-    urls = [
-        "https://dl.fedoraproject.org/pub/fedora/linux/releases/32/Cloud/aarch64/images/Fedora-Cloud-Base-32-1.6.aarch64.qcow2",
-        "https://storage.googleapis.com/builddeps/b367755c664a2d7a26955bbfff985855adfa2ca15e908baf15b4b176d68d3967",
     ],
 )
 
@@ -334,24 +319,6 @@ container_pull(
     tag = "32",
 )
 
-# Pull fedora 32 customize container-disk
-# WARNING: please update any automated process to push this image to quay.io
-# instead of index.docker.io
-# TODO build fedora_sriov_lane for multi-arch
-container_pull(
-    name = "fedora_sriov_lane",
-    digest = "sha256:6f66ee747d62c354c0d36e640f8c97d6be0b6ad88a9e8c0180496ac55cba31bf",
-    registry = "quay.io",
-    repository = "kubevirtci/fedora-sriov-testing",
-)
-
-container_pull(
-    name = "fedora_sriov_lane_aarch64",
-    digest = "sha256:6f66ee747d62c354c0d36e640f8c97d6be0b6ad88a9e8c0180496ac55cba31bf",
-    registry = "quay.io",
-    repository = "kubevirtci/fedora-sriov-testing",
-)
-
 # Pull go_image_base
 container_pull(
     name = "go_image_base",
@@ -390,7 +357,7 @@ container_pull(
 # TODO build fedora_with_test_tooling for multi-arch
 container_pull(
     name = "fedora_with_test_tooling",
-    digest = "sha256:ce36d2b4f81b038fba0b61b1bb1ac7f671d47687fb1f9d7ddedd22742cc79dd9",
+    digest = "sha256:14193941e1fe74f2189536263c71479abbd296dc93b75e8a7f97f0b31e78b71e",
     registry = "quay.io",
     repository = "kubevirtci/fedora-with-test-tooling",
 )
@@ -1369,17 +1336,6 @@ rpm(
 )
 
 rpm(
-    name = "ebtables-legacy-0__2.0.11-5.fc32.x86_64",
-    sha256 = "2eca40e72fdd3ea19d22f00c127c4d166eaf7687cc0a8c1056ae3a6264cda56d",
-    urls = [
-        "https://mirror.dogado.de/fedora/linux/releases/32/Everything/x86_64/os/Packages/e/ebtables-legacy-2.0.11-5.fc32.x86_64.rpm",
-        "https://mirrors.n-ix.net/fedora/linux/releases/32/Everything/x86_64/os/Packages/e/ebtables-legacy-2.0.11-5.fc32.x86_64.rpm",
-        "https://ftp.halifax.rwth-aachen.de/fedora/linux/releases/32/Everything/x86_64/os/Packages/e/ebtables-legacy-2.0.11-5.fc32.x86_64.rpm",
-        "https://ftp-stud.hs-esslingen.de/pub/fedora/linux/releases/32/Everything/x86_64/os/Packages/e/ebtables-legacy-2.0.11-5.fc32.x86_64.rpm",
-    ],
-)
-
-rpm(
     name = "edk2-aarch64-0__20200801stable-1.fc32.aarch64",
     sha256 = "672d0a48607a2b2532f31647163fab0a659a8a9e02f6d9abfe626b75e4d8f7f8",
     urls = [
@@ -2324,6 +2280,18 @@ rpm(
         "https://mirror.23media.com/fedora/linux/updates/32/Everything/x86_64/Packages/i/iptables-libs-1.8.4-9.fc32.x86_64.rpm",
         "https://ftp.halifax.rwth-aachen.de/fedora/linux/updates/32/Everything/x86_64/Packages/i/iptables-libs-1.8.4-9.fc32.x86_64.rpm",
         "https://storage.googleapis.com/builddeps/dcf038adbb690e6aa3dcc020576eccf1ee3eeecb0cddd3011fa5f99e85c8bf3a",
+    ],
+)
+
+rpm(
+    name = "iptables-nft-0__1.8.4-9.fc32.x86_64",
+    sha256 = "b81b7935915e07fe9fec3cfb0a25c27baa051ad9ee5a3f3a0ffd22b1615eccb9",
+    urls = [
+        "https://mirror.atl.genesisadaptive.com/fedora/linux/updates/32/Everything/x86_64/Packages/i/iptables-nft-1.8.4-9.fc32.x86_64.rpm",
+        "https://sjc.edge.kernel.org/fedora-buffet/fedora/linux/updates/32/Everything/x86_64/Packages/i/iptables-nft-1.8.4-9.fc32.x86_64.rpm",
+        "https://mirror.us-midwest-1.nexcess.net/fedora/updates/32/Everything/x86_64/Packages/i/iptables-nft-1.8.4-9.fc32.x86_64.rpm",
+        "https://mirrors.rit.edu/fedora/fedora/linux/updates/32/Everything/x86_64/Packages/i/iptables-nft-1.8.4-9.fc32.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/b81b7935915e07fe9fec3cfb0a25c27baa051ad9ee5a3f3a0ffd22b1615eccb9",
     ],
 )
 
@@ -4646,30 +4614,6 @@ rpm(
         "https://mirror.23media.com/fedora/linux/updates/32/Everything/x86_64/Packages/m/mdevctl-0.78-1.fc32.noarch.rpm",
         "https://ftp.halifax.rwth-aachen.de/fedora/linux/updates/32/Everything/x86_64/Packages/m/mdevctl-0.78-1.fc32.noarch.rpm",
         "https://storage.googleapis.com/builddeps/8ca56e4f9ba1a6c89359c1c6d219f10b933571f77965c6ca6f2d5fcda135794f",
-    ],
-)
-
-rpm(
-    name = "mozjs60-0__60.9.0-5.fc32.aarch64",
-    sha256 = "b532ac1225423bbce715f47ae83c1b9b70ac1e7818760a498c83aab0ae374c99",
-    urls = [
-        "https://ftp.halifax.rwth-aachen.de/fedora/linux/releases/32/Everything/aarch64/os/Packages/m/mozjs60-60.9.0-5.fc32.aarch64.rpm",
-        "https://mirrors.xtom.de/fedora/releases/32/Everything/aarch64/os/Packages/m/mozjs60-60.9.0-5.fc32.aarch64.rpm",
-        "https://ftp.plusline.net/fedora/linux/releases/32/Everything/aarch64/os/Packages/m/mozjs60-60.9.0-5.fc32.aarch64.rpm",
-        "https://ftp-stud.hs-esslingen.de/pub/fedora/linux/releases/32/Everything/aarch64/os/Packages/m/mozjs60-60.9.0-5.fc32.aarch64.rpm",
-        "https://storage.googleapis.com/builddeps/b532ac1225423bbce715f47ae83c1b9b70ac1e7818760a498c83aab0ae374c99",
-    ],
-)
-
-rpm(
-    name = "mozjs60-0__60.9.0-5.fc32.x86_64",
-    sha256 = "80cf220a3314f965c088e03d2b750426767db0b36b6b7c5e8059b9217ff4de6d",
-    urls = [
-        "https://ftp-stud.hs-esslingen.de/pub/fedora/linux/releases/32/Everything/x86_64/os/Packages/m/mozjs60-60.9.0-5.fc32.x86_64.rpm",
-        "https://mirror.dogado.de/fedora/linux/releases/32/Everything/x86_64/os/Packages/m/mozjs60-60.9.0-5.fc32.x86_64.rpm",
-        "https://ftp.plusline.net/fedora/linux/releases/32/Everything/x86_64/os/Packages/m/mozjs60-60.9.0-5.fc32.x86_64.rpm",
-        "https://ftp.fau.de/fedora/linux/releases/32/Everything/x86_64/os/Packages/m/mozjs60-60.9.0-5.fc32.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/80cf220a3314f965c088e03d2b750426767db0b36b6b7c5e8059b9217ff4de6d",
     ],
 )
 

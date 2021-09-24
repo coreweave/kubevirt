@@ -62,14 +62,6 @@ metadata:
   name: kubevirt-operator
 rules:
 - apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - get
-  - update
-- apiGroups:
   - kubevirt.io
   resources:
   - kubevirts
@@ -110,6 +102,16 @@ rules:
   - get
   - list
   - watch
+  - create
+  - delete
+  - patch
+- apiGroups:
+  - apps
+  resources:
+  - controllerrevisions
+  verbs:
+  - watch
+  - list
   - create
   - delete
   - patch
@@ -224,11 +226,15 @@ rules:
 - apiGroups:
   - subresources.kubevirt.io
   resources:
-  - virtualmachines/start
-  - virtualmachines/stop
-  - virtualmachines/restart
+  - virtualmachineinstances/pause
+  - virtualmachineinstances/unpause
+  - virtualmachineinstances/addvolume
+  - virtualmachineinstances/removevolume
+  - virtualmachineinstances/freeze
+  - virtualmachineinstances/unfreeze
   verbs:
-  - put
+  - update
+  - get
 - apiGroups:
   - ""
   resources:
@@ -398,6 +404,15 @@ rules:
   verbs:
   - list
 - apiGroups:
+  - apps
+  resources:
+  - controllerrevisions
+  verbs:
+  - watch
+  - list
+  - create
+  - delete
+- apiGroups:
   - ""
   resources:
   - persistentvolumeclaims
@@ -429,7 +444,6 @@ rules:
   - virtualmachineinstances/freeze
   - virtualmachineinstances/unfreeze
   verbs:
-  - get
   - update
 - apiGroups:
   - cdi.kubevirt.io
@@ -497,12 +511,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - persistentvolumeclaims
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
   - nodes
   verbs:
   - patch
@@ -560,6 +568,9 @@ rules:
   resources:
   - virtualmachineinstances/console
   - virtualmachineinstances/vnc
+  - virtualmachineinstances/guestosinfo
+  - virtualmachineinstances/filesystemlist
+  - virtualmachineinstances/userlist
   verbs:
   - get
 - apiGroups:
@@ -569,8 +580,9 @@ rules:
   - virtualmachineinstances/unpause
   - virtualmachineinstances/addvolume
   - virtualmachineinstances/removevolume
+  - virtualmachineinstances/freeze
+  - virtualmachineinstances/unfreeze
   verbs:
-  - get
   - update
 - apiGroups:
   - subresources.kubevirt.io
@@ -617,6 +629,9 @@ rules:
   resources:
   - virtualmachineinstances/console
   - virtualmachineinstances/vnc
+  - virtualmachineinstances/guestosinfo
+  - virtualmachineinstances/filesystemlist
+  - virtualmachineinstances/userlist
   verbs:
   - get
 - apiGroups:
@@ -626,8 +641,9 @@ rules:
   - virtualmachineinstances/unpause
   - virtualmachineinstances/addvolume
   - virtualmachineinstances/removevolume
+  - virtualmachineinstances/freeze
+  - virtualmachineinstances/unfreeze
   verbs:
-  - get
   - update
 - apiGroups:
   - subresources.kubevirt.io
@@ -674,6 +690,14 @@ rules:
   verbs:
   - get
   - list
+- apiGroups:
+  - subresources.kubevirt.io
+  resources:
+  - virtualmachineinstances/guestosinfo
+  - virtualmachineinstances/filesystemlist
+  - virtualmachineinstances/userlist
+  verbs:
+  - get
 - apiGroups:
   - kubevirt.io
   resources:

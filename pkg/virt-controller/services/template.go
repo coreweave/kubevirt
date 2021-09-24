@@ -442,6 +442,12 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 			hotplugVolumes[volumeStatus.Name] = true
 		}
 	}
+	// This detects hotplug volumes for a started but not ready VMI
+	for _, volume := range vmi.Spec.Volumes {
+		if (volume.DataVolume != nil && volume.DataVolume.Hotpluggable) || (volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.Hotpluggable) {
+			hotplugVolumes[volume.Name] = true
+		}
+	}
 
 	// Need to run in privileged mode in Power or libvirt will fail to lock memory for VMI
 	if t.IsPPC64() {
@@ -522,7 +528,10 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 			volumes = append(volumes, k8sv1.Volume{
 				Name: volume.Name,
 				VolumeSource: k8sv1.VolumeSource{
-					PersistentVolumeClaim: volume.PersistentVolumeClaim,
+					PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+						ClaimName: volume.PersistentVolumeClaim.ClaimName,
+						ReadOnly:  volume.PersistentVolumeClaim.ReadOnly,
+					},
 				},
 			})
 		}
@@ -867,7 +876,7 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 		if vcpus != 0 && cpuAllocationRatio > 0 {
 			val := float64(vcpus) / float64(cpuAllocationRatio)
 			vcpusStr := fmt.Sprintf("%g", val)
-			if val < 0 {
+			if val < 1 {
 				val *= 1000
 				vcpusStr = fmt.Sprintf("%gm", val)
 			}
@@ -1014,8 +1023,6 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 		resources.Limits[k8sv1.ResourceMemory] = *resources.Requests.Memory()
 	}
 
-	lessPVCSpaceToleration := t.clusterConfig.GetLessPVCSpaceToleration()
-	reservePVCBytes := t.clusterConfig.GetMinimumReservePVCBytes()
 	ovmfPath := t.clusterConfig.GetOVMFPath()
 
 	var command []string
@@ -1036,8 +1043,6 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 			"--container-disk-dir", t.containerDiskDir,
 			"--grace-period-seconds", strconv.Itoa(int(gracePeriodSeconds)),
 			"--hook-sidecars", strconv.Itoa(len(requestedHookSidecarList)),
-			"--less-pvc-space-toleration", strconv.Itoa(lessPVCSpaceToleration),
-			"--minimum-pvc-reserve-bytes", strconv.FormatUint(reservePVCBytes, 10),
 			"--ovmf-path", ovmfPath,
 		}
 		if nonRoot {
@@ -1045,20 +1050,20 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 		}
 	}
 
-	useEmulation := t.clusterConfig.IsUseEmulation()
+	allowEmulation := t.clusterConfig.AllowEmulation()
 	imagePullPolicy := t.clusterConfig.GetImagePullPolicy()
 
 	if resources.Limits == nil {
 		resources.Limits = make(k8sv1.ResourceList)
 	}
 
-	extraResources := getRequiredResources(vmi, useEmulation)
+	extraResources := getRequiredResources(vmi, allowEmulation)
 	for key, val := range extraResources {
 		resources.Limits[key] = val
 	}
 
-	if useEmulation {
-		command = append(command, "--use-emulation")
+	if allowEmulation {
+		command = append(command, "--allow-emulation")
 	} else {
 		resources.Limits[KvmDevice] = resource.MustParse("1")
 	}
@@ -1087,6 +1092,11 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 		if resourceName != "" {
 			requestResource(&resources, resourceName)
 		}
+	}
+
+	err = validatePermittedHostDevices(&vmi.Spec, t.clusterConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	if util.IsGPUVMI(vmi) {
@@ -1452,6 +1462,37 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 	return &pod, nil
 }
 
+func validatePermittedHostDevices(spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) error {
+	errors := make([]string, 0)
+
+	if hostDevs := config.GetPermittedHostDevices(); hostDevs != nil {
+		// build a map of all permitted host devices
+		supportedHostDevicesMap := make(map[string]bool)
+		for _, dev := range hostDevs.PciHostDevices {
+			supportedHostDevicesMap[dev.ResourceName] = true
+		}
+		for _, dev := range hostDevs.MediatedDevices {
+			supportedHostDevicesMap[dev.ResourceName] = true
+		}
+		for _, hostDev := range spec.Domain.Devices.GPUs {
+			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
+				errors = append(errors, fmt.Sprintf("GPU %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName))
+			}
+		}
+		for _, hostDev := range spec.Domain.Devices.HostDevices {
+			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
+				errors = append(errors, fmt.Sprintf("HostDevice %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName))
+			}
+		}
+	}
+
+	if len(errors) != 0 {
+		return fmt.Errorf(strings.Join(errors, " "))
+	}
+
+	return nil
+}
+
 func (t *templateService) RenderHotplugAttachmentPodTemplate(volumes []*v1.Volume, ownerPod *k8sv1.Pod, vmi *v1.VirtualMachineInstance, claimMap map[string]*k8sv1.PersistentVolumeClaim, tempPod bool) (*k8sv1.Pod, error) {
 	zero := int64(0)
 	sharedMount := k8sv1.MountPropagationHostToContainer
@@ -1746,15 +1787,15 @@ func getRequiredCapabilities(vmi *v1.VirtualMachineInstance, config *virtconfig.
 	return capabilities
 }
 
-func getRequiredResources(vmi *v1.VirtualMachineInstance, useEmulation bool) k8sv1.ResourceList {
+func getRequiredResources(vmi *v1.VirtualMachineInstance, allowEmulation bool) k8sv1.ResourceList {
 	res := k8sv1.ResourceList{}
 	if (len(vmi.Spec.Domain.Devices.Interfaces) > 0) ||
 		(vmi.Spec.Domain.Devices.AutoattachPodInterface == nil) ||
 		(*vmi.Spec.Domain.Devices.AutoattachPodInterface == true) {
 		res[TunDevice] = resource.MustParse("1")
 	}
-	if util.NeedVirtioNetDevice(vmi, useEmulation) {
-		// Note that about network interface, useEmulation does not make
+	if util.NeedVirtioNetDevice(vmi, allowEmulation) {
+		// Note that about network interface, allowEmulation does not make
 		// any difference on eventual Domain xml, but uniformly making
 		// /dev/vhost-net unavailable and libvirt implicitly fallback
 		// to use QEMU userland NIC emulation.
@@ -2122,6 +2163,9 @@ func generatePodAnnotations(vmi *v1.VirtualMachineInstance) (map[string]string, 
 		vmi.GetObjectMeta().GetName(),
 		vmi.GetObjectMeta().GetNamespace())
 
+	// Set this annotation now to indicate that the newly created virt-launchers will use
+	// unix sockets as a transport for migration
+	annotationsSet[v1.MigrationTransportUnixAnnotation] = "true"
 	return annotationsSet, nil
 }
 

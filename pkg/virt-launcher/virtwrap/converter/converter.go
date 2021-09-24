@@ -37,6 +37,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/vcpu"
+
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
 
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
@@ -95,7 +97,7 @@ type EFIConfiguration struct {
 
 type ConverterContext struct {
 	Architecture          string
-	UseEmulation          bool
+	AllowEmulation        bool
 	Secrets               map[string]*k8sv1.Secret
 	VirtualMachine        *v1.VirtualMachineInstance
 	CPUSet                []int
@@ -104,12 +106,11 @@ type ConverterContext struct {
 	HotplugVolumes        map[string]v1.VolumeStatus
 	PermanentVolumes      map[string]v1.VolumeStatus
 	DiskType              map[string]*containerdisk.DiskInfo
-	SRIOVDevices          []api.HostDevice
 	SMBios                *cmdv1.SMBios
-	GpuDevices            []string
-	VgpuDevices           []string
-	HostDevices           map[string]HostDevicesList
-	EmulatorThreadCpu     *int
+	SRIOVDevices          []api.HostDevice
+	LegacyHostDevices     []api.HostDevice
+	GenericHostDevices    []api.HostDevice
+	GPUHostDevices        []api.HostDevice
 	EFIConfiguration      *EFIConfiguration
 	MemBalloonStatsPeriod uint
 	UseVirtioTransitional bool
@@ -139,51 +140,6 @@ func isARM64(arch string) bool {
 		return true
 	}
 	return false
-}
-
-// pop next device ID or address from a list
-// these can either be PCI addresses or UUIDs for MDEVs
-func popDeviceIDFromList(addrList []string) (string, []string) {
-	address := addrList[0]
-	if len(addrList) > 1 {
-		return address, addrList[1:]
-	}
-	return address, []string{}
-}
-
-func getHostDeviceByResourceName(c *ConverterContext, resourceName string, name string) (api.HostDevice, error) {
-	if device, exist := c.HostDevices[resourceName]; len(device.AddrList) != 0 && exist {
-		addr, remainingAddresses := popDeviceIDFromList(device.AddrList)
-		domainHostDev, err := createHostDevicesFromAddress(device.Type, addr, name)
-		if err != nil {
-			return domainHostDev, err
-		}
-		device.AddrList = remainingAddresses
-		c.HostDevices[resourceName] = device
-		return domainHostDev, nil
-	}
-	return api.HostDevice{}, fmt.Errorf("failed to allocated a host device for resource: %s", resourceName)
-}
-
-// Both HostDevices and GPUs can allocate PCI devices or a MDEVs
-func Convert_HostDevices_And_GPU(devices v1.Devices, domain *api.Domain, c *ConverterContext) error {
-	for _, hostDev := range devices.HostDevices {
-		hostDevice, err := getHostDeviceByResourceName(c, hostDev.DeviceName, hostDev.Name)
-		if err != nil {
-			return err
-		}
-		domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, hostDevice)
-	}
-	for _, gpu := range devices.GPUs {
-		hostDevice, err := getHostDeviceByResourceName(c, gpu.DeviceName, gpu.Name)
-		if err != nil {
-			return err
-		}
-		domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, hostDevice)
-	}
-
-	return nil
-
 }
 
 func Convert_v1_Disk_To_api_Disk(c *ConverterContext, diskDevice *v1.Disk, disk *api.Disk, prefixMap map[string]deviceNamer, numQueues *uint) error {
@@ -1129,33 +1085,35 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 	// number of cores in vmi.Spec.Domain.Resources.Requests/Limits, not only
 	// in vmi.Spec.Domain.CPU
 	cpuTopology := getCPUTopology(vmi)
-	cpuCount := calculateRequestedVCPUs(cpuTopology)
+	cpuCount := vcpu.CalculateRequestedVCPUs(cpuTopology)
 	domain.Spec.CPU.Topology = cpuTopology
 	domain.Spec.VCPU = &api.VCPU{
 		Placement: "static",
 		CPUs:      cpuCount,
 	}
 
-	if _, err := os.Stat("/dev/kvm"); os.IsNotExist(err) {
-		if c.UseEmulation {
-			logger := log.DefaultLogger()
-			logger.Infof("Hardware emulation device '/dev/kvm' not present. Using software emulation.")
-			domain.Spec.Type = "qemu"
-		} else {
-			return fmt.Errorf("hardware emulation device '/dev/kvm' not present")
-		}
+	kvmPath := "/dev/kvm"
+	if softwareEmulation, err := util.UseSoftwareEmulationForDevice(kvmPath, c.AllowEmulation); err != nil {
+		return err
+	} else if softwareEmulation {
+		logger := log.DefaultLogger()
+		logger.Infof("Hardware emulation device '%s' not present. Using software emulation.", kvmPath)
+		domain.Spec.Type = "qemu"
+	} else if _, err := os.Stat(kvmPath); os.IsNotExist(err) {
+		return fmt.Errorf("hardware emulation device '%s' not present", kvmPath)
 	} else if err != nil {
 		return err
 	}
 
 	virtioNetProhibited := false
-	if _, err := os.Stat("/dev/vhost-net"); os.IsNotExist(err) {
-		if c.UseEmulation {
-			logger := log.DefaultLogger()
-			logger.Infof("In-kernel virtio-net device emulation '/dev/vhost-net' not present. Falling back to QEMU userland emulation.")
-		} else {
-			virtioNetProhibited = true
-		}
+	vhostNetPath := "/dev/vhost-net"
+	if softwareEmulation, err := util.UseSoftwareEmulationForDevice(vhostNetPath, c.AllowEmulation); err != nil {
+		return err
+	} else if softwareEmulation {
+		logger := log.DefaultLogger()
+		logger.Infof("In-kernel virtio-net device emulation '%s' not present. Falling back to QEMU userland emulation.", vhostNetPath)
+	} else if _, err := os.Stat(vhostNetPath); os.IsNotExist(err) {
+		virtioNetProhibited = true
 	} else if err != nil {
 		return err
 	}
@@ -1626,27 +1584,37 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 
 		// Adjust guest vcpu config. Currently will handle vCPUs to pCPUs pinning
 		if vmi.IsCPUDedicated() {
-			if err := formatDomainCPUTune(domain, c); err != nil {
+			var cpuPool vcpu.VCPUPool
+			if isNumaPassthrough(vmi) {
+				cpuPool = vcpu.NewStrictCPUPool(domain.Spec.CPU.Topology, c.Topology, c.CPUSet)
+			} else {
+				cpuPool = vcpu.NewRelaxedCPUPool(domain.Spec.CPU.Topology, c.Topology, c.CPUSet)
+			}
+			cpuTune, err := cpuPool.FitCores()
+			if err != nil {
 				log.Log.Reason(err).Error("failed to format domain cputune.")
 				return err
 			}
-			if vmi.Spec.Domain.CPU.IsolateEmulatorThread {
-				if c.EmulatorThreadCpu == nil {
-					err := fmt.Errorf("no CPUs allocated for the emulation thread")
-					log.Log.Reason(err).Error("failed to format emulation thread pin")
-					return err
+			domain.Spec.CPUTune = cpuTune
 
+			var emulatorThread uint32
+			if vmi.Spec.Domain.CPU.IsolateEmulatorThread {
+				emulatorThread, err = cpuPool.FitThread()
+				if err != nil {
+					e := fmt.Errorf("no CPU allocated for the emulation thread: %v", err)
+					log.Log.Reason(e).Error("failed to format emulation thread pin")
+					return e
 				}
-				appendDomainEmulatorThreadPin(domain, *c.EmulatorThreadCpu)
+				appendDomainEmulatorThreadPin(domain, emulatorThread)
 			}
 			if useIOThreads {
-				if err := formatDomainIOThreadPin(vmi, domain, c); err != nil {
+				if err := formatDomainIOThreadPin(vmi, domain, emulatorThread, c); err != nil {
 					log.Log.Reason(err).Error("failed to format domain iothread pinning.")
 					return err
 				}
 
 			}
-			if vmi.Spec.Domain.CPU.NUMA != nil && vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil {
+			if isNumaPassthrough(vmi) {
 				if err := numaMapping(vmi, &domain.Spec, c.Topology); err != nil {
 					log.Log.Reason(err).Error("failed to calculate passed through NUMA topology.")
 					return err
@@ -1654,28 +1622,14 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 			}
 		}
 	}
-	err = Convert_HostDevices_And_GPU(vmi.Spec.Domain.Devices, domain, c)
-	if err != nil {
-		log.Log.Reason(err).Error("Unable to prepare host devices, fall back to legacy")
-	}
+
+	domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, c.GenericHostDevices...)
+	domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, c.GPUHostDevices...)
 
 	// This is needed to support a legacy approach to device assignment
 	// Append HostDevices to DomXML if GPU is requested
 	if util.IsGPUVMI(vmi) {
-		vgpuMdevUUID := append([]string{}, c.VgpuDevices...)
-		hostDevices, err := createHostDevicesFromMdevUUIDList(vgpuMdevUUID)
-		if err != nil {
-			log.Log.Reason(err).Error("Unable to parse Mdev UUID addresses")
-		} else {
-			domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, hostDevices...)
-		}
-		gpuPCIAddresses := append([]string{}, c.GpuDevices...)
-		hostDevices, err = createHostDevicesFromPCIAddresses(gpuPCIAddresses)
-		if err != nil {
-			log.Log.Reason(err).Error("Unable to parse PCI addresses")
-		} else {
-			domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, hostDevices...)
-		}
+		domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, c.LegacyHostDevices...)
 	}
 
 	if vmi.Spec.Domain.CPU == nil || vmi.Spec.Domain.CPU.Model == "" {
@@ -1829,9 +1783,9 @@ func getCPUTopology(vmi *v1.VirtualMachineInstance) *api.CPUTopology {
 	}
 }
 
-func appendDomainEmulatorThreadPin(domain *api.Domain, allocatedCpu int) {
+func appendDomainEmulatorThreadPin(domain *api.Domain, allocatedCpu uint32) {
 	emulatorThread := api.CPUEmulatorPin{
-		CPUSet: strconv.Itoa(allocatedCpu),
+		CPUSet: strconv.Itoa(int(allocatedCpu)),
 	}
 	domain.Spec.CPUTune.EmulatorPin = &emulatorThread
 }
@@ -1843,13 +1797,13 @@ func appendDomainIOThreadPin(domain *api.Domain, thread uint32, cpuset string) {
 	domain.Spec.CPUTune.IOThreadPin = append(domain.Spec.CPUTune.IOThreadPin, iothreadPin)
 }
 
-func formatDomainIOThreadPin(vmi *v1.VirtualMachineInstance, domain *api.Domain, c *ConverterContext) error {
+func formatDomainIOThreadPin(vmi *v1.VirtualMachineInstance, domain *api.Domain, emulatorThread uint32, c *ConverterContext) error {
 	iothreads := int(domain.Spec.IOThreads.IOThreads)
-	vcpus := int(calculateRequestedVCPUs(domain.Spec.CPU.Topology))
+	vcpus := int(vcpu.CalculateRequestedVCPUs(domain.Spec.CPU.Topology))
 
 	if vmi.IsCPUDedicated() && vmi.Spec.Domain.CPU.IsolateEmulatorThread {
 		// pin the IOThread on the same pCPU as the emulator thread
-		cpuset := fmt.Sprintf("%d", *c.EmulatorThreadCpu)
+		cpuset := strconv.Itoa(int(emulatorThread))
 		appendDomainIOThreadPin(domain, uint32(1), cpuset)
 	} else if iothreads >= vcpus {
 		// pin an IOThread on a CPU
@@ -1928,95 +1882,6 @@ func boolToString(value *bool, defaultPositive bool, positive string, negative s
 		return toString(defaultPositive)
 	}
 	return toString(*value)
-}
-
-func createHostDevicesFromAddress(devType HostDeviceType, deviceID string, name string) (api.HostDevice, error) {
-	switch devType {
-	case HostDevicePCI:
-		return createHostDevicesFromPCIAddress(deviceID, name)
-	case HostDeviceMDEV:
-		return createHostDevicesFromMdevUUID(deviceID, name)
-	}
-	return api.HostDevice{}, fmt.Errorf("failed to create host devices for invalid type %s", devType)
-}
-
-func createHostDevicesFromPCIAddress(pciAddr string, name string) (api.HostDevice, error) {
-	address, err := device.NewPciAddressField(pciAddr)
-	if err != nil {
-		return api.HostDevice{}, err
-	}
-
-	hostDev := api.HostDevice{
-		Source: api.HostDeviceSource{
-			Address: address,
-		},
-		Type:    "pci",
-		Managed: "yes",
-	}
-	hostDev.Alias = api.NewUserDefinedAlias(name)
-
-	return hostDev, nil
-}
-
-func createHostDevicesFromMdevUUID(mdevUUID string, name string) (api.HostDevice, error) {
-	decoratedAddrField := &api.Address{
-		UUID: mdevUUID,
-	}
-
-	hostDev := api.HostDevice{
-		Source: api.HostDeviceSource{
-			Address: decoratedAddrField,
-		},
-		Type:  "mdev",
-		Mode:  "subsystem",
-		Model: "vfio-pci",
-	}
-	hostDev.Alias = api.NewUserDefinedAlias(name)
-
-	return hostDev, nil
-}
-
-func createHostDevicesFromPCIAddresses(pcis []string) ([]api.HostDevice, error) {
-	var hds []api.HostDevice
-	for _, pciAddr := range pcis {
-		address, err := device.NewPciAddressField(pciAddr)
-		if err != nil {
-			return nil, err
-		}
-
-		hostDev := api.HostDevice{
-			Source: api.HostDeviceSource{
-				Address: address,
-			},
-			Type:    "pci",
-			Managed: "yes",
-		}
-
-		hds = append(hds, hostDev)
-	}
-
-	return hds, nil
-}
-
-func createHostDevicesFromMdevUUIDList(mdevUuidList []string) ([]api.HostDevice, error) {
-	var hds []api.HostDevice
-	for _, mdevUuid := range mdevUuidList {
-		decoratedAddrField := &api.Address{
-			UUID: mdevUuid,
-		}
-
-		hostDev := api.HostDevice{
-			Source: api.HostDeviceSource{
-				Address: decoratedAddrField,
-			},
-			Type:  "mdev",
-			Mode:  "subsystem",
-			Model: "vfio-pci",
-		}
-		hds = append(hds, hostDev)
-	}
-
-	return hds, nil
 }
 
 func GetImageInfo(imagePath string) (*containerdisk.DiskInfo, error) {
@@ -2115,4 +1980,8 @@ func GetVolumeNameByTarget(domain *api.Domain, target string) string {
 		}
 	}
 	return ""
+}
+
+func isNumaPassthrough(vmi *v1.VirtualMachineInstance) bool {
+	return vmi.Spec.Domain.CPU.NUMA != nil && vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil
 }

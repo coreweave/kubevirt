@@ -147,8 +147,7 @@ cluster-deploy: cluster-clean
 	./hack/cluster-deploy.sh
 
 cluster-sync:
-	$(MAKE) cluster-build
-	$(MAKE) cluster-deploy
+	./hack/cluster-sync.sh
 
 builder-build:
 	./hack/builder/build.sh
@@ -160,13 +159,17 @@ olm-verify:
 	hack/dockerized "./hack/olm.sh verify"
 
 current-dir := $(realpath .)
+rule-spec-dumper-executable := "rule-spec-dumper"
 
 build-prom-spec-dumper:
-	hack/dockerized "go build -o rule-spec-dumper ./hack/prom-rule-ci/rule-spec-dumper.go"
+	hack/dockerized "go build -o ${rule-spec-dumper-executable} ./hack/prom-rule-ci/rule-spec-dumper.go"
+
+clean-prom-spec-dumper:
+	rm -f ${rule-spec-dumper-executable}
 
 prom-rules-verify: build-prom-spec-dumper
 	./hack/prom-rule-ci/verify-rules.sh \
-		"${current-dir}/rule-spec-dumper" \
+		"${current-dir}/${rule-spec-dumper-executable}" \
 		"${current-dir}/hack/prom-rule-ci/prom-rules-tests.yaml"
 
 olm-push:

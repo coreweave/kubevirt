@@ -89,7 +89,7 @@ const (
 const (
 	imageAlpine      = "alpine-container-disk-demo"
 	imageCirros      = "cirros-container-disk-demo"
-	imageFedora      = "fedora-cloud-container-disk-demo"
+	imageFedora      = "fedora-with-test-tooling-container-disk"
 	imageMicroLiveCD = "microlivecd-container-disk-demo"
 	imageKernelBoot  = "alpine-ext-kernel-boot-demo"
 )
@@ -309,8 +309,8 @@ func addPVCDisk(spec *v1.VirtualMachineInstanceSpec, claimName string, bus strin
 	spec.Volumes = append(spec.Volumes, v1.Volume{
 		Name: diskName,
 		VolumeSource: v1.VolumeSource{
-			PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
-				ClaimName: claimName,
+			PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+				PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
 			},
 		},
 	})

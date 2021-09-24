@@ -14,10 +14,12 @@ go_library(
         "//pkg/monitoring/client/prometheus:go_default_library",
         "//pkg/monitoring/domainstats/downwardmetrics:go_default_library",
         "//pkg/monitoring/domainstats/prometheus:go_default_library",
+        "//pkg/monitoring/profiler:go_default_library",
         "//pkg/monitoring/reflector/prometheus:go_default_library",
         "//pkg/monitoring/workqueue/prometheus:go_default_library",
         "//pkg/service:go_default_library",
         "//pkg/util:go_default_library",
+        "//pkg/util/ratelimiter:go_default_library",
         "//pkg/util/webhooks:go_default_library",
         "//pkg/virt-config:go_default_library",
         "//pkg/virt-handler:go_default_library",
@@ -50,6 +52,7 @@ go_library(
         "//vendor/k8s.io/client-go/tools/cache:go_default_library",
         "//vendor/k8s.io/client-go/tools/record:go_default_library",
         "//vendor/k8s.io/client-go/util/certificate:go_default_library",
+        "//vendor/k8s.io/client-go/util/flowcontrol:go_default_library",
     ],
 )
 
@@ -138,11 +141,11 @@ container_image(
     tars = select({
         "@io_bazel_rules_go//go/platform:linux_arm64": [
             ":passwd-tar",
-            "//rpm:launcherbase_aarch64",
+            "//rpm:handlerbase_aarch64",
         ],
         "//conditions:default": [
             ":passwd-tar",
-            "//rpm:launcherbase_x86_64",
+            "//rpm:handlerbase_x86_64",
         ],
     }),
 )

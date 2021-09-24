@@ -252,6 +252,7 @@ var _ = Describe("Template", func() {
 						"pre.hook.backup.velero.io/command":    "[\"/usr/bin/virt-freezer\", \"--freeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
 						"post.hook.backup.velero.io/container": "compute",
 						"post.hook.backup.velero.io/command":   "[\"/usr/bin/virt-freezer\", \"--unfreeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
+						"kubevirt.io/migrationTransportUnix":   "true",
 					},
 				),
 				table.Entry("and don't contain kubevirt annotation added by apiserver",
@@ -265,6 +266,7 @@ var _ = Describe("Template", func() {
 						"pre.hook.backup.velero.io/command":    "[\"/usr/bin/virt-freezer\", \"--freeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
 						"post.hook.backup.velero.io/container": "compute",
 						"post.hook.backup.velero.io/command":   "[\"/usr/bin/virt-freezer\", \"--unfreeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
+						"kubevirt.io/migrationTransportUnix":   "true",
 					},
 				),
 				table.Entry("and contain kubevirt domain annotation",
@@ -277,6 +279,7 @@ var _ = Describe("Template", func() {
 						"pre.hook.backup.velero.io/command":    "[\"/usr/bin/virt-freezer\", \"--freeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
 						"post.hook.backup.velero.io/container": "compute",
 						"post.hook.backup.velero.io/command":   "[\"/usr/bin/virt-freezer\", \"--unfreeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
+						"kubevirt.io/migrationTransportUnix":   "true",
 					},
 				),
 				table.Entry("and contain kubernetes annotation",
@@ -290,6 +293,7 @@ var _ = Describe("Template", func() {
 						"pre.hook.backup.velero.io/command":              "[\"/usr/bin/virt-freezer\", \"--freeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
 						"post.hook.backup.velero.io/container":           "compute",
 						"post.hook.backup.velero.io/command":             "[\"/usr/bin/virt-freezer\", \"--unfreeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
+						"kubevirt.io/migrationTransportUnix":             "true",
 					},
 				),
 				table.Entry("and contain kubevirt ignitiondata annotation",
@@ -311,6 +315,7 @@ var _ = Describe("Template", func() {
 						"pre.hook.backup.velero.io/command":    "[\"/usr/bin/virt-freezer\", \"--freeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
 						"post.hook.backup.velero.io/container": "compute",
 						"post.hook.backup.velero.io/command":   "[\"/usr/bin/virt-freezer\", \"--unfreeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
+						"kubevirt.io/migrationTransportUnix":   "true",
 					},
 				),
 			)
@@ -354,6 +359,7 @@ var _ = Describe("Template", func() {
 					"pre.hook.backup.velero.io/command":    "[\"/usr/bin/virt-freezer\", \"--freeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
 					"post.hook.backup.velero.io/container": "compute",
 					"post.hook.backup.velero.io/command":   "[\"/usr/bin/virt-freezer\", \"--unfreeze\", \"--name\", \"testvmi\", \"--namespace\", \"testns\"]",
+					"kubevirt.io/migrationTransportUnix":   "true",
 				}))
 				Expect(pod.ObjectMeta.OwnerReferences).To(Equal([]metav1.OwnerReference{{
 					APIVersion:         v1.VirtualMachineInstanceGroupVersionKind.GroupVersion().String(),
@@ -378,8 +384,6 @@ var _ = Describe("Template", func() {
 					"--container-disk-dir", "/var/run/kubevirt/container-disks",
 					"--grace-period-seconds", "45",
 					"--hook-sidecars", "1",
-					"--less-pvc-space-toleration", "10",
-					"--minimum-pvc-reserve-bytes", "131072",
 					"--ovmf-path", ovmfPath}))
 				Expect(pod.Spec.Containers[1].Name).To(Equal("hook-sidecar-0"))
 				Expect(pod.Spec.Containers[1].Image).To(Equal("some-image:v1"))
@@ -863,6 +867,17 @@ var _ = Describe("Template", func() {
 			})
 
 		})
+		Context("migration over unix sockets", func() {
+			It("virt-launcher should have a MigrationTransportUnixAnnotation", func() {
+				config, kvInformer, svc = configFactory(defaultArch)
+				vmi := v1.NewMinimalVMI("fake-vmi")
+
+				pod, err := svc.RenderLaunchManifest(vmi)
+				Expect(err).ToNot(HaveOccurred())
+				_, ok := pod.Annotations[v1.MigrationTransportUnixAnnotation]
+				Expect(ok).To(BeTrue())
+			})
+		})
 		Context("with multus annotation", func() {
 			It("should add multus networks in the pod annotation", func() {
 				config, kvInformer, svc = configFactory(defaultArch)
@@ -1084,8 +1099,6 @@ var _ = Describe("Template", func() {
 					"--container-disk-dir", "/var/run/kubevirt/container-disks",
 					"--grace-period-seconds", "45",
 					"--hook-sidecars", "1",
-					"--less-pvc-space-toleration", "10",
-					"--minimum-pvc-reserve-bytes", "131072",
 					"--ovmf-path", ovmfPath}))
 				Expect(pod.Spec.Containers[1].Name).To(Equal("hook-sidecar-0"))
 				Expect(pod.Spec.Containers[1].Image).To(Equal("some-image:v1"))
@@ -1819,6 +1832,27 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(pod.Spec.Containers[0].Resources.Requests.Cpu().String()).To(Equal("3"))
 			})
+			It("should allocate proportinal amount of cpus to vmipod as vcpus with allocation_ratio set to 10", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+							CPU: &v1.CPU{Cores: 3},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(pod.Spec.Containers[0].Resources.Requests.Cpu().String()).To(Equal("300m"))
+			})
 			It("should override the calculated amount of cpus if the user has explicitly specified cpu request", func() {
 				config, kvInformer, svc = configFactory(defaultArch)
 				kvConfig := kv.DeepCopy()
@@ -1982,7 +2016,7 @@ var _ = Describe("Template", func() {
 					{
 						Name: volumeName,
 						VolumeSource: v1.VolumeSource{
-							PersistentVolumeClaim: &kubev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+							PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: kubev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName}},
 						},
 					},
 				}
@@ -2033,7 +2067,7 @@ var _ = Describe("Template", func() {
 					{
 						Name: volumeName,
 						VolumeSource: v1.VolumeSource{
-							PersistentVolumeClaim: &kubev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+							PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: kubev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName}},
 						},
 					},
 				}
@@ -2075,7 +2109,7 @@ var _ = Describe("Template", func() {
 					{
 						Name: volumeName,
 						VolumeSource: v1.VolumeSource{
-							PersistentVolumeClaim: &kubev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+							PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: kubev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName}},
 						},
 					},
 				}
@@ -2093,6 +2127,65 @@ var _ = Describe("Template", func() {
 				_, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).To(HaveOccurred(), "Render manifest results in an error")
 				Expect(err).To(BeAssignableToTypeOf(PvcNotFoundError(errors.New(""))), "Render manifest results in an PvsNotFoundError")
+			})
+		})
+
+		Context("with hotplug volumes", func() {
+			It("should render without any hotplug volumes listed in volumeStatus or having `Hotpluggable` flag", func() {
+				config, kvInformer, svc = configFactory(defaultArch)
+				permanentVolumeName := "permanent-vol"
+				hotplugFromSpecName := "hotplug-from-spec"
+				hotplugFromStatusName := "hotplug-from-status"
+				namespace := "testns"
+				volumeNames := []string{hotplugFromSpecName, hotplugFromStatusName, permanentVolumeName}
+				volumes := make([]v1.Volume, len(volumeNames))
+				for _, name := range volumeNames {
+					pvc := kubev1.PersistentVolumeClaim{
+						TypeMeta:   metav1.TypeMeta{Kind: "PersistentVolumeClaim", APIVersion: "v1"},
+						ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+					}
+					err := pvcCache.Add(&pvc)
+					Expect(err).ToNot(HaveOccurred(), "Added PVC to cache successfully")
+
+					volumes = append(volumes, v1.Volume{
+						Name: name,
+						VolumeSource: v1.VolumeSource{
+							PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+								PersistentVolumeClaimVolumeSource: kubev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: name,
+								},
+								Hotpluggable: name == hotplugFromSpecName,
+							},
+						},
+					})
+				}
+
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testvmi", Namespace: namespace, UID: "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Volumes: volumes,
+					},
+					Status: v1.VirtualMachineInstanceStatus{
+						VolumeStatus: []v1.VolumeStatus{
+							{
+								Name:          hotplugFromStatusName,
+								HotplugVolume: &v1.HotplugVolumeStatus{},
+							},
+						},
+					},
+				}
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(pod.Spec.Containers[0].Name).To(Equal("compute"))
+				volumeMountNames := make([]string, len(pod.Spec.Containers[0].VolumeMounts))
+				for _, volumeMount := range pod.Spec.Containers[0].VolumeMounts {
+					volumeMountNames = append(volumeMountNames, volumeMount.Name)
+				}
+				Expect(volumeMountNames).To(ContainElement(permanentVolumeName))
+				Expect(volumeMountNames).ToNot(ContainElements(hotplugFromSpecName, hotplugFromStatusName))
 			})
 		})
 
@@ -2858,52 +2951,6 @@ var _ = Describe("Template", func() {
 				Expect(ok).To(Equal(true))
 				Expect(val).To(Equal(*resource.NewQuantity(1, resource.DecimalSI)))
 			})
-		})
-
-		It("should add the lessPVCSpaceToleration argument to the template", func() {
-			config, kvInformer, svc = configFactory(defaultArch)
-			kvConfig := kv.DeepCopy()
-			kvConfig.Spec.Configuration.DeveloperConfiguration.LessPVCSpaceToleration = 42
-			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
-
-			vmi := v1.VirtualMachineInstance{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "testvmi", Namespace: "default", UID: "1234",
-				},
-				Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{
-					Devices: v1.Devices{
-						DisableHotplug: true,
-					},
-				}},
-			}
-			pod, err := svc.RenderLaunchManifest(&vmi)
-			Expect(err).ToNot(HaveOccurred())
-
-			Expect(pod.Spec.Containers[0].Command).To(ContainElement("--less-pvc-space-toleration"), "command arg key should be correct")
-			Expect(pod.Spec.Containers[0].Command).To(ContainElement("42"), "command arg value should be correct")
-		})
-
-		It("should add the minimum PVC reserve argument to the template", func() {
-			config, kvInformer, svc = configFactory(defaultArch)
-			kvConfig := kv.DeepCopy()
-			kvConfig.Spec.Configuration.DeveloperConfiguration = &v1.DeveloperConfiguration{MinimumReservePVCBytes: 1048576}
-			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
-
-			vmi := v1.VirtualMachineInstance{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "testvmi", Namespace: "default", UID: "1234",
-				},
-				Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{
-					Devices: v1.Devices{
-						DisableHotplug: true,
-					},
-				}},
-			}
-			pod, err := svc.RenderLaunchManifest(&vmi)
-			Expect(err).ToNot(HaveOccurred())
-
-			Expect(pod.Spec.Containers[0].Command).To(ContainElement("--minimum-pvc-reserve-bytes"), "command arg key should be correct")
-			Expect(pod.Spec.Containers[0].Command).To(ContainElement("1048576"), "command arg value should be correct")
 		})
 
 		Context("with specified priorityClass", func() {

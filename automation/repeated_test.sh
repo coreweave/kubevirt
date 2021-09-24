@@ -120,7 +120,7 @@ if [[ -z ${NEW_TESTS-} ]]; then
     set -e
 
     # skip certain tests for now, as we don't have a strategy currently
-    NEW_TESTS=$(echo "$NEW_TESTS" | sed -E 's/\|?[^\|]*(sriov|multus|windows|gpu)[^\|]*//g' | sed 's/^|//')
+    NEW_TESTS=$(echo "$NEW_TESTS" | sed -E 's/\|?[^\|]*(sriov|multus|windows|gpu|mdev)[^\|]*//g' | sed 's/^|//')
 fi
 if [[ -z "${NEW_TESTS}" ]]; then
     echo "Nothing to test"
@@ -144,6 +144,8 @@ for lane in "${TEST_LANES[@]}"; do
 
     export KUBEVIRT_PROVIDER="$lane"
     export KUBEVIRT_NUM_NODES=2
+    export KUBEVIRT_WITH_CNAO="true"
+    export KUBEVIRT_DEPLOY_CDI="true"
     make cluster-up
 
     for i in $(seq 1 "$NUM_TESTS"); do

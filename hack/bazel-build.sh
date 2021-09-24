@@ -26,11 +26,18 @@ rm -rf ${CMD_OUT_DIR}
 mkdir -p ${CMD_OUT_DIR}/virtctl
 mkdir -p ${CMD_OUT_DIR}/dump
 mkdir -p ${CMD_OUT_DIR}/perfscale-audit
+mkdir -p ${CMD_OUT_DIR}/perfscale-load-generator
+mkdir -p ${CMD_OUT_DIR}/cluster-profiler
 
 # Build all binaries for amd64
 bazel build \
     --config=${ARCHITECTURE} \
-    //tools/csv-generator/... //cmd/... //staging/src/kubevirt.io/client-go/examples/...
+    //tools/csv-generator/... \
+    //tools/perfscale-audit/... \
+    //tools/perfscale-load-generator/... \
+    //tools/cluster-profiler/... \
+    //cmd/... \
+    //staging/src/kubevirt.io/client-go/examples/...
 
 # Copy dump binary to a reachable place outside of the build container
 bazel run \
@@ -41,6 +48,16 @@ bazel run \
 bazel run \
     --config=${ARCHITECTURE} \
     :build-perfscale-audit -- ${CMD_OUT_DIR}/perfscale-audit/perfscale-audit
+
+# Copy perfscale-load-generator binary to a reachable place outside of the build container
+bazel run \
+    --config=${ARCHITECTURE} \
+    :build-perfscale-load-generator -- ${CMD_OUT_DIR}/perfscale-load-generator/perfscale-load-generator
+
+# Copy cluster-profiler binary to a reachable place outside of the build container
+bazel run \
+    --config=${ARCHITECTURE} \
+    :build-cluster-profiler -- ${CMD_OUT_DIR}/cluster-profiler/cluster-profiler
 
 # build platform native virtctl explicitly
 bazel run \

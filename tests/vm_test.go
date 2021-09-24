@@ -161,7 +161,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Expect(createdVM.Spec.Template.Spec.Domain.Machine.Type).To(Equal(testingMachineType))
 		})
 
-		It("[QUARANTINE][test_id:3311]should keep the supplied MachineType when created", func() {
+		It("[test_id:3311]should keep the supplied MachineType when created", func() {
 			By("Creating VirtualMachine")
 			explicitMachineType := "pc-q35-3.0"
 			template, _ := newVirtualMachineInstanceWithContainerDisk()
@@ -666,6 +666,92 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			}
 		})
 
+		It("should create vm revision when starting vm", func() {
+			newVM := newVirtualMachine(true)
+			vmCpy := newVM.DeepCopy()
+			vmCpy.Status = v1.VirtualMachineStatus{}
+
+			var vmi *v1.VirtualMachineInstance
+			Eventually(func() bool {
+				vmi, err = virtClient.VirtualMachineInstance(newVM.Namespace).Get(newVM.Name, &k8smetav1.GetOptions{})
+				if errors.IsNotFound(err) {
+					return false
+				}
+				Expect(err).ToNot(HaveOccurred())
+				return vmi.Status.Phase == v1.Running
+			}, 240*time.Second, 1*time.Second).Should(BeTrue())
+
+			expectedVMRevisionName := fmt.Sprintf("revision-start-vm-%s-%d", newVM.UID, newVM.Generation)
+			Expect(vmi.Status.VirtualMachineRevisionName).To(Equal(expectedVMRevisionName))
+
+			cr, err := virtClient.AppsV1().ControllerRevisions(newVM.Namespace).Get(context.Background(), vmi.Status.VirtualMachineRevisionName, k8smetav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cr.Revision).To(Equal(int64(1)))
+			vmRevision := &v1.VirtualMachine{}
+			err = json.Unmarshal(cr.Data.Raw, vmRevision)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(vmRevision.Spec).To(Equal(vmCpy.Spec))
+		})
+
+		It("should delete old vm revision and create new one when restarting vm", func() {
+			By("Starting the VM")
+			newVM := newVirtualMachine(true)
+
+			var vmi *v1.VirtualMachineInstance
+			Eventually(func() bool {
+				vmi, err = virtClient.VirtualMachineInstance(newVM.Namespace).Get(newVM.Name, &k8smetav1.GetOptions{})
+				if errors.IsNotFound(err) {
+					return false
+				}
+				Expect(err).ToNot(HaveOccurred())
+				return vmi.Status.Phase == v1.Running
+			}, 240*time.Second, 1*time.Second).Should(BeTrue())
+
+			expectedVMRevisionName := fmt.Sprintf("revision-start-vm-%s-%d", newVM.UID, newVM.Generation)
+			Expect(vmi.Status.VirtualMachineRevisionName).To(Equal(expectedVMRevisionName))
+			oldVMRevisionName := expectedVMRevisionName
+
+			By("Stoping the VM")
+			newVM = stopVM(newVM)
+
+			By("Updating the VM template spec")
+			newVM, err = virtClient.VirtualMachine(newVM.Namespace).Get(newVM.Name, &k8smetav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			updatedVM := newVM.DeepCopy()
+			updatedVM.Spec.Template.Spec.Domain.Resources.Requests = corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("4096Ki"),
+			}
+			updatedVM, err := virtClient.VirtualMachine(updatedVM.Namespace).Update(updatedVM)
+			Expect(err).ToNot(HaveOccurred())
+
+			By("Starting the VM after update")
+			newVM = startVM(updatedVM)
+			vmCpy := newVM.DeepCopy()
+			vmCpy.Status = v1.VirtualMachineStatus{}
+			Eventually(func() bool {
+				vmi, err = virtClient.VirtualMachineInstance(newVM.Namespace).Get(newVM.Name, &k8smetav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				return vmi.Status.Phase == v1.Running
+			}, 240*time.Second, 1*time.Second).Should(BeTrue())
+
+			expectedVMRevisionName = fmt.Sprintf("revision-start-vm-%s-%d", newVM.UID, newVM.Generation)
+			Expect(vmi.Status.VirtualMachineRevisionName).To(Equal(expectedVMRevisionName))
+
+			cr, err := virtClient.AppsV1().ControllerRevisions(newVM.Namespace).Get(context.Background(), oldVMRevisionName, k8smetav1.GetOptions{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+
+			cr, err = virtClient.AppsV1().ControllerRevisions(newVM.Namespace).Get(context.Background(), vmi.Status.VirtualMachineRevisionName, k8smetav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cr.Revision).To(Equal(int64(4)))
+			vmRevision := &v1.VirtualMachine{}
+			err = json.Unmarshal(cr.Data.Raw, vmRevision)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(vmRevision.Spec).To(Equal(vmCpy.Spec))
+		})
+
 		It("[test_id:4645]should set the Ready condition on VM", func() {
 			vm := newVirtualMachine(false)
 
@@ -693,7 +779,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 				Should(Equal(k8sv1.ConditionFalse))
 		})
 
-		table.DescribeTable("[test_id:todo]should report an error status when VM scheduling error occurs", func(unschedulableFunc func(vmi *v1.VirtualMachineInstance)) {
+		table.DescribeTable("should report an error status when VM scheduling error occurs", func(unschedulableFunc func(vmi *v1.VirtualMachineInstance)) {
 			vmi := tests.NewRandomVMIWithEphemeralDisk("no-such-image")
 			unschedulableFunc(vmi)
 
@@ -709,14 +795,14 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Eventually(vmPrintableStatus, 300*time.Second, 1*time.Second).
 				Should(Equal(v1.VirtualMachineStatusUnschedulable))
 		},
-			table.Entry("unsatisfiable resource requirements", func(vmi *v1.VirtualMachineInstance) {
+			table.Entry("[test_id:6867]with unsatisfiable resource requirements", func(vmi *v1.VirtualMachineInstance) {
 				vmi.Spec.Domain.Resources.Requests = corev1.ResourceList{
 					// This may stop working sometime around 2040
 					corev1.ResourceMemory: resource.MustParse("1Ei"),
 					corev1.ResourceCPU:    resource.MustParse("1M"),
 				}
 			}),
-			table.Entry("unsatisfiable scheduling constraints", func(vmi *v1.VirtualMachineInstance) {
+			table.Entry("[test_id:6868]with unsatisfiable scheduling constraints", func(vmi *v1.VirtualMachineInstance) {
 				vmi.Spec.NodeSelector = map[string]string{
 					"node-label": "that-doesnt-exist",
 				}
@@ -837,7 +923,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			It("[test_id:3007]Should force restart a VM with terminationGracePeriodSeconds>0", func() {
 
 				By("getting a VM with high TerminationGracePeriod")
-				newVMI := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskFedora))
+				newVMI := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskFedoraTestTooling))
 				gracePeriod := int64(600)
 				newVMI.Spec.TerminationGracePeriodSeconds = &gracePeriod
 				newVM := tests.NewRandomVirtualMachine(newVMI, true)
@@ -1523,8 +1609,8 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 					launcherPod := libvmi.GetPodByVirtualMachineInstance(newVMI, newVM.Namespace)
 					Expect(launcherPod.Status.Phase).To(Equal(podPhase))
 				},
-					table.Entry("VMI launcher pod should fail", "false", k8sv1.PodFailed),
-					table.Entry("VMI launcher pod should keep running", "true", k8sv1.PodRunning),
+					table.Entry("[test_id:7164]VMI launcher pod should fail", "false", k8sv1.PodFailed),
+					table.Entry("[test_id:6993]VMI launcher pod should keep running", "true", k8sv1.PodRunning),
 				)
 			})
 		})

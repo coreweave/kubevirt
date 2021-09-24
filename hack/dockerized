@@ -22,7 +22,7 @@ if [ -z ${KUBEVIRT_CRI} ]; then
     fi
 fi
 
-KUBEVIRT_BUILDER_IMAGE="quay.io/kubevirt/builder:2107141556-8cc2ef886"
+KUBEVIRT_BUILDER_IMAGE="quay.io/kubevirt/builder:2108311443-370e711b8"
 
 SYNC_OUT=${SYNC_OUT:-true}
 
@@ -107,9 +107,17 @@ _rsync \
 
 volumes="-v ${BUILDER}:/root:rw,z"
 
-# append .docker directory as volume
-mkdir -p "${HOME}/.docker"
-volumes="$volumes -v ${HOME}/.docker:/root/.docker:ro,z"
+# append .docker secrets directory as volume
+mkdir -p "${HOME}/.docker/secrets"
+volumes="$volumes -v ${HOME}/.docker/secrets:/root/.docker/secrets:ro,z"
+
+# Use a bind-mount to expose docker/podman auth file to the container
+ID=$(id -u)
+if [[ $KUBEVIRT_CRI = "podman" ]] && [[ -f "/tmp/podman-run-${ID}/containers/auth.json" ]]; then
+    volumes="$volumes --mount type=bind,source=/tmp/podman-run-${ID}/containers/auth.json,target=/root/.docker/config.json,readonly"
+elif [[ -f "${HOME}/.docker/config.json" ]]; then
+    volumes="$volumes --mount type=bind,source=${HOME}/.docker/config.json,target=/root/.docker/config.json,readonly"
+fi
 
 # add custom docker certs, if needed
 if [ -n "$DOCKER_CA_CERT_FILE" ] && [ -f "$DOCKER_CA_CERT_FILE" ]; then
@@ -118,6 +126,7 @@ fi
 
 # if defined, append the ARTIFACTS directory
 if [ -n "$ARTIFACTS" ]; then
+    mkdir -p "$ARTIFACTS"
     if [[ "$ARTIFACTS" = /* ]]; then
         volumes="$volumes -v ${ARTIFACTS}:${ARTIFACTS}:rw,z"
     else
@@ -129,8 +138,8 @@ fi
 # Ensure that a bazel server which is running is the correct one
 if [ -n "$($KUBEVIRT_CRI ps --format '{{.Names}}' | grep ${BUILDER}-bazel-server)" ]; then
     # check if the image is correct
-    builder_id=$($KUBEVIRT_CRI inspect ${KUBEVIRT_BUILDER_IMAGE} | $KUBEVIRT_CRI run --security-opt "label=disable" --rm -i imega/jq:1.6 ".[0].Id")
-    bazel_server_id=$($KUBEVIRT_CRI inspect ${BUILDER}-bazel-server | $KUBEVIRT_CRI run --security-opt "label=disable" --rm -i imega/jq:1.6 ".[0].Image")
+    builder_id=$($KUBEVIRT_CRI inspect --format='{{.Id}}' ${KUBEVIRT_BUILDER_IMAGE})
+    bazel_server_id=$($KUBEVIRT_CRI inspect --format='{{.Image}}' ${BUILDER}-bazel-server)
     if [ "${builder_id}" != "${bazel_server_id}" ]; then
         echo "Bazel server is outdated, restarting ..."
         $KUBEVIRT_CRI stop ${BUILDER}-bazel-server

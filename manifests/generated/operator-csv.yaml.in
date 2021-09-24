@@ -160,14 +160,6 @@ spec:
       clusterPermissions:
       - rules:
         - apiGroups:
-          - ""
-          resources:
-          - secrets
-          verbs:
-          - create
-          - get
-          - update
-        - apiGroups:
           - kubevirt.io
           resources:
           - kubevirts
@@ -208,6 +200,16 @@ spec:
           - get
           - list
           - watch
+          - create
+          - delete
+          - patch
+        - apiGroups:
+          - apps
+          resources:
+          - controllerrevisions
+          verbs:
+          - watch
+          - list
           - create
           - delete
           - patch
@@ -322,11 +324,15 @@ spec:
         - apiGroups:
           - subresources.kubevirt.io
           resources:
-          - virtualmachines/start
-          - virtualmachines/stop
-          - virtualmachines/restart
+          - virtualmachineinstances/pause
+          - virtualmachineinstances/unpause
+          - virtualmachineinstances/addvolume
+          - virtualmachineinstances/removevolume
+          - virtualmachineinstances/freeze
+          - virtualmachineinstances/unfreeze
           verbs:
-          - put
+          - update
+          - get
         - apiGroups:
           - ""
           resources:
@@ -496,6 +502,15 @@ spec:
           verbs:
           - list
         - apiGroups:
+          - apps
+          resources:
+          - controllerrevisions
+          verbs:
+          - watch
+          - list
+          - create
+          - delete
+        - apiGroups:
           - ""
           resources:
           - persistentvolumeclaims
@@ -527,7 +542,6 @@ spec:
           - virtualmachineinstances/freeze
           - virtualmachineinstances/unfreeze
           verbs:
-          - get
           - update
         - apiGroups:
           - cdi.kubevirt.io
@@ -595,12 +609,6 @@ spec:
         - apiGroups:
           - ""
           resources:
-          - persistentvolumeclaims
-          verbs:
-          - get
-        - apiGroups:
-          - ""
-          resources:
           - nodes
           verbs:
           - patch
@@ -658,6 +666,9 @@ spec:
           resources:
           - virtualmachineinstances/console
           - virtualmachineinstances/vnc
+          - virtualmachineinstances/guestosinfo
+          - virtualmachineinstances/filesystemlist
+          - virtualmachineinstances/userlist
           verbs:
           - get
         - apiGroups:
@@ -667,8 +678,9 @@ spec:
           - virtualmachineinstances/unpause
           - virtualmachineinstances/addvolume
           - virtualmachineinstances/removevolume
+          - virtualmachineinstances/freeze
+          - virtualmachineinstances/unfreeze
           verbs:
-          - get
           - update
         - apiGroups:
           - subresources.kubevirt.io
@@ -715,6 +727,9 @@ spec:
           resources:
           - virtualmachineinstances/console
           - virtualmachineinstances/vnc
+          - virtualmachineinstances/guestosinfo
+          - virtualmachineinstances/filesystemlist
+          - virtualmachineinstances/userlist
           verbs:
           - get
         - apiGroups:
@@ -724,8 +739,9 @@ spec:
           - virtualmachineinstances/unpause
           - virtualmachineinstances/addvolume
           - virtualmachineinstances/removevolume
+          - virtualmachineinstances/freeze
+          - virtualmachineinstances/unfreeze
           verbs:
-          - get
           - update
         - apiGroups:
           - subresources.kubevirt.io
@@ -772,6 +788,14 @@ spec:
           verbs:
           - get
           - list
+        - apiGroups:
+          - subresources.kubevirt.io
+          resources:
+          - virtualmachineinstances/guestosinfo
+          - virtualmachineinstances/filesystemlist
+          - virtualmachineinstances/userlist
+          verbs:
+          - get
         - apiGroups:
           - kubevirt.io
           resources:
@@ -888,6 +912,8 @@ spec:
                 - mountPath: /etc/virt-operator/certificates
                   name: kubevirt-operator-certs
                   readOnly: true
+                - mountPath: /profile-data
+                  name: profile-data
               priorityClassName: kubevirt-cluster-critical
               securityContext:
                 runAsNonRoot: true
@@ -900,6 +926,8 @@ spec:
                 secret:
                   optional: true
                   secretName: kubevirt-operator-certs
+              - emptyDir: {}
+                name: profile-data
       permissions:
       - rules:
         - apiGroups:

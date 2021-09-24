@@ -26,7 +26,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -44,6 +43,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/certificate"
+	"k8s.io/client-go/util/flowcontrol"
+
+	"kubevirt.io/kubevirt/pkg/util/ratelimiter"
 
 	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
 
@@ -63,8 +65,9 @@ import (
 	inotifyinformer "kubevirt.io/kubevirt/pkg/inotify-informer"
 	_ "kubevirt.io/kubevirt/pkg/monitoring/client/prometheus"               // import for prometheus metrics
 	promdomain "kubevirt.io/kubevirt/pkg/monitoring/domainstats/prometheus" // import for prometheus metrics
-	_ "kubevirt.io/kubevirt/pkg/monitoring/reflector/prometheus"            // import for prometheus metrics
-	_ "kubevirt.io/kubevirt/pkg/monitoring/workqueue/prometheus"            // import for prometheus metrics
+	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
+	_ "kubevirt.io/kubevirt/pkg/monitoring/reflector/prometheus" // import for prometheus metrics
+	_ "kubevirt.io/kubevirt/pkg/monitoring/workqueue/prometheus" // import for prometheus metrics
 	"kubevirt.io/kubevirt/pkg/service"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/webhooks"
@@ -144,13 +147,14 @@ type virtHandlerApp struct {
 	virtCli   kubecli.KubevirtClient
 	namespace string
 
-	serverTLSConfig   *tls.Config
-	clientTLSConfig   *tls.Config
-	consoleServerPort int
-	clientcertmanager certificate.Manager
-	servercertmanager certificate.Manager
-	promTLSConfig     *tls.Config
-	clusterConfig     *virtconfig.ClusterConfig
+	serverTLSConfig       *tls.Config
+	clientTLSConfig       *tls.Config
+	consoleServerPort     int
+	clientcertmanager     certificate.Manager
+	servercertmanager     certificate.Manager
+	promTLSConfig         *tls.Config
+	clusterConfig         *virtconfig.ClusterConfig
+	reloadableRateLimiter *ratelimiter.ReloadableRateLimiter
 }
 
 var (
@@ -201,8 +205,13 @@ func (app *virtHandlerApp) Run() {
 		panic(err)
 	}
 
-	// Create event recorder
-	app.virtCli, err = kubecli.GetKubevirtClient()
+	app.reloadableRateLimiter = ratelimiter.NewReloadableRateLimiter(flowcontrol.NewTokenBucketRateLimiter(virtconfig.DefaultVirtHandlerQPS, virtconfig.DefaultVirtHandlerBurst))
+	clientConfig, err := kubecli.GetKubevirtClientConfig()
+	if err != nil {
+		panic(err)
+	}
+	clientConfig.RateLimiter = app.reloadableRateLimiter
+	app.virtCli, err = kubecli.GetKubevirtClientFromRESTConfig(clientConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -225,6 +234,7 @@ func (app *virtHandlerApp) Run() {
 		os.Exit(0)
 	}()
 
+	// Create event recorder
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartRecordingToSink(&k8coresv1.EventSinkImpl{Interface: app.virtCli.CoreV1().Events(k8sv1.NamespaceAll)})
 	// Scheme is used to create an ObjectReference from an Object (e.g. VirtualMachineInstance) during Event creation
@@ -290,6 +300,7 @@ func (app *virtHandlerApp) Run() {
 	app.clusterConfig = virtconfig.NewClusterConfig(factory.ConfigMap(), factory.CRD(), factory.KubeVirt(), app.namespace)
 	// set log verbosity
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
+	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeRateLimiter)
 
 	migrationProxy := migrationproxy.NewMigrationProxyManager(app.serverTLSConfig, app.clientTLSConfig, app.clusterConfig)
 
@@ -369,7 +380,7 @@ func (app *virtHandlerApp) Run() {
 
 		// relabel tun device
 		unprivilegedContainerSELinuxLabel := "system_u:object_r:container_file_t:s0"
-		err = relabelFiles(unprivilegedContainerSELinuxLabel, "/dev/net/tun", "/dev/null")
+		err = selinux.RelabelFiles(unprivilegedContainerSELinuxLabel, se.IsPermissive(), "/dev/net/tun", "/dev/null")
 		if err != nil {
 			panic(fmt.Errorf("error relabeling required files: %v", err))
 		}
@@ -439,11 +450,26 @@ func (app *virtHandlerApp) shouldChangeLogVerbosity() {
 	log.Log.V(2).Infof("set verbosity to %d", verbosity)
 }
 
+// Update virt-handler rate limiter
+func (app *virtHandlerApp) shouldChangeRateLimiter() {
+	config := app.clusterConfig.GetConfig()
+	qps := config.HandlerConfiguration.RestClient.RateLimiter.TokenBucketRateLimiter.QPS
+	burst := config.HandlerConfiguration.RestClient.RateLimiter.TokenBucketRateLimiter.Burst
+	app.reloadableRateLimiter.Set(flowcontrol.NewTokenBucketRateLimiter(qps, burst))
+	log.Log.V(2).Infof("setting rate limiter to %v QPS and %v Burst", qps, burst)
+}
+
 func (app *virtHandlerApp) runPrometheusServer(errCh chan error) {
 	mux := restful.NewContainer()
 	webService := new(restful.WebService)
 	webService.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
 	webService.Route(webService.GET("/healthz").To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig, apiHealthVersion)).Doc("Health endpoint"))
+
+	componentProfiler := profiler.NewProfileManager(app.clusterConfig)
+	webService.Route(webService.GET("/start-profiler").To(componentProfiler.HandleStartProfiler).Doc("start profiler endpoint"))
+	webService.Route(webService.GET("/stop-profiler").To(componentProfiler.HandleStopProfiler).Doc("stop profiler endpoint"))
+	webService.Route(webService.GET("/dump-profiler").To(componentProfiler.HandleDumpProfiler).Doc("dump profiler results endpoint"))
+
 	mux.Add(webService)
 	log.Log.V(1).Infof("metrics: max concurrent requests=%d", app.MaxRequestsInFlight)
 	mux.Handle("/metrics", promdomain.Handler(app.MaxRequestsInFlight))
@@ -588,18 +614,5 @@ func copy(sourceFile string, targetFile string) error {
 	if err != nil {
 		return fmt.Errorf("failed to make file executable: %v", err)
 	}
-	return nil
-}
-
-func relabelFiles(newLabel string, files ...string) error {
-	relabelArgs := []string{"selinux", "relabel", newLabel}
-	for _, file := range files {
-		cmd := exec.Command("virt-chroot", append(relabelArgs, file)...)
-		err := cmd.Run()
-		if err != nil {
-			return fmt.Errorf("error relabeling file %s with label %s. Reason: %v", file, newLabel, err)
-		}
-	}
-
 	return nil
 }

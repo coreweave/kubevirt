@@ -30,8 +30,6 @@ import (
 	"strconv"
 	"strings"
 
-	"kubevirt.io/kubevirt/pkg/virt-controller/services"
-
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
@@ -39,6 +37,8 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	k8smeta "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 
 	"kubevirt.io/kubevirt/pkg/ephemeral-disk/fake"
 	"kubevirt.io/kubevirt/pkg/testutils"
@@ -471,9 +471,9 @@ var _ = Describe("Converter", func() {
 				{
 					Name: "pvc_block_test",
 					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
 							ClaimName: "testblock",
-						},
+						}},
 					},
 				},
 				{
@@ -1410,11 +1410,10 @@ var _ = Describe("Converter", func() {
 						},
 					},
 				},
-				UseEmulation:          true,
+				AllowEmulation:        true,
 				IsBlockPVC:            isBlockPVCMap,
 				IsBlockDV:             isBlockDVMap,
 				SMBios:                TestSmbios,
-				GpuDevices:            []string{},
 				MemBalloonStatsPeriod: 10,
 				EphemeraldiskCreator:  EphemeralDiskImageCreator,
 			}
@@ -1959,8 +1958,8 @@ var _ = Describe("Converter", func() {
 						},
 					},
 				},
-				UseEmulation: true,
-				SMBios:       TestSmbios,
+				AllowEmulation: true,
+				SMBios:         TestSmbios,
 			}
 		})
 
@@ -2319,7 +2318,7 @@ var _ = Describe("Converter", func() {
 			vmi.Spec.Domain.Devices = v1.Devices{
 				AutoattachGraphicsDevice: autoAttach,
 			}
-			domain := vmiToDomain(&vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(&vmi, &ConverterContext{AllowEmulation: true})
 			Expect(domain.Spec.Devices.Video).To(HaveLen(devices))
 			Expect(domain.Spec.Devices.Graphics).To(HaveLen(devices))
 
@@ -2347,7 +2346,7 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			domain := vmiToDomain(&vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(&vmi, &ConverterContext{AllowEmulation: true})
 			Expect(domain.Spec.Features.Hyperv).To(Equal(result))
 
 		},
@@ -2409,7 +2408,7 @@ var _ = Describe("Converter", func() {
 			vmi.Spec.Domain.Devices = v1.Devices{
 				AutoattachSerialConsole: autoAttach,
 			}
-			domain := vmiToDomain(&vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(&vmi, &ConverterContext{AllowEmulation: true})
 			Expect(domain.Spec.Devices.Serials).To(HaveLen(devices))
 			Expect(domain.Spec.Devices.Consoles).To(HaveLen(devices))
 
@@ -2575,7 +2574,7 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			domain := vmiToDomain(&vmi, &ConverterContext{UseEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
+			domain := vmiToDomain(&vmi, &ConverterContext{AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
 			Expect(domain.Spec.IOThreads).ToNot(BeNil())
 			Expect(int(domain.Spec.IOThreads.IOThreads)).To(Equal(threadCount))
 			for idx, disk := range domain.Spec.Devices.Disks {
@@ -2674,7 +2673,7 @@ var _ = Describe("Converter", func() {
 				Cores: 2,
 			}
 
-			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true, SMBios: &cmdv1.SMBios{}})
+			domain := vmiToDomain(vmi, &ConverterContext{AllowEmulation: true, SMBios: &cmdv1.SMBios{}})
 			Expect(*(domain.Spec.Devices.Disks[0].Driver.Queues)).To(Equal(expectedQueues),
 				"expected number of queues to equal number of requested vCPUs")
 		})
@@ -2706,14 +2705,36 @@ var _ = Describe("Converter", func() {
 			vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = resource.MustParse("16")
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			c := &ConverterContext{CPUSet: []int{5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20},
-				UseEmulation: true,
-				SMBios:       &cmdv1.SMBios{},
+				AllowEmulation: true,
+				SMBios:         &cmdv1.SMBios{},
+				Topology: &cmdv1.Topology{
+					NumaCells: []*cmdv1.Cell{{
+						Cpus: []*cmdv1.CPU{
+							{Id: 5},
+							{Id: 6},
+							{Id: 7},
+							{Id: 8},
+							{Id: 9},
+							{Id: 10},
+							{Id: 11},
+							{Id: 12},
+							{Id: 13},
+							{Id: 14},
+							{Id: 15},
+							{Id: 16},
+							{Id: 17},
+							{Id: 18},
+							{Id: 19},
+							{Id: 20},
+						},
+					}},
+				},
 			}
 			domain := vmiToDomain(vmi, c)
 			domain.Spec.IOThreads = &api.IOThreads{}
 			domain.Spec.IOThreads.IOThreads = uint(6)
 
-			err := formatDomainIOThreadPin(vmi, domain, c)
+			err := formatDomainIOThreadPin(vmi, domain, 0, c)
 			Expect(err).ToNot(HaveOccurred())
 			expectedLayout := []api.CPUTuneIOThreadPin{
 				{IOThread: 1, CPUSet: "5,6,7"},
@@ -2730,12 +2751,23 @@ var _ = Describe("Converter", func() {
 		It("should pack iothreads equally on available vcpus, if there are more iothreads than vcpus", func() {
 			vmi.Spec.Domain.CPU.Cores = 2
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-			c := &ConverterContext{CPUSet: []int{5, 6}, UseEmulation: true}
+			c := &ConverterContext{
+				CPUSet:         []int{5, 6},
+				AllowEmulation: true,
+				Topology: &cmdv1.Topology{
+					NumaCells: []*cmdv1.Cell{{
+						Cpus: []*cmdv1.CPU{
+							{Id: 5},
+							{Id: 6},
+						},
+					}},
+				},
+			}
 			domain := vmiToDomain(vmi, c)
 			domain.Spec.IOThreads = &api.IOThreads{}
 			domain.Spec.IOThreads.IOThreads = uint(6)
 
-			err := formatDomainIOThreadPin(vmi, domain, c)
+			err := formatDomainIOThreadPin(vmi, domain, 0, c)
 			Expect(err).ToNot(HaveOccurred())
 			expectedLayout := []api.CPUTuneIOThreadPin{
 				{IOThread: 1, CPUSet: "6"},
@@ -2776,7 +2808,7 @@ var _ = Describe("Converter", func() {
 				Cores: 2,
 			}
 
-			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(vmi, &ConverterContext{AllowEmulation: true})
 			Expect(*(domain.Spec.Devices.Interfaces[0].Driver.Queues)).To(Equal(expectedQueues),
 				"expected number of queues to equal number of requested vCPUs")
 		})
@@ -2788,14 +2820,14 @@ var _ = Describe("Converter", func() {
 				Sockets: 1,
 				Threads: 2,
 			}
-			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(vmi, &ConverterContext{AllowEmulation: true})
 			Expect(*(domain.Spec.Devices.Interfaces[0].Driver.Queues)).To(Equal(expectedQueues),
 				"expected number of queues to equal number of requested vCPUs")
 		})
 
 		It("should not assign queues to a non-virtio devices", func() {
 			vmi.Spec.Domain.Devices.Interfaces[0].Model = "e1000"
-			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(vmi, &ConverterContext{AllowEmulation: true})
 			Expect(domain.Spec.Devices.Interfaces[0].Driver).To(BeNil(),
 				"queues should not be set for models other than virtio")
 		})
@@ -2806,7 +2838,7 @@ var _ = Describe("Converter", func() {
 				Sockets: 1,
 				Threads: 2,
 			}
-			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(vmi, &ConverterContext{AllowEmulation: true})
 			expectedNumberQueues := uint(multiQueueMaxQueues)
 			Expect(*(domain.Spec.Devices.Interfaces[0].Driver.Queues)).To(Equal(expectedNumberQueues),
 				"should be capped to the maximum number of queues on tap devices")
@@ -2829,7 +2861,7 @@ var _ = Describe("Converter", func() {
 
 			c = &ConverterContext{
 				VirtualMachine: vmi,
-				UseEmulation:   true,
+				AllowEmulation: true,
 			}
 		})
 
@@ -2909,7 +2941,7 @@ var _ = Describe("Converter", func() {
 
 			c = &ConverterContext{
 				VirtualMachine: vmi,
-				UseEmulation:   true,
+				AllowEmulation: true,
 			}
 		})
 
@@ -2951,255 +2983,6 @@ var _ = Describe("Converter", func() {
 		})
 	})
 
-	Context("Legacy GPU resource request", func() {
-		vmi := &v1.VirtualMachineInstance{
-			ObjectMeta: k8smeta.ObjectMeta{
-				Name:      "testvmi",
-				Namespace: "mynamespace",
-				UID:       "1234",
-			},
-			Spec: v1.VirtualMachineInstanceSpec{
-				Domain: v1.DomainSpec{
-					Devices: v1.Devices{
-						GPUs: []v1.GPU{
-							{
-								Name: "vendor.com/gpu_name",
-							},
-						},
-					},
-				},
-			},
-		}
-
-		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-
-		It("should convert GPU resource request into host devices", func() {
-			c := &ConverterContext{
-				UseEmulation: true,
-				GpuDevices:   []string{"2609:19:90.0", "2609:19:90.1"},
-			}
-
-			domain := vmiToDomain(vmi, c)
-
-			Expect(len(domain.Spec.Devices.HostDevices)).To(Equal(2))
-			Expect(domain.Spec.Devices.HostDevices[0].Type).To(Equal("pci"))
-			Expect(domain.Spec.Devices.HostDevices[0].Managed).To(Equal("yes"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Domain).To(Equal("0x2609"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Bus).To(Equal("0x19"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Slot).To(Equal("0x90"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Function).To(Equal("0x0"))
-			Expect(domain.Spec.Devices.HostDevices[1].Type).To(Equal("pci"))
-			Expect(domain.Spec.Devices.HostDevices[1].Managed).To(Equal("yes"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Domain).To(Equal("0x2609"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Bus).To(Equal("0x19"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Slot).To(Equal("0x90"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Function).To(Equal("0x1"))
-
-		})
-
-		It("should convert GPU resource request into host devices for VGPU", func() {
-			c := &ConverterContext{
-				UseEmulation: true,
-				VgpuDevices:  []string{"aa618089-8b16-4d01-a136-25a0f3c73123", "aa618089-8b16-4d01-a136-25a0f3c73124"},
-			}
-
-			domain := vmiToDomain(vmi, c)
-
-			Expect(len(domain.Spec.Devices.HostDevices)).To(Equal(2))
-			Expect(domain.Spec.Devices.HostDevices[0].Type).To(Equal("mdev"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.UUID).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73123"))
-			Expect(domain.Spec.Devices.HostDevices[0].Mode).To(Equal("subsystem"))
-			Expect(domain.Spec.Devices.HostDevices[0].Model).To(Equal("vfio-pci"))
-			Expect(domain.Spec.Devices.HostDevices[1].Type).To(Equal("mdev"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.UUID).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73124"))
-			Expect(domain.Spec.Devices.HostDevices[1].Mode).To(Equal("subsystem"))
-			Expect(domain.Spec.Devices.HostDevices[1].Model).To(Equal("vfio-pci"))
-
-		})
-	})
-	Context("GPU resource request", func() {
-		vmi := &v1.VirtualMachineInstance{
-			ObjectMeta: k8smeta.ObjectMeta{
-				Name:      "testvmi",
-				Namespace: "mynamespace",
-				UID:       "1234",
-			},
-			Spec: v1.VirtualMachineInstanceSpec{
-				Domain: v1.DomainSpec{
-					Devices: v1.Devices{
-						GPUs: []v1.GPU{
-							{
-								DeviceName: "vendor.com/gpu_name",
-								Name:       "gpu_name",
-							},
-						},
-					},
-				},
-			},
-		}
-
-		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-
-		It("should convert GPU resource request into host devices", func() {
-			c := &ConverterContext{
-				UseEmulation: true,
-				HostDevices: map[string]HostDevicesList{
-					"vendor.com/gpu_name": {
-						Type:     HostDevicePCI,
-						AddrList: []string{"2609:19:90.0", "2609:19:90.1"},
-					},
-				},
-			}
-
-			domain := vmiToDomain(vmi, c)
-
-			Expect(len(domain.Spec.Devices.HostDevices)).To(Equal(1))
-			Expect(domain.Spec.Devices.HostDevices[0].Type).To(Equal("pci"))
-			Expect(domain.Spec.Devices.HostDevices[0].Managed).To(Equal("yes"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Domain).To(Equal("0x2609"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Bus).To(Equal("0x19"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Slot).To(Equal("0x90"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Function).To(Equal("0x0"))
-			Expect(domain.Spec.Devices.HostDevices[0].Alias.GetName()).To(Equal("gpu_name"))
-
-		})
-		It("should convert 2 GPU resource request into host devices", func() {
-			c := &ConverterContext{
-				UseEmulation: true,
-				HostDevices: map[string]HostDevicesList{
-					"vendor.com/gpu_name": {
-						Type:     HostDevicePCI,
-						AddrList: []string{"2609:19:90.0", "2609:19:90.1"},
-					},
-				},
-			}
-			newGpu := v1.GPU{
-				DeviceName: "vendor.com/gpu_name",
-				Name:       "gpu_name1",
-			}
-			vmi.Spec.Domain.Devices.GPUs = append(vmi.Spec.Domain.Devices.GPUs, newGpu)
-
-			domain := vmiToDomain(vmi, c)
-			Expect(len(domain.Spec.Devices.HostDevices)).To(Equal(2))
-			Expect(domain.Spec.Devices.HostDevices[0].Type).To(Equal("pci"))
-			Expect(domain.Spec.Devices.HostDevices[0].Managed).To(Equal("yes"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Domain).To(Equal("0x2609"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Bus).To(Equal("0x19"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Slot).To(Equal("0x90"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Function).To(Equal("0x0"))
-			Expect(domain.Spec.Devices.HostDevices[0].Alias.GetName()).To(Equal("gpu_name"))
-			Expect(domain.Spec.Devices.HostDevices[1].Type).To(Equal("pci"))
-			Expect(domain.Spec.Devices.HostDevices[1].Managed).To(Equal("yes"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Domain).To(Equal("0x2609"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Bus).To(Equal("0x19"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Slot).To(Equal("0x90"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Function).To(Equal("0x1"))
-			Expect(domain.Spec.Devices.HostDevices[1].Alias.GetName()).To(Equal("gpu_name1"))
-
-		})
-
-		It("should convert GPU resource request into host devices for VGPU", func() {
-			c := &ConverterContext{
-				UseEmulation: true,
-				HostDevices: map[string]HostDevicesList{
-					"vendor.com/gpu_name": {
-						Type:     HostDevicePCI,
-						AddrList: []string{"2609:19:90.0", "2609:19:90.1"},
-					},
-					"vendor.com/vgpu_name": {
-						Type:     HostDeviceMDEV,
-						AddrList: []string{"aa618089-8b16-4d01-a136-25a0f3c73123", "aa618089-8b16-4d01-a136-25a0f3c73124"},
-					},
-				},
-			}
-			gpus := []v1.GPU{
-				{
-					DeviceName: "vendor.com/gpu_name",
-					Name:       "gpu_name",
-				},
-				{
-					DeviceName: "vendor.com/vgpu_name",
-					Name:       "vgpu_name1",
-				},
-			}
-			vmi.Spec.Domain.Devices.GPUs = gpus
-
-			domain := vmiToDomain(vmi, c)
-
-			Expect(len(domain.Spec.Devices.HostDevices)).To(Equal(2))
-			Expect(domain.Spec.Devices.HostDevices[0].Type).To(Equal("pci"))
-			Expect(domain.Spec.Devices.HostDevices[0].Managed).To(Equal("yes"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Domain).To(Equal("0x2609"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Bus).To(Equal("0x19"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Slot).To(Equal("0x90"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Function).To(Equal("0x0"))
-			Expect(domain.Spec.Devices.HostDevices[0].Alias.GetName()).To(Equal("gpu_name"))
-			Expect(domain.Spec.Devices.HostDevices[1].Type).To(Equal("mdev"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.UUID).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73123"))
-			Expect(domain.Spec.Devices.HostDevices[1].Mode).To(Equal("subsystem"))
-			Expect(domain.Spec.Devices.HostDevices[1].Model).To(Equal("vfio-pci"))
-			Expect(domain.Spec.Devices.HostDevices[1].Alias.GetName()).To(Equal("vgpu_name1"))
-		})
-	})
-
-	Context("HostDevices resource request", func() {
-		vmi := &v1.VirtualMachineInstance{
-			ObjectMeta: k8smeta.ObjectMeta{
-				Name:      "testvmi",
-				Namespace: "mynamespace",
-				UID:       "1234",
-			},
-			Spec: v1.VirtualMachineInstanceSpec{
-				Domain: v1.DomainSpec{
-					Devices: v1.Devices{
-						HostDevices: []v1.HostDevice{
-							{
-								DeviceName: "vendor.com/pci_name",
-								Name:       "pci_name",
-							},
-							{
-								DeviceName: "vendor.com/mdev_name",
-								Name:       "mdev_name",
-							},
-						},
-					},
-				},
-			},
-		}
-
-		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-		It("should convert HostDevices resources request into host devices for MDEV and PCI", func() {
-			c := &ConverterContext{
-				UseEmulation: true,
-				HostDevices: map[string]HostDevicesList{
-					"vendor.com/pci_name": {
-						Type:     HostDevicePCI,
-						AddrList: []string{"2609:19:90.0", "2609:19:90.1"},
-					},
-					"vendor.com/mdev_name": {
-						Type:     HostDeviceMDEV,
-						AddrList: []string{"aa618089-8b16-4d01-a136-25a0f3c73123", "aa618089-8b16-4d01-a136-25a0f3c73124"},
-					},
-				},
-			}
-			domain := vmiToDomain(vmi, c)
-
-			Expect(len(domain.Spec.Devices.HostDevices)).To(Equal(2))
-			Expect(domain.Spec.Devices.HostDevices[0].Type).To(Equal("pci"))
-			Expect(domain.Spec.Devices.HostDevices[0].Managed).To(Equal("yes"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Domain).To(Equal("0x2609"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Bus).To(Equal("0x19"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Slot).To(Equal("0x90"))
-			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Function).To(Equal("0x0"))
-			Expect(domain.Spec.Devices.HostDevices[0].Alias.GetName()).To(Equal("pci_name"))
-			Expect(domain.Spec.Devices.HostDevices[1].Type).To(Equal("mdev"))
-			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.UUID).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73123"))
-			Expect(domain.Spec.Devices.HostDevices[1].Mode).To(Equal("subsystem"))
-			Expect(domain.Spec.Devices.HostDevices[1].Model).To(Equal("vfio-pci"))
-			Expect(domain.Spec.Devices.HostDevices[1].Alias.GetName()).To(Equal("mdev_name"))
-		})
-	})
-
 	Context("hotplug", func() {
 		var vmi *v1.VirtualMachineInstance
 		var c *ConverterContext
@@ -3218,7 +3001,7 @@ var _ = Describe("Converter", func() {
 
 			c = &ConverterContext{
 				VirtualMachine: vmi,
-				UseEmulation:   true,
+				AllowEmulation: true,
 				IsBlockPVC: map[string]bool{
 					"test-block-pvc": true,
 				},
@@ -3463,7 +3246,7 @@ func vmiToDomainXML(vmi *v1.VirtualMachineInstance, c *ConverterContext) string 
 
 func vmiToDomain(vmi *v1.VirtualMachineInstance, c *ConverterContext) *api.Domain {
 	domain := &api.Domain{}
-	Expect(Convert_v1_VirtualMachineInstance_To_api_Domain(vmi, domain, c)).To(Succeed())
+	ExpectWithOffset(1, Convert_v1_VirtualMachineInstance_To_api_Domain(vmi, domain, c)).To(Succeed())
 	api.NewDefaulter(c.Architecture).SetObjectDefaults_Domain(domain)
 	return domain
 }

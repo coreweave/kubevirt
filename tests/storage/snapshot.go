@@ -7,11 +7,10 @@ import (
 	"time"
 
 	expect "github.com/google/goexpect"
+	vsv1beta1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
-
-	vsv1beta1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -25,6 +24,7 @@ import (
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	. "kubevirt.io/kubevirt/tests/framework/matcher"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/util"
 )
@@ -303,6 +303,56 @@ var _ = SIGDescribe("[Serial]VirtualMachineSnapshot Tests", func() {
 				}
 			}
 
+			addDVtoVMI := func(vm *v1.VirtualMachine) {
+				dv := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, snapshotStorageClass, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
+				_, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.Background(), dv, metav1.CreateOptions{})
+				Expect(err).To(BeNil())
+				Eventually(ThisDV(dv), 240).Should(HaveSucceeded())
+				volumeSource := &v1.HotplugVolumeSource{
+					DataVolume: &v1.DataVolumeSource{
+						Name: dv.Name,
+					},
+				}
+				addVolumeName := "testvolume"
+				addVolumeOptions := &v1.AddVolumeOptions{
+					Name: addVolumeName,
+					Disk: &v1.Disk{
+						DiskDevice: v1.DiskDevice{
+							Disk: &v1.DiskTarget{
+								Bus: "scsi",
+							},
+						},
+						Serial: addVolumeName,
+					},
+					VolumeSource: volumeSource,
+				}
+
+				Eventually(func() error {
+					return virtClient.VirtualMachineInstance(vm.Namespace).AddVolume(vm.Name, addVolumeOptions)
+				}, 3*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
+
+				Eventually(func() bool {
+					updatedVMI, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+					Expect(err).To(BeNil())
+
+					foundVolume := false
+					foundDisk := false
+
+					for _, volume := range updatedVMI.Spec.Volumes {
+						if volume.Name == addVolumeName {
+							foundVolume = true
+						}
+					}
+					for _, disk := range updatedVMI.Spec.Domain.Devices.Disks {
+						if disk.Name == addVolumeName {
+							foundDisk = true
+						}
+					}
+
+					return foundVolume && foundDisk
+				}, 90*time.Second, 1*time.Second).Should(BeTrue())
+			}
+
 			callVeleroHook := func(vmi *v1.VirtualMachineInstance, annoContainer, annoCommand string) error {
 				pod := tests.GetPodByVirtualMachineInstance(vmi)
 
@@ -369,6 +419,22 @@ var _ = SIGDescribe("[Serial]VirtualMachineSnapshot Tests", func() {
 				tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 300)
 				tests.WaitAgentConnected(virtClient, vmi)
 
+				initialMemory := vmi.Spec.Domain.Resources.Requests[corev1.ResourceMemory]
+				newMemory := resource.MustParse("1Gi")
+				Expect(newMemory).ToNot(Equal(initialMemory))
+
+				//update vm to make sure vm revision is saved in the snapshot
+				By("Updating the VM template spec")
+				newVM, err := virtClient.VirtualMachine(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				updatedVM := newVM.DeepCopy()
+				updatedVM.Spec.Template.Spec.Domain.Resources.Requests = corev1.ResourceList{
+					corev1.ResourceMemory: newMemory,
+				}
+				updatedVM, err = virtClient.VirtualMachine(updatedVM.Namespace).Update(updatedVM)
+				Expect(err).ToNot(HaveOccurred())
+
 				snapshot = newSnapshot()
 
 				_, err = virtClient.VirtualMachineSnapshot(snapshot.Namespace).Create(context.Background(), snapshot, metav1.CreateOptions{})
@@ -383,9 +449,13 @@ var _ = SIGDescribe("[Serial]VirtualMachineSnapshot Tests", func() {
 				content, err := virtClient.VirtualMachineSnapshotContent(vm.Namespace).Get(context.Background(), contentName, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
+				contentSourceSpec := content.Spec.Source.VirtualMachine.Spec
 				Expect(*content.Spec.VirtualMachineSnapshotName).To(Equal(snapshot.Name))
-				Expect(content.Spec.Source.VirtualMachine.Spec).To(Equal(vm.Spec))
+				Expect(contentSourceSpec).To(Equal(vm.Spec))
 				Expect(content.Spec.VolumeBackups).Should(HaveLen(len(vm.Spec.DataVolumeTemplates)))
+
+				snapshotSourceMemory := contentSourceSpec.Template.Spec.Domain.Resources.Requests[corev1.ResourceMemory]
+				Expect(snapshotSourceMemory).To(Equal(initialMemory))
 			})
 
 			It("[test_id:6768]with volumes and no guest agent available", func() {
@@ -484,36 +554,14 @@ var _ = SIGDescribe("[Serial]VirtualMachineSnapshot Tests", func() {
 			})
 
 			It("[test_id:6837]delete snapshot after freeze, expect vm unfreeze", func() {
-				dataVolume := tests.NewRandomDataVolumeWithHttpImportInStorageClass(
-					tests.GetUrl(tests.FedoraHttpUrl),
+				var vmi *v1.VirtualMachineInstance
+				vm, vmi = createAndStartVM(tests.NewRandomVMWithDataVolumeWithRegistryImport(
+					cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskFedoraTestTooling),
 					util.NamespaceTestDefault,
 					snapshotStorageClass,
-					corev1.ReadWriteOnce)
-				dataVolume.Spec.PVC.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("6Gi")
-				var vmi *v1.VirtualMachineInstance
-				vm, vmi = createAndStartVM(tests.NewRandomVMWithDataVolumeAndUserData(
-					dataVolume,
-					"#cloud-config\npassword: fedora\nchpasswd: { expire: False }\npackages:\n qemu-guest-agent",
-				))
-				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
-				Eventually(func() error {
-					var batch []expect.Batcher
-					batch = append(batch, []expect.Batcher{
-						&expect.BSnd{S: "\n"},
-						&expect.BExp{R: console.PromptExpression},
-						&expect.BSnd{S: "sudo systemctl start qemu-guest-agent\n"},
-						&expect.BExp{R: console.PromptExpression},
-						&expect.BSnd{S: "echo $?\n"},
-						&expect.BExp{R: console.RetValue("0")},
-						&expect.BSnd{S: "sudo systemctl enable qemu-guest-agent\n"},
-						&expect.BExp{R: console.PromptExpression},
-						&expect.BSnd{S: "echo $?\n"},
-						&expect.BExp{R: console.RetValue("0")},
-					}...)
-
-					return console.SafeExpectBatch(vmi, batch, 120)
-				}, 720*time.Second, 1*time.Second).Should(Succeed())
+					corev1.ReadWriteOnce))
 				tests.WaitAgentConnected(virtClient, vmi)
+				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
 
 				createDenyVolumeSnapshotCreateWebhook()
 				defer deleteWebhook()
@@ -537,36 +585,14 @@ var _ = SIGDescribe("[Serial]VirtualMachineSnapshot Tests", func() {
 			})
 
 			It("should unfreeze vm if snapshot fails when deadline exceeded", func() {
-				dataVolume := tests.NewRandomDataVolumeWithHttpImportInStorageClass(
-					tests.GetUrl(tests.FedoraHttpUrl),
+				var vmi *v1.VirtualMachineInstance
+				vm, vmi = createAndStartVM(tests.NewRandomVMWithDataVolumeWithRegistryImport(
+					cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskFedoraTestTooling),
 					util.NamespaceTestDefault,
 					snapshotStorageClass,
-					corev1.ReadWriteOnce)
-				dataVolume.Spec.PVC.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("6Gi")
-				var vmi *v1.VirtualMachineInstance
-				vm, vmi = createAndStartVM(tests.NewRandomVMWithDataVolumeAndUserData(
-					dataVolume,
-					"#cloud-config\npassword: fedora\nchpasswd: { expire: False }\npackages:\n qemu-guest-agent",
-				))
-				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
-				Eventually(func() error {
-					var batch []expect.Batcher
-					batch = append(batch, []expect.Batcher{
-						&expect.BSnd{S: "\n"},
-						&expect.BExp{R: console.PromptExpression},
-						&expect.BSnd{S: "sudo systemctl start qemu-guest-agent\n"},
-						&expect.BExp{R: console.PromptExpression},
-						&expect.BSnd{S: "echo $?\n"},
-						&expect.BExp{R: console.RetValue("0")},
-						&expect.BSnd{S: "sudo systemctl enable qemu-guest-agent\n"},
-						&expect.BExp{R: console.PromptExpression},
-						&expect.BSnd{S: "echo $?\n"},
-						&expect.BExp{R: console.RetValue("0")},
-					}...)
-
-					return console.SafeExpectBatch(vmi, batch, 120)
-				}, 720*time.Second, 1*time.Second).Should(Succeed())
+					corev1.ReadWriteOnce))
 				tests.WaitAgentConnected(virtClient, vmi)
+				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
 
 				createDenyVolumeSnapshotCreateWebhook()
 				snapshot = newSnapshot()
@@ -604,6 +630,87 @@ var _ = SIGDescribe("[Serial]VirtualMachineSnapshot Tests", func() {
 						snapshot.Status.Phase == snapshotv1.Failed &&
 						updatedVMI.Status.FSFreezeStatus == "" &&
 						errors.IsNotFound(contentErr)
+				}, time.Minute, 2*time.Second).Should(BeTrue())
+			})
+
+			It("stop vm when online snapshot fails with hot plug disk to succeed snapshot", func() {
+				var vmi *v1.VirtualMachineInstance
+				vm, vmi = createAndStartVM(tests.NewRandomVMWithDataVolumeWithRegistryImport(
+					cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskFedoraTestTooling),
+					util.NamespaceTestDefault,
+					snapshotStorageClass,
+					corev1.ReadWriteOnce))
+				tests.WaitAgentConnected(virtClient, vmi)
+				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
+
+				By("Add hotplug disk")
+				addDVtoVMI(vm)
+				By("Create Snapshot")
+				snapshot = newSnapshot()
+				_, err = virtClient.VirtualMachineSnapshot(snapshot.Namespace).Create(context.Background(), snapshot, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				Eventually(func() bool {
+					snapshot, err = virtClient.VirtualMachineSnapshot(vm.Namespace).Get(context.Background(), snapshot.Name, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					return snapshot.Status != nil &&
+						len(snapshot.Status.Conditions) == 2 &&
+						snapshot.Status.Conditions[0].Status == corev1.ConditionFalse &&
+						strings.Contains(snapshot.Status.Conditions[0].Reason, "Source not locked") &&
+						snapshot.Status.Conditions[1].Status == corev1.ConditionFalse &&
+						strings.Contains(snapshot.Status.Conditions[1].Reason, "Not ready") &&
+						snapshot.Status.Phase == snapshotv1.InProgress
+				}, 20*time.Second, 2*time.Second).Should(BeTrue())
+				expectedIndications := []snapshotv1.Indication{snapshotv1.VMSnapshotOnlineSnapshotIndication, snapshotv1.VMSnapshotGuestAgentIndication}
+				Expect(snapshot.Status.Indications).To(Equal(expectedIndications))
+
+				By("Stopping VM")
+				vm = tests.StopVirtualMachine(vm)
+
+				Eventually(func() bool {
+					snapshot, err = virtClient.VirtualMachineSnapshot(vm.Namespace).Get(context.Background(), snapshot.Name, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					return snapshot.Status != nil &&
+						len(snapshot.Status.Conditions) == 2 &&
+						snapshot.Status.Conditions[0].Status == corev1.ConditionFalse &&
+						strings.Contains(snapshot.Status.Conditions[0].Reason, "Operation complete") &&
+						snapshot.Status.Conditions[1].Status == corev1.ConditionTrue &&
+						strings.Contains(snapshot.Status.Conditions[1].Reason, "Operation complete") &&
+						snapshot.Status.Phase == snapshotv1.Succeeded
+				}, 30*time.Second, 2*time.Second).Should(BeTrue())
+				Expect(snapshot.Status.Indications).To(BeEmpty())
+			})
+
+			It("should fail online snapshot with hot plug disk if not shutting down vm", func() {
+				var vmi *v1.VirtualMachineInstance
+				vm, vmi = createAndStartVM(tests.NewRandomVMWithDataVolumeWithRegistryImport(
+					cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskFedoraTestTooling),
+					util.NamespaceTestDefault,
+					snapshotStorageClass,
+					corev1.ReadWriteOnce))
+				tests.WaitAgentConnected(virtClient, vmi)
+				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
+
+				By("Add hotplug disk")
+				addDVtoVMI(vm)
+				snapshot = newSnapshot()
+				snapshot.Spec.FailureDeadline = &metav1.Duration{Duration: 30 * time.Second}
+				_, err = virtClient.VirtualMachineSnapshot(snapshot.Namespace).Create(context.Background(), snapshot, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				Eventually(func() bool {
+					snapshot, err = virtClient.VirtualMachineSnapshot(vm.Namespace).Get(context.Background(), snapshot.Name, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					return snapshot.Status != nil &&
+						len(snapshot.Status.Conditions) == 3 &&
+						snapshot.Status.Conditions[0].Status == corev1.ConditionFalse &&
+						strings.Contains(snapshot.Status.Conditions[0].Reason, "Source not locked") &&
+						snapshot.Status.Conditions[1].Status == corev1.ConditionFalse &&
+						strings.Contains(snapshot.Status.Conditions[1].Reason, "Not ready") &&
+						snapshot.Status.Conditions[2].Status == corev1.ConditionTrue &&
+						snapshot.Status.Conditions[2].Type == snapshotv1.ConditionFailure &&
+						strings.Contains(snapshot.Status.Conditions[2].Reason, "snapshot deadline exceeded") &&
+						snapshot.Status.Phase == snapshotv1.Failed
 				}, time.Minute, 2*time.Second).Should(BeTrue())
 			})
 

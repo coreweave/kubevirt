@@ -108,6 +108,7 @@ import (
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
 	"kubevirt.io/kubevirt/tests/flags"
+	. "kubevirt.io/kubevirt/tests/framework/matcher"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libvmi"
 
@@ -132,7 +133,6 @@ const (
 	AlpineHttpUrl = iota
 	DummyFileHttpUrl
 	CirrosHttpUrl
-	FedoraHttpUrl
 	VirtWhatCpuidHelperHttpUrl
 )
 
@@ -192,7 +192,6 @@ const (
 var (
 	HostPathAlpine string
 	HostPathCustom string
-	HostPathFedora string
 )
 
 const (
@@ -475,6 +474,7 @@ func SynchronizedAfterTestSuiteCleanup() {
 	if Config.ManageStorageClasses {
 		deleteStorageClass(Config.StorageClassHostPath)
 		deleteStorageClass(Config.StorageClassBlockVolume)
+		deleteStorageClass(Config.StorageClassHostPathSeparateDevice)
 	}
 	CleanNodes()
 }
@@ -659,8 +659,11 @@ func SynchronizedBeforeTestSetup() []byte {
 	}
 
 	if Config.ManageStorageClasses {
-		createStorageClass(Config.StorageClassHostPath)
-		createStorageClass(Config.StorageClassBlockVolume)
+		immediateBinding := storagev1.VolumeBindingImmediate
+		wffc := storagev1.VolumeBindingWaitForFirstConsumer
+		createStorageClass(Config.StorageClassHostPath, &immediateBinding)
+		createStorageClass(Config.StorageClassBlockVolume, &immediateBinding)
+		createStorageClass(Config.StorageClassHostPathSeparateDevice, &wffc)
 	}
 
 	EnsureKVMPresent()
@@ -683,7 +686,6 @@ func BeforeTestSuitSetup(_ []byte) {
 	worker := config.GinkgoConfig.ParallelNode
 	HostPathAlpine = filepath.Join(HostPathBase, fmt.Sprintf("%s%v", "alpine", worker))
 	HostPathCustom = filepath.Join(HostPathBase, fmt.Sprintf("%s%v", "custom", worker))
-	HostPathFedora = filepath.Join(HostPathBase, "fedora-cloud")
 
 	BlockDiskForTest = fmt.Sprintf("block-disk-for-tests%v", worker)
 
@@ -784,7 +786,7 @@ func RestoreKubeVirtResource() {
 	}
 }
 
-func createStorageClass(name string) {
+func createStorageClass(name string, bindingMode *storagev1.VolumeBindingMode) {
 	virtClient, err := kubecli.GetKubevirtClient()
 	util2.PanicOnError(err)
 
@@ -795,7 +797,8 @@ func createStorageClass(name string) {
 				"kubevirt.io/test": name,
 			},
 		},
-		Provisioner: name,
+		Provisioner:       "kubernetes.io/no-provisioner",
+		VolumeBindingMode: bindingMode,
 	}
 	_, err = virtClient.StorageV1().StorageClasses().Create(context.Background(), sc, metav1.CreateOptions{})
 	if !errors.IsAlreadyExists(err) {
@@ -817,24 +820,24 @@ func deleteStorageClass(name string) {
 	util2.PanicOnError(err)
 }
 
-func ShouldUseEmulation(virtClient kubecli.KubevirtClient) bool {
-	useEmulation := false
+func ShouldAllowEmulation(virtClient kubecli.KubevirtClient) bool {
+	allowEmulation := false
 	virtClient, err := kubecli.GetKubevirtClient()
 	util2.PanicOnError(err)
 
 	kv := util2.GetCurrentKv(virtClient)
 	if kv.Spec.Configuration.DeveloperConfiguration != nil {
-		useEmulation = kv.Spec.Configuration.DeveloperConfiguration.UseEmulation
+		allowEmulation = kv.Spec.Configuration.DeveloperConfiguration.UseEmulation
 	}
 
-	return useEmulation
+	return allowEmulation
 }
 
 func EnsureKVMPresent() {
 	virtClient, err := kubecli.GetKubevirtClient()
 	util2.PanicOnError(err)
 
-	if !ShouldUseEmulation(virtClient) {
+	if !ShouldAllowEmulation(virtClient) {
 		listOptions := metav1.ListOptions{LabelSelector: v1.AppLabel + "=virt-handler"}
 		virtHandlerPods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(context.Background(), listOptions)
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
@@ -955,6 +958,10 @@ func CreateHostPathPVC(os, size string) {
 	CreatePVC(os, size, Config.StorageClassHostPath, false)
 }
 
+func CreateHostPathPVConSeparateDevice(os, size string) {
+	CreatePVC(os, size, Config.StorageClassHostPathSeparateDevice, false)
+}
+
 func CreatePVC(os, size, storageClass string, recycledPV bool) {
 	virtCli, err := kubecli.GetKubevirtClient()
 	util2.PanicOnError(err)
@@ -1019,6 +1026,82 @@ func newPVC(os, size, storageClass string, recycledPV bool) *k8sv1.PersistentVol
 			},
 			StorageClassName: &storageClass,
 		},
+	}
+}
+
+func DeleteAllSeparateDeviceHostPathPvs() {
+	virtClient, err := kubecli.GetKubevirtClient()
+	util2.PanicOnError(err)
+
+	pvList, err := virtClient.CoreV1().PersistentVolumes().List(context.Background(), metav1.ListOptions{})
+	util2.PanicOnError(err)
+	for _, pv := range pvList.Items {
+		if pv.Spec.StorageClassName == Config.StorageClassHostPathSeparateDevice {
+			// ignore error we want to attempt to delete them all.
+			virtClient.CoreV1().PersistentVolumes().Delete(context.Background(), pv.Name, metav1.DeleteOptions{})
+		}
+	}
+}
+
+func CreateAllSeparateDeviceHostPathPvs(osName string) {
+	virtClient, err := kubecli.GetKubevirtClient()
+	util2.PanicOnError(err)
+	Eventually(func() int {
+		nodes := util2.GetAllSchedulableNodes(virtClient)
+		if len(nodes.Items) > 0 {
+			for _, node := range nodes.Items {
+				createSeparateDeviceHostPathPv(osName, node.Name)
+			}
+		}
+		return len(nodes.Items)
+	}, 5*time.Minute, 10*time.Second).ShouldNot(BeZero(), "no schedulable nodes found")
+}
+
+func createSeparateDeviceHostPathPv(osName, nodeName string) {
+	virtCli, err := kubecli.GetKubevirtClient()
+	util2.PanicOnError(err)
+	name := fmt.Sprintf("separate-device-%s-pv", nodeName)
+	pv := &k8sv1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-%s", name, util2.NamespaceTestDefault),
+			Labels: map[string]string{
+				"kubevirt.io/test": osName,
+				cleanup.TestLabelForNamespace(util2.NamespaceTestDefault): "",
+			},
+		},
+		Spec: k8sv1.PersistentVolumeSpec{
+			AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
+			Capacity: k8sv1.ResourceList{
+				"storage": resource.MustParse("3Gi"),
+			},
+			PersistentVolumeReclaimPolicy: k8sv1.PersistentVolumeReclaimRetain,
+			PersistentVolumeSource: k8sv1.PersistentVolumeSource{
+				HostPath: &k8sv1.HostPathVolumeSource{
+					Path: "/tmp/hostImages/mount_hp/test",
+				},
+			},
+			StorageClassName: Config.StorageClassHostPathSeparateDevice,
+			NodeAffinity: &k8sv1.VolumeNodeAffinity{
+				Required: &k8sv1.NodeSelector{
+					NodeSelectorTerms: []k8sv1.NodeSelectorTerm{
+						{
+							MatchExpressions: []k8sv1.NodeSelectorRequirement{
+								{
+									Key:      "kubernetes.io/hostname",
+									Operator: k8sv1.NodeSelectorOpIn,
+									Values:   []string{nodeName},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err = virtCli.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
+	if !errors.IsAlreadyExists(err) {
+		util2.PanicOnError(err)
 	}
 }
 
@@ -1488,7 +1571,7 @@ func RunVMIAndExpectLaunch(vmi *v1.VirtualMachineInstance, timeout int) *v1.Virt
 func RunVMIAndExpectLaunchWithDataVolume(vmi *v1.VirtualMachineInstance, dv *cdiv1.DataVolume, timeout int) *v1.VirtualMachineInstance {
 	obj := RunVMI(vmi, timeout)
 	By("Waiting until the DataVolume is ready")
-	WaitForSuccessfulDataVolumeImport(dv, timeout)
+	Eventually(ThisDV(dv), timeout).Should(HaveSucceeded())
 	By("Waiting until the VirtualMachineInstance will start")
 	WaitForSuccessfulVMIStartWithTimeout(obj, timeout)
 	return obj
@@ -1845,7 +1928,7 @@ func createNamespaces() {
 }
 
 func NewRandomDataVolumeWithRegistryImport(imageUrl, namespace string, accessMode k8sv1.PersistentVolumeAccessMode) *cdiv1.DataVolume {
-	return newRandomDataVolumeWithRegistryImport(imageUrl, namespace, Config.StorageClassLocal, accessMode)
+	return NewRandomDataVolumeWithRegistryImportInStorageClass(imageUrl, namespace, Config.StorageClassLocal, accessMode)
 }
 
 func NewRandomDataVolumeWithHttpImport(imageUrl, namespace string, accessMode k8sv1.PersistentVolumeAccessMode) *cdiv1.DataVolume {
@@ -1875,11 +1958,11 @@ func NewRandomVirtualMachineInstanceWithOCSDisk(imageUrl, namespace string, acce
 	dv.Spec.PVC.VolumeMode = &volMode
 	_, err = virtCli.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.Background(), dv, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
-	WaitForSuccessfulDataVolumeImport(dv, 240)
+	Eventually(ThisDV(dv), 240).Should(HaveSucceeded())
 	return NewRandomVMIWithDataVolume(dv.Name), dv
 }
 
-func newRandomDataVolumeWithRegistryImport(imageUrl, namespace, storageClass string, accessMode k8sv1.PersistentVolumeAccessMode) *cdiv1.DataVolume {
+func NewRandomDataVolumeWithRegistryImportInStorageClass(imageUrl, namespace, storageClass string, accessMode k8sv1.PersistentVolumeAccessMode) *cdiv1.DataVolume {
 	name := "test-datavolume-" + rand.String(12)
 	quantity, err := resource.ParseQuantity("1Gi")
 	util2.PanicOnError(err)
@@ -2096,6 +2179,16 @@ func NewRandomVMWithRegistryDataVolume(imageUrl string, namespace string) *v1.Vi
 	return vm
 }
 
+func NewRandomVMWithDataVolumeWithRegistryImport(imageUrl, namespace, storageClass string, accessMode k8sv1.PersistentVolumeAccessMode) *v1.VirtualMachine {
+	dataVolume := NewRandomDataVolumeWithRegistryImportInStorageClass(imageUrl, namespace, storageClass, accessMode)
+	dataVolume.Spec.PVC.Resources.Requests[k8sv1.ResourceStorage] = resource.MustParse("6Gi")
+	vmi := NewRandomVMIWithDataVolume(dataVolume.Name)
+	vm := NewRandomVirtualMachine(vmi, false)
+
+	addDataVolumeTemplate(vm, dataVolume)
+	return vm
+}
+
 func NewRandomVMWithDataVolume(imageUrl string, namespace string) *v1.VirtualMachine {
 	dataVolume := NewRandomDataVolumeWithHttpImport(imageUrl, namespace, k8sv1.ReadWriteOnce)
 	vmi := NewRandomVMIWithDataVolume(dataVolume.Name)
@@ -2121,13 +2214,6 @@ func NewRandomVMWithDataVolumeAndUserData(dataVolume *cdiv1.DataVolume, userData
 
 	addDataVolumeTemplate(vm, dataVolume)
 	return vm
-}
-
-func NewRandomVMWithBlockDataVolumeAndUserDataInStorageClass(imageUrl, namespace, userData, storageClass string) *v1.VirtualMachine {
-	dataVolume := NewRandomDataVolumeWithHttpImportInStorageClass(imageUrl, namespace, storageClass, k8sv1.ReadWriteOnce)
-	volumeMode := k8sv1.PersistentVolumeBlock
-	dataVolume.Spec.PVC.VolumeMode = &volumeMode
-	return NewRandomVMWithDataVolumeAndUserData(dataVolume, userData)
 }
 
 func NewRandomVMWithDataVolumeAndUserDataInStorageClass(imageUrl, namespace, userData, storageClass string) *v1.VirtualMachine {
@@ -2223,7 +2309,7 @@ func NewRandomVMIWithEphemeralDisk(containerImage string) *v1.VirtualMachineInst
 	vmi := NewRandomVMI()
 
 	AddEphemeralDisk(vmi, "disk0", "virtio", containerImage)
-	if containerImage == cd.ContainerDiskFor(cd.ContainerDiskFedora) {
+	if containerImage == cd.ContainerDiskFor(cd.ContainerDiskFedoraTestTooling) {
 		vmi.Spec.Domain.Devices.Rng = &v1.Rng{} // newer fedora kernels may require hardware RNG to boot
 	}
 	return vmi
@@ -2272,9 +2358,9 @@ func AddPVCDisk(vmi *v1.VirtualMachineInstance, name string, bus string, claimNa
 	vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 		Name: name,
 		VolumeSource: v1.VolumeSource{
-			PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+			PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
 				ClaimName: claimName,
-			},
+			}},
 		},
 	})
 
@@ -2320,7 +2406,6 @@ func NewRandomFedoraVMIWithGuestAgent() *v1.VirtualMachineInstance {
 	return libvmi.NewTestToolingFedora(
 		libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 		libvmi.WithNetwork(v1.DefaultPodNetwork()),
-		libvmi.WithCloudInitNoCloudUserData(GetFedoraToolsGuestAgentUserData(), false),
 		libvmi.WithCloudInitNoCloudNetworkData(networkData, false),
 	)
 }
@@ -2345,9 +2430,9 @@ func AddPVCFS(vmi *v1.VirtualMachineInstance, name string, claimName string) *v1
 	vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 		Name: name,
 		VolumeSource: v1.VolumeSource{
-			PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+			PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
 				ClaimName: claimName,
-			},
+			}},
 		},
 	})
 
@@ -2383,41 +2468,18 @@ func NewRandomVMIWithPVCFS(claimName string) *v1.VirtualMachineInstance {
 }
 
 func NewRandomFedoraVMIWithDmidecode() *v1.VirtualMachineInstance {
-	userData := `#!/bin/bash
-	    echo "fedora" |passwd fedora --stdin
-	`
-	vmi := NewRandomVMIWithEphemeralDiskAndUserdataHighMemory(cd.ContainerDiskFor(cd.ContainerDiskFedoraTestTooling), userData)
+	vmi := NewRandomVMIWithEphemeralDiskHighMemory(cd.ContainerDiskFor(cd.ContainerDiskFedoraTestTooling))
 	return vmi
 }
 
 func NewRandomFedoraVMIWithVirtWhatCpuidHelper() *v1.VirtualMachineInstance {
-	userData := `#!/bin/bash
-	    echo "fedora" |passwd fedora --stdin
-	`
-	vmi := NewRandomVMIWithEphemeralDiskAndUserdataHighMemory(cd.ContainerDiskFor(cd.ContainerDiskFedoraTestTooling), userData)
+	vmi := NewRandomVMIWithEphemeralDiskHighMemory(cd.ContainerDiskFor(cd.ContainerDiskFedoraTestTooling))
 	return vmi
-}
-
-func GetFedoraToolsGuestAgentUserData() string {
-	return `#!/bin/bash
-            echo "fedora" |passwd fedora --stdin
-            sudo setenforce Permissive
-	    sudo cp /home/fedora/qemu-guest-agent.service /lib/systemd/system/
-	    sudo systemctl daemon-reload
-            sudo systemctl start qemu-guest-agent
-            sudo systemctl enable qemu-guest-agent
-`
 }
 
 func GetFedoraToolsGuestAgentBlacklistUserData(commands string) string {
 	return fmt.Sprintf(`#!/bin/bash
-            echo "fedora" |passwd fedora --stdin
-            sudo setenforce Permissive
-            sudo cp /home/fedora/qemu-guest-agent.service /lib/systemd/system/
             echo -e "\n\nBLACKLIST_RPC=%s" | sudo tee -a /etc/sysconfig/qemu-ga
-            sudo systemctl daemon-reload
-            sudo systemctl start qemu-guest-agent
-            sudo systemctl enable qemu-guest-agent
 `, commands)
 }
 
@@ -2636,9 +2698,9 @@ func NewRandomVMIWithCDRom(claimName string) *v1.VirtualMachineInstance {
 	vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 		Name: "disk0",
 		VolumeSource: v1.VolumeSource{
-			PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+			PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
 				ClaimName: claimName,
-			},
+			}},
 		},
 	})
 	return vmi
@@ -2880,50 +2942,6 @@ func NewRandomVMIWithCustomMacAddress() *v1.VirtualMachineInstance {
 	AddExplicitPodNetworkInterface(vmi)
 	vmi.Spec.Domain.Devices.Interfaces[0].MacAddress = "de:ad:00:00:be:af"
 	return vmi
-}
-
-// Block until DataVolume succeeds on storage with Immediate binding
-// or is in WaitForFirstConsumer state on storage with WaitForFirstConsumer binding.
-func WaitForDataVolumeReadyToStartVMI(obj runtime.Object, seconds int) {
-	vmi, ok := obj.(*v1.VirtualMachineInstance)
-	ExpectWithOffset(1, ok).To(BeTrue(), "Object is not of type *v1.VMI")
-	WaitForDataVolumeReady(vmi.Namespace, vmi.Spec.Volumes[0].DataVolume.Name, seconds)
-}
-
-func WaitForDataVolumeReady(namespace, name string, seconds int) {
-	waitForDataVolumePhase(namespace, name, seconds, cdiv1.WaitForFirstConsumer, cdiv1.Succeeded)
-}
-
-func WaitForDataVolumeImportInProgress(namespace, name string, seconds int) {
-	waitForDataVolumePhase(namespace, name, seconds, cdiv1.WaitForFirstConsumer, cdiv1.ImportInProgress)
-}
-
-func WaitForDataVolumePhaseWFFC(namespace, name string, seconds int) {
-	waitForDataVolumePhase(namespace, name, seconds, cdiv1.WaitForFirstConsumer)
-}
-
-func WaitForSuccessfulDataVolumeImport(dv *cdiv1.DataVolume, seconds int) {
-	waitForDataVolumePhase(dv.Namespace, dv.Name, seconds, cdiv1.Succeeded)
-}
-
-func waitForDataVolumePhase(namespace, name string, seconds int, phase ...cdiv1.DataVolumePhase) {
-	By("Checking that the DataVolume has succeeded")
-	virtClient, err := kubecli.GetKubevirtClient()
-	ExpectWithOffset(2, err).ToNot(HaveOccurred())
-
-	EventuallyWithOffset(2,
-		func() cdiv1.DataVolumePhase {
-			dv, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(namespace).Get(context.Background(), name, metav1.GetOptions{})
-			if apierrors.IsNotFound(err) {
-				return cdiv1.PhaseUnset
-			}
-			ExpectWithOffset(2, err).ToNot(HaveOccurred())
-
-			return dv.Status.Phase
-		},
-		time.Duration(seconds)*time.Second, 1*time.Second).
-		Should(BeElementOf(phase),
-			"Timed out waiting for DataVolume to enter Succeeded phase")
 }
 
 // Block until the specified VirtualMachineInstance reached either Failed or Running states
@@ -3398,6 +3416,8 @@ func LibvirtDomainIsPersistent(virtClient kubecli.KubevirtClient, vmi *v1.Virtua
 	return strings.Contains(stdout, vmi.Namespace+"_"+vmi.Name), nil
 }
 
+// Deprecated: BeforeAll must not be used. Tests need to be self-contained to allow sane cleanup, accurate reporting and
+// parallel execution.
 func BeforeAll(fn func()) {
 	first := true
 	BeforeEach(func() {
@@ -4790,8 +4810,6 @@ func GetUrl(urlIndex int) string {
 		str = fmt.Sprintf("http://cdi-http-import-server.%s/dummy.file", flags.KubeVirtInstallNamespace)
 	case CirrosHttpUrl:
 		str = fmt.Sprintf("http://cdi-http-import-server.%s/images/cirros.img", flags.KubeVirtInstallNamespace)
-	case FedoraHttpUrl:
-		str = fmt.Sprintf("http://cdi-http-import-server.%s/images/fedora.img", flags.KubeVirtInstallNamespace)
 	case VirtWhatCpuidHelperHttpUrl:
 		str = fmt.Sprintf("http://cdi-http-import-server.%s/virt-what-cpuid-helper", flags.KubeVirtInstallNamespace)
 	default:

@@ -40,15 +40,18 @@ if [ -z $TARGET ]; then
   exit 1
 fi
 
+export KUBEVIRT_DEPLOY_CDI=true
 if [[ $TARGET =~ windows.* ]]; then
   echo "picking the default provider for windows tests"
 elif [[ $TARGET =~ cnao ]]; then
   export KUBEVIRT_WITH_CNAO=true
   export KUBEVIRT_PROVIDER=${TARGET/-cnao/}
+  export KUBEVIRT_DEPLOY_CDI=false
 elif [[ $TARGET =~ sig-network ]]; then
   export KUBEVIRT_WITH_CNAO=true
   export KUBEVIRT_PROVIDER=${TARGET/-sig-network/}
   export KUBEVIRT_DEPLOY_ISTIO=true
+  export KUBEVIRT_DEPLOY_CDI=false
   if [[ $TARGET =~ k8s-1\.1.* ]]; then
     export KUBEVIRT_DEPLOY_ISTIO=false
   fi
@@ -57,6 +60,8 @@ elif [[ $TARGET =~ sig-storage ]]; then
   export KUBEVIRT_STORAGE="rook-ceph-default"
 elif [[ $TARGET =~ sig-compute ]]; then
   export KUBEVIRT_PROVIDER=${TARGET/-sig-compute/}
+elif [[ $TARGET =~ sig-operator ]]; then
+  export KUBEVIRT_PROVIDER=${TARGET/-sig-operator/}  
 else
   export KUBEVIRT_PROVIDER=${TARGET}
 fi
@@ -68,6 +73,9 @@ fi
 
 if [[ $TARGET =~ sriov.* ]]; then
   export KUBEVIRT_NUM_NODES=3
+  export KUBEVIRT_DEPLOY_CDI=false
+elif [[ $TARGET =~ vgpu.* ]]; then
+  export KUBEVIRT_NUM_NODES=1
 else
   export KUBEVIRT_NUM_NODES=2
 fi
@@ -249,11 +257,11 @@ timeout=300
 sample=30
 
 for i in ${namespaces[@]}; do
-  # Wait until kubevirt pods are running
+  # Wait until kubevirt pods are running or completed
   current_time=0
-  while [ -n "$(kubectl get pods -n $i --no-headers | grep -v Running)" ]; do
-    echo "Waiting for kubevirt pods to enter the Running state ..."
-    kubectl get pods -n $i --no-headers | >&2 grep -v Running || true
+  while [ -n "$(kubectl get pods -n $i --no-headers | grep -v -E 'Running|Completed')" ]; do
+    echo "Waiting for kubevirt pods to enter the Running/Completed state ..."
+    kubectl get pods -n $i --no-headers | >&2 grep -v -E 'Running|Completed' || true
     sleep $sample
 
     current_time=$((current_time + sample))
@@ -266,9 +274,9 @@ for i in ${namespaces[@]}; do
 
   # Make sure all containers are ready
   current_time=0
-  while [ -n "$(kubectl get pods -n $i -o'custom-columns=status:status.containerStatuses[*].ready' --no-headers | grep false)" ]; do
+  while [ -n "$(kubectl get pods -n $i --field-selector=status.phase==Running -o'custom-columns=status:status.containerStatuses[*].ready' --no-headers | grep false)" ]; do
     echo "Waiting for KubeVirt containers to become ready ..."
-    kubectl get pods -n $i -o'custom-columns=status:status.containerStatuses[*].ready' --no-headers | grep false || true
+    kubectl get pods -n $i --field-selector=status.phase==Running -o'custom-columns=status:status.containerStatuses[*].ready' --no-headers | grep false || true
     sleep $sample
 
     current_time=$((current_time + sample))
@@ -333,17 +341,21 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-network\\]"
   elif [[ $TARGET =~ sig-storage ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-storage\\]|\\[rook-ceph\\]"
+  elif [[ $TARGET =~ vgpu.* ]]; then
+    export KUBEVIRT_E2E_FOCUS=MediatedDevices
   elif [[ $TARGET =~ sig-compute ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-compute\\]"
-    export KUBEVIRT_E2E_SKIP="GPU"
+    export KUBEVIRT_E2E_SKIP="GPU|MediatedDevices"
+  elif [[ $TARGET =~ sig-operator ]]; then
+    export KUBEVIRT_E2E_FOCUS="\\[sig-operator\\]"
   elif [[ $TARGET =~ sriov.* ]]; then
     export KUBEVIRT_E2E_FOCUS=SRIOV
   elif [[ $TARGET =~ gpu.* ]]; then
     export KUBEVIRT_E2E_FOCUS=GPU
   elif [[ $TARGET =~ (okd|ocp).* ]]; then
-    export KUBEVIRT_E2E_SKIP="SRIOV|GPU"
+    export KUBEVIRT_E2E_SKIP="SRIOV|GPU|MediatedDevices"
   else
-    export KUBEVIRT_E2E_SKIP="Multus|SRIOV|GPU|Macvtap"
+    export KUBEVIRT_E2E_SKIP="Multus|SRIOV|GPU|Macvtap|MediatedDevices"
   fi
 
   if ! [[ $TARGET =~ sig-storage ]]; then

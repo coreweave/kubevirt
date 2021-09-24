@@ -49,9 +49,12 @@ import (
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
+const defaultProfilerComponentPort = 8443
+
 type SubresourceAPIApp struct {
 	virtCli                 kubecli.KubevirtClient
 	consoleServerPort       int
+	profilerComponentPort   int
 	handlerTLSConfiguration *tls.Config
 	credentialsLock         *sync.Mutex
 	statusUpdater           *status.VMStatusUpdater
@@ -62,6 +65,7 @@ func NewSubresourceAPIApp(virtCli kubecli.KubevirtClient, consoleServerPort int,
 	return &SubresourceAPIApp{
 		virtCli:                 virtCli,
 		consoleServerPort:       consoleServerPort,
+		profilerComponentPort:   defaultProfilerComponentPort,
 		credentialsLock:         &sync.Mutex{},
 		handlerTLSConfiguration: tlsConfiguration,
 		statusUpdater:           status.NewVMStatusUpdater(virtCli),
@@ -1047,6 +1051,11 @@ func (app *SubresourceAPIApp) addVolumeRequestHandler(request *restful.Request, 
 	opts.Disk.Name = opts.Name
 	volumeRequest := v1.VirtualMachineVolumeRequest{
 		AddVolumeOptions: opts,
+	}
+	if opts.VolumeSource.DataVolume != nil {
+		opts.VolumeSource.DataVolume.Hotpluggable = true
+	} else if opts.VolumeSource.PersistentVolumeClaim != nil {
+		opts.VolumeSource.PersistentVolumeClaim.Hotpluggable = true
 	}
 
 	// inject into VMI if ephemeral, else set as a request on the VM to both make permanent and hotplug.

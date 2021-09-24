@@ -51,6 +51,11 @@ var (
 	master     string
 )
 
+type RestConfigHookFunc func(*rest.Config)
+
+var restConfigHooks []RestConfigHookFunc
+var restConfigHooksLock sync.Mutex
+
 var virtclient KubevirtClient
 var once sync.Once
 
@@ -62,6 +67,22 @@ func Init() {
 	}
 	if flag.CommandLine.Lookup("master") == nil {
 		flag.StringVar(&master, "master", "", "master url")
+	}
+}
+
+func RegisterRestConfigHook(fn RestConfigHookFunc) {
+	restConfigHooksLock.Lock()
+	defer restConfigHooksLock.Unlock()
+
+	restConfigHooks = append(restConfigHooks, fn)
+}
+
+func executeRestConfigHooks(config *rest.Config) {
+	restConfigHooksLock.Lock()
+	defer restConfigHooksLock.Unlock()
+
+	for _, hookFn := range restConfigHooks {
+		hookFn(config)
 	}
 }
 
@@ -236,6 +257,8 @@ func GetKubevirtClientFromRESTConfig(config *rest.Config) (KubevirtClient, error
 		config.UserAgent = restclient.DefaultKubernetesUserAgent()
 	}
 
+	executeRestConfigHooks(&shallowCopy)
+
 	restClient, err := rest.RESTClientFor(&shallowCopy)
 	if err != nil {
 		return nil, err
@@ -329,14 +352,11 @@ func GetKubevirtSubresourceClient() (KubevirtClient, error) {
 	return GetKubevirtSubresourceClientFromFlags(master, kubeconfig)
 }
 
+// Deprecated: Use GetKubevirtClientConfig instead
 func GetConfig() (*restclient.Config, error) {
 	return clientcmd.BuildConfigFromFlags(master, kubeconfig)
 }
 
 func GetKubevirtClientConfig() (*rest.Config, error) {
-	config, err := clientcmd.BuildConfigFromFlags(master, kubeconfig)
-	if err != nil {
-		return nil, err
-	}
-	return config, nil
+	return GetConfig()
 }

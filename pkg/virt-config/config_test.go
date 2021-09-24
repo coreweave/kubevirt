@@ -37,12 +37,12 @@ var _ = Describe("ConfigMap", func() {
 		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
 			Data: map[string]string{"debug.useEmulation": value},
 		})
-		Expect(clusterConfig.IsUseEmulation()).To(Equal(result))
+		Expect(clusterConfig.AllowEmulation()).To(Equal(result))
 	},
-		table.Entry("is true, IsUseEmulation should return true", "true", true),
-		table.Entry("is false, IsUseEmulation should return false", "false", false),
-		table.Entry("when unset, IsUseEmulation should return false", "", false),
-		table.Entry("when invalid, IsUseEmulation should return the default", "invalid", false),
+		table.Entry("is true, AllowEmulation should return true", "true", true),
+		table.Entry("is false, AllowEmulation should return false", "false", false),
+		table.Entry("when unset, AllowEmulation should return false", "", false),
+		table.Entry("when invalid, AllowEmulation should return the default", "invalid", false),
 	)
 
 	table.DescribeTable(" when permitSlirpInterface", func(value string, result bool) {
@@ -485,7 +485,7 @@ var _ = Describe("ConfigMap", func() {
 			},
 		})
 
-		emulation := clusterConfig.IsUseEmulation()
+		emulation := clusterConfig.AllowEmulation()
 		Expect(emulation).To(BeTrue())
 
 		cminformer.GetStore().Add(&kubev1.ConfigMap{
@@ -494,12 +494,25 @@ var _ = Describe("ConfigMap", func() {
 				Name:            virtconfig.ConfigMapName,
 				ResourceVersion: rand.String(10),
 			},
-			Data: map[string]string{virtconfig.UseEmulationKey: "false"},
+			Data: map[string]string{virtconfig.AllowEmulationKey: "false"},
 		})
 
-		emulation = clusterConfig.IsUseEmulation()
+		emulation = clusterConfig.AllowEmulation()
 		Expect(emulation).To(BeFalse())
 	})
+
+	table.DescribeTable("when ClusterProfiler feature-gate", func(openFeatureGates string, isEnabled bool) {
+		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
+			Data: map[string]string{virtconfig.FeatureGatesKey: openFeatureGates},
+		})
+
+		Expect(clusterConfig.ClusterProfilerEnabled()).To(Equal(isEnabled))
+	},
+		table.Entry("ClusterProfiler feature gate not set should result in cluster profiler being disabled",
+			"", false),
+		table.Entry("ClusterProfiler feature gate enabled should result in cluster profiler being enabled",
+			virtconfig.ClusterProfiler, true),
+	)
 
 	table.DescribeTable("when feature-gate", func(openFeatureGates string, isLiveMigrationEnabled, isSRIOVLiveMigrationEnabled bool) {
 		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
