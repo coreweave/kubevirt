@@ -1,7 +1,7 @@
 image: docker:stable
 
 stages:
-- test
+#- test
 - build
 - push
 
@@ -13,13 +13,13 @@ variables:
 before_script:
   - apk add bash make git rsync
 
-test:
-  stage: test
-  only:
-    refs:
-    - coreweave
-  script:
-  - hack/dockerized-cw "hack/bazel-fmt.sh && CI=${CI} ARTIFACTS=${ARTIFACTS} hack/bazel-test.sh"
+#test:
+#  stage: test
+#  only:
+#    refs:
+#    - coreweave
+#  script:
+#  - hack/dockerized-cw "hack/bazel-fmt.sh && CI=${CI} ARTIFACTS=${ARTIFACTS} hack/bazel-test.sh"
   
 build:
   stage: build
