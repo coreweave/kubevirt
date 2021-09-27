@@ -392,8 +392,7 @@ func getObjectMetaPatch(desired, current metav1.ObjectMeta) ([]string, error) {
 func hasImmutableFieldChanged(service, cachedService *corev1.Service) bool {
 	deleteAndReplace := false
 
-	typeSame := isServiceClusterIP(cachedService) && isServiceClusterIP(service)
-	if !typeSame || shouldEnforceClusterIP(service.Spec.ClusterIP, cachedService.Spec.ClusterIP) {
+	if shouldEnforceClusterIP(service.Spec.ClusterIP, cachedService.Spec.ClusterIP) {
 		deleteAndReplace = true
 	}
 
