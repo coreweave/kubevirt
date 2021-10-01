@@ -1,4 +1,5 @@
-FROM registry.gitlab.com/atlantic-crypto/kubevirt/virt-launcher:60c51f5ce866dd4c3abdec40d41fc5999858848b
+ARG BASE_IMAGE_TAG=latest
+FROM registry.gitlab.com/atlantic-crypto/kubevirt/virt-launcher:${BASE_IMAGE_TAG}
 
 RUN mv /usr/libexec/virtiofsd /usr/libexec/virtiofsd.bin
 
