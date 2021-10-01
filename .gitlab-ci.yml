@@ -51,5 +51,6 @@ push-launcher:
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - hack/dockerized-cw "export BUILD_ARCH=${BUILD_ARCH} && hack/bazel-fmt.sh && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_PRE_TAG} DOCKER_TAG_ALT=${DOCKER_TAG_ALT} IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT} KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} PUSH_TARGETS='${PUSH_TARGETS}' ./hack/bazel-push-images.sh"
+    - docker pull ${DOCKER_PREFIX}/virt-launcher:${DOCKER_PRE_TAG}
     - docker build virtiofs-hack/ --build-arg BASE_IMAGE_TAG=${DOCKER_TAG} -t ${DOCKER_TAG}
     - docker push ${DOCKER_PREFIX}/virt-launcher:${DOCKER_TAG}
