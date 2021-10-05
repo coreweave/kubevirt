@@ -411,6 +411,7 @@ func generateServicePatch(
 
 	// set these values in the case they are empty
 	service.Spec.ClusterIP = cachedService.Spec.ClusterIP
+	service.Spec.HealthCheckNodePort = cachedService.Spec.HealthCheckNodePort
 	service.Spec.Type = cachedService.Spec.Type
 	if service.Spec.SessionAffinity == "" {
 		service.Spec.SessionAffinity = cachedService.Spec.SessionAffinity
