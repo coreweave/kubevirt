@@ -1334,6 +1334,10 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 					Name:      hookSidecarSocks,
 					MountPath: hooks.HookSocketsSharedDirectory,
 				},
+				{
+					Name:      "libvirt-runtime",
+					MountPath: "/var/run/libvirt",
+				},
 			},
 		}
 		if nonRoot {
