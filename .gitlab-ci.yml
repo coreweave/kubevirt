@@ -4,6 +4,7 @@ stages:
 #- test
 - build
 - push
+- build-qemu
 
 variables:
   DOCKER_PREFIX: registry.gitlab.com
@@ -27,6 +28,7 @@ build:
   only:
     refs:
     - coreweave
+    - mg/custom-qemu
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - hack/dockerized-cw "export BUILD_ARCH=${BUILD_ARCH} && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} DOCKER_TAG_ALT=${DOCKER_TAG_ALT} IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT} ./hack/bazel-build-images.sh"
@@ -36,6 +38,7 @@ push:
   only:
     refs:
     - coreweave
+    - mg/custom-qemu
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - hack/dockerized-cw "export BUILD_ARCH=${BUILD_ARCH} && hack/bazel-fmt.sh && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} DOCKER_TAG_ALT=${DOCKER_TAG_ALT} IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT} KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} PUSH_TARGETS='${PUSH_TARGETS}' ./hack/bazel-push-images.sh"
@@ -45,6 +48,7 @@ push-launcher:
   only:
     refs:
     - coreweave
+    - mg/custom-qemu
   variables:
     PUSH_TARGETS: 'virt-launcher'
     DOCKER_PRE_TAG: '${CI_COMMIT_SHORT_SHA}-pre'
@@ -53,4 +57,15 @@ push-launcher:
     - hack/dockerized-cw "export BUILD_ARCH=${BUILD_ARCH} && hack/bazel-fmt.sh && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_PRE_TAG} DOCKER_TAG_ALT=${DOCKER_TAG_ALT} IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT} KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} PUSH_TARGETS='${PUSH_TARGETS}' ./hack/bazel-push-images.sh"
     - docker pull ${DOCKER_PREFIX}/${IMAGE_PREFIX}virt-launcher:${DOCKER_PRE_TAG}
     - docker build virtiofs-hack/ --build-arg BASE_IMAGE_TAG=${DOCKER_PRE_TAG} -t ${DOCKER_PREFIX}/${IMAGE_PREFIX}virt-launcher:${DOCKER_TAG}
+    - docker push ${DOCKER_PREFIX}/${IMAGE_PREFIX}virt-launcher:${DOCKER_TAG}
+
+build-custom-qemu:
+  stage: build-qemu
+  only:
+    refs:
+    - coreweave
+    - mg/custom-qemu
+  script:  
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build --build-arg DOCKER_TAG=${DOCKER_TAG} -t ${DOCKER_PREFIX}/${IMAGE_PREFIX}virt-launcher:${DOCKER_TAG} -f hack/Dockerfile.qemu .
     - docker push ${DOCKER_PREFIX}/${IMAGE_PREFIX}virt-launcher:${DOCKER_TAG}

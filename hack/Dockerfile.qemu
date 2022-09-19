@@ -1,0 +1,262 @@
+ARG DOCKER_TAG
+
+FROM centos:centos8 as qemu-builder
+
+RUN cd /etc/yum.repos.d/ && \
+sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* && \
+sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
+
+RUN dnf makecache &&\
+dnf update -y
+
+
+RUN dnf group install -y "Development Tools"
+RUN dnf install -y python3 pixman-devel glib2-devel tree
+RUN dnf --enablerepo=powertools install -y ninja-build
+
+RUN dnf install -y \
+gnutls-devel libgcrypt-devel libssh-devel libaio-devel \
+libepoxy-devel numactl-devel libcacard-devel libseccomp-devel \
+libcap-ng-devel  libiscsi-devel libcurl-devel libpng-devel \
+cyrus-sasl-devel lzo-devel libudev-devel systemtap-sdt-devel
+
+RUN dnf --enablerepo=powertools install -y \
+device-mapper-multipath-devel librados2-devel librbd-devel \
+glusterfs-api-devel python3-sphinx libusb-devel libibverbs-devel \
+usbredir-devel libpmem-devel libxkbcommon-devel snappy-devel libfdt-devel \
+spice-server-devel
+
+
+RUN mkdir -p /workspace && cd workspace
+WORKDIR /workspace
+
+RUN git clone --depth 1 --branch v6.2.0 https://github.com/qemu/qemu.git && \
+cd qemu && \
+git submodule init && \
+git submodule update
+
+# /workspace/qemu/scripts/ci/org.centos/stream/8/x86_64/configure && 
+
+WORKDIR /workspace/qemu
+RUN mkdir build && \
+cd build && \
+../configure \
+--prefix="/workspace/qemu-install/usr" \
+--libdir="/workspace/qemu-install/usr/lib64" \
+--datadir="/workspace/qemu-install/usr/share" \
+--sysconfdir="/workspace/qemu-install/etc" \
+--interp-prefix=/usr/qemu-%M \
+--localstatedir="/workspace/qemu-install/var" \
+--docdir="/workspace/qemu-install/usr/share/doc" \
+--libexecdir="/workspace/qemu-install/usr/libexec" \
+--extra-ldflags="-Wl,--build-id -Wl,-z,relro -Wl,-z,now" \
+--extra-cflags="-O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -specs=/usr/lib/rpm/redhat/redhat-hardened-cc1 -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -m64 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection" \
+--with-suffix="qemu-kvm" \
+--firmwarepath=/workspace/qemu-install/usr/share/qemu-firmware \
+--with-git=meson \
+--with-git-submodules=update \
+--target-list="x86_64-softmmu" \
+--block-drv-rw-whitelist="qcow2,raw,file,host_device,nbd,iscsi,rbd,blkdebug,luks,null-co,nvme,copy-on-read,throttle,gluster" \
+--audio-drv-list="" \
+--block-drv-ro-whitelist="vmdk,vhdx,vpc,https,ssh" \
+--with-coroutine=ucontext \
+--with-git=git \
+--tls-priority=@QEMU,SYSTEM \
+--disable-attr \
+--disable-auth-pam \
+--disable-avx2 \
+--disable-avx512f \
+--disable-bochs \
+--disable-bpf \
+--disable-brlapi \
+--disable-bsd-user \
+--disable-bzip2 \
+--disable-cap-ng \
+--disable-capstone \
+--disable-cfi \
+--disable-cfi-debug \
+--disable-cloop \
+--disable-cocoa \
+--disable-coroutine-pool \
+--disable-crypto-afalg \
+--disable-curl \
+--disable-curses \
+--disable-debug-info \
+--disable-debug-mutex \
+--disable-debug-tcg \
+--disable-dmg \
+--disable-docs \
+--disable-fuse \
+--disable-fuse-lseek \
+--disable-gcrypt \
+--disable-gio \
+--disable-glusterfs \
+--disable-gnutls \
+--disable-gtk \
+--disable-guest-agent \
+--disable-guest-agent-msi \
+--disable-hax \
+--disable-hvf \
+--disable-iconv \
+--disable-kvm \
+--disable-libdaxctl \
+--disable-libiscsi \
+--disable-libnfs \
+--disable-libpmem \
+--disable-libssh \
+--disable-libudev \
+--disable-libusb \
+--disable-libxml2 \
+--disable-linux-aio \
+--disable-linux-io-uring \
+--disable-linux-user \
+--disable-live-block-migration \
+--disable-lto \
+--disable-lzfse \
+--disable-lzo \
+--disable-malloc-trim \
+--disable-membarrier \
+--disable-modules \
+--disable-module-upgrades \
+--disable-mpath \
+--disable-multiprocess \
+--disable-netmap \
+--disable-nettle \
+--disable-numa \
+--disable-nvmm \
+--disable-opengl \
+--disable-parallels \
+--disable-pie \
+--disable-pvrdma \
+--disable-qcow1 \
+--disable-qed \
+--disable-qom-cast-debug \
+--disable-rbd \
+--disable-rdma \
+--disable-replication \
+--disable-rng-none \
+--disable-safe-stack \
+--disable-sanitizers \
+--disable-sdl \
+--disable-sdl-image \
+--disable-seccomp \
+--disable-slirp-smbd \
+--disable-smartcard \
+--disable-snappy \
+--disable-sparse \
+--disable-spice \
+--disable-strip \
+--disable-system \
+--disable-tcg \
+--disable-tools \
+--disable-tpm \
+--disable-u2f \
+--disable-usb-redir \
+--disable-user \
+--disable-vde \
+--disable-vdi \
+--disable-vhost-crypto \
+--disable-vhost-kernel \
+--disable-vhost-net \
+--disable-vhost-scsi \
+--disable-vhost-user \
+--disable-vhost-user-blk-server \
+--disable-vhost-vdpa \
+--disable-vhost-vsock \
+--disable-virglrenderer \
+--disable-virtfs \
+--disable-virtiofsd \
+--disable-vnc \
+--disable-vnc-jpeg \
+--disable-vnc-png \
+--disable-vnc-sasl \
+--disable-vte \
+--disable-vvfat \
+--disable-werror \
+--disable-whpx \
+--disable-xen \
+--disable-xen-pci-passthrough \
+--disable-xfsctl \
+--disable-xkbcommon \
+--disable-zstd \
+--enable-attr \
+--enable-avx2 \
+--enable-cap-ng \
+--enable-capstone \
+--enable-coroutine-pool \
+--enable-curl \
+--enable-debug-info \
+--enable-docs \
+--enable-fdt \
+--enable-gcrypt \
+--enable-glusterfs \
+--enable-gnutls \
+--enable-guest-agent \
+--enable-iconv \
+--enable-kvm \
+--enable-libiscsi \
+--enable-libpmem \
+--enable-libssh \
+--enable-libusb \
+--enable-libudev \
+--enable-linux-aio \
+--enable-lzo \
+--enable-malloc-trim \
+--enable-modules \
+--enable-mpath \
+--enable-numa \
+--enable-opengl \
+--enable-pie \
+--enable-rbd \
+--enable-rdma \
+--enable-seccomp \
+--enable-snappy \
+--enable-smartcard \
+--enable-spice \
+--enable-system \
+--enable-tcg \
+--enable-tools \
+--enable-tpm \
+--enable-trace-backend=dtrace \
+--enable-usb-redir \
+--enable-virtiofsd \
+--enable-vhost-kernel \
+--enable-vhost-net \
+--enable-vhost-user \
+--enable-vhost-user-blk-server \
+--enable-vhost-vdpa \
+--enable-vhost-vsock \
+--enable-vnc \
+--enable-vnc-png \
+--enable-vnc-sasl \
+--enable-werror \
+--enable-xkbcommon && \
+make -j$(nproc) && \
+make install
+
+ENV LD_LIBRARY_PATH=/workspace/qemu-install/usr/lib64:${LD_LIBRARY_PATH}
+ENV PATH=/workspace/qemu-install/usr/bin:${PATH}
+WORKDIR /workspace
+RUN tree /workspace/qemu-install
+ENTRYPOINT [ "qemu-system-x86_64" ]
+
+
+FROM registry.gitlab.com/atlantic-crypto/kubevirt/virt-launcher:${DOCKER_TAG} AS qemu
+
+COPY --from=qemu-builder /workspace/qemu-install/usr/bin/ /usr/bin/
+COPY --from=qemu-builder /workspace/qemu-install/usr/lib64/qemu-kvm/ /usr/lib64/qemu-kvm/
+COPY --from=qemu-builder /workspace/qemu-install/usr/libexec/ /usr/libexec/
+COPY --from=qemu-builder /workspace/qemu-install/usr/share/qemu-kvm/ /usr/libexec/share/qemu-kvm/
+COPY --from=qemu-builder /workspace/qemu-install/usr/share/systemtap/tapset/ /usr/systemtap/tapset/
+RUN mv -f /usr/bin/qemu-system-x86_64 /usr/libexec/qemu-kvm
+# Skip copying:
+# - /usr/share/application
+# - /usr/share/doc
+# - /usr/share/icons
+# - /usr/share/man
+
+# Add missing fdt lib for qemu 6.2.0
+COPY --from=qemu-builder /usr/lib64/libfdt-1.6.0.so /usr/lib64/libfdt-1.6.0.so
+RUN ln -s /usr/lib64/libfdt-1.6.0.so /usr/lib64/libfdt.so.1 && \
+ln -s /usr/lib64/libfdt.so.1 /usr/lib64/libfdt.so && \
+ls -la /usr/lib64 | grep libfdt
