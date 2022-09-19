@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -ex
 
 source $(dirname "$0")/common.sh
 
@@ -8,21 +8,11 @@ if [ "${KUBEVIRT_RUN_UNNESTED}" == "true" ]; then
     exit $?
 fi
 
-# Select an available container runtime
-if [ -z ${KUBEVIRT_CRI} ]; then
-    if docker ps >/dev/null; then
-        KUBEVIRT_CRI=docker
-        echo "selecting docker as container runtime"
-    elif podman ps >/dev/null; then
-        KUBEVIRT_CRI=podman
-        echo "selecting podman as container runtime"
-    else
-        echo "no working container runtime found. Neither docker nor podman seems to work."
-        exit 1
-    fi
-fi
+KUBEVIRT_CRI="docker"
 
-KUBEVIRT_BUILDER_IMAGE="quay.io/kubevirt/builder:2109081533-c2a4c43a6"
+fail_if_cri_bin_missing
+
+KUBEVIRT_BUILDER_IMAGE="quay.io/kubevirt/builder:2202010936-905b3aae5"
 
 SYNC_OUT=${SYNC_OUT:-true}
 
@@ -62,12 +52,11 @@ function finish() {
 }
 trap finish EXIT
 
-RSYNC_IP=$($KUBEVIRT_CRI inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $RSYNC_CID)
-RSYNCD_PORT=873
+RSYNCD_PORT=$($KUBEVIRT_CRI port $RSYNC_CID 873 | cut -d':' -f2)
 
 rsynch_fail_count=0
 
-while ! rsync ${KUBEVIRT_DIR}/${RSYNCTEMP} "rsync://root@$RSYNC_IP:${RSYNCD_PORT}/build/${RSYNCTEMP}" &>/dev/null; do
+while ! rsync ${KUBEVIRT_DIR}/${RSYNCTEMP} "rsync://root@127.0.0.1:${RSYNCD_PORT}/build/${RSYNCTEMP}" &>/dev/null; do
     if [[ "$rsynch_fail_count" -eq 0 ]]; then
         printf "Waiting for rsyncd to be ready"
         sleep .1
@@ -104,13 +93,21 @@ _rsync \
     --exclude ".vagrant" \
     --exclude ".bazeldnf" \
     ${KUBEVIRT_DIR}/ \
-    "rsync://root@$RSYNC_IP:${RSYNCD_PORT}/build"
+    "rsync://root@127.0.0.1:${RSYNCD_PORT}/build"
 
 volumes="-v ${BUILDER}:/root:rw,z"
 
-# append .docker directory as volume
-# mkdir -p "${HOME}/.docker"
-# volumes="$volumes -v ${HOME}/.docker:/root/.docker:ro,z"
+# append .docker secrets directory as volume
+# mkdir -p "${HOME}/.docker/secrets"
+# volumes="$volumes -v ${HOME}/.docker/secrets:/root/.docker/secrets:ro,z"
+
+# Use a bind-mount to expose docker/podman auth file to the container
+# ID=$(id -u)
+# if [[ $KUBEVIRT_CRI = "podman" ]] && [[ -f "/tmp/podman-run-${ID}/containers/auth.json" ]]; then
+#     volumes="$volumes --mount type=bind,source=/tmp/podman-run-${ID}/containers/auth.json,target=/root/.docker/config.json,readonly"
+# elif [[ -f "${HOME}/.docker/config.json" ]]; then
+#     volumes="$volumes --mount type=bind,source=${HOME}/.docker/config.json,target=/root/.docker/config.json,readonly"
+# fi
 
 # add custom docker certs, if needed
 if [ -n "$DOCKER_CA_CERT_FILE" ] && [ -f "$DOCKER_CA_CERT_FILE" ]; then
@@ -119,6 +116,7 @@ fi
 
 # if defined, append the ARTIFACTS directory
 if [ -n "$ARTIFACTS" ]; then
+    mkdir -p "$ARTIFACTS"
     if [[ "$ARTIFACTS" = /* ]]; then
         volumes="$volumes -v ${ARTIFACTS}:${ARTIFACTS}:rw,z"
     else
@@ -130,8 +128,8 @@ fi
 # Ensure that a bazel server which is running is the correct one
 if [ -n "$($KUBEVIRT_CRI ps --format '{{.Names}}' | grep ${BUILDER}-bazel-server)" ]; then
     # check if the image is correct
-    builder_id=$($KUBEVIRT_CRI inspect ${KUBEVIRT_BUILDER_IMAGE} | $KUBEVIRT_CRI run --security-opt "label=disable" --rm -i imega/jq:1.6 ".[0].Id")
-    bazel_server_id=$($KUBEVIRT_CRI inspect ${BUILDER}-bazel-server | $KUBEVIRT_CRI run --security-opt "label=disable" --rm -i imega/jq:1.6 ".[0].Image")
+    builder_id=$($KUBEVIRT_CRI inspect --format='{{.Id}}' ${KUBEVIRT_BUILDER_IMAGE})
+    bazel_server_id=$($KUBEVIRT_CRI inspect --format='{{.Image}}' ${BUILDER}-bazel-server)
     if [ "${builder_id}" != "${bazel_server_id}" ]; then
         echo "Bazel server is outdated, restarting ..."
         $KUBEVIRT_CRI stop ${BUILDER}-bazel-server
@@ -155,10 +153,11 @@ fi
 
 # Run the command
 test -t 1 && USE_TTY="-it"
-if ! $KUBEVIRT_CRI exec ${USE_TTY} ${BUILDER}-bazel-server /entrypoint.sh "$@"; then
+EXEC_ENV_VARS="--env KUBEVIRT_CRI=${KUBEVIRT_CRI}"
+if ! $KUBEVIRT_CRI exec $EXEC_ENV_VARS ${USE_TTY} ${BUILDER}-bazel-server /entrypoint.sh "$@"; then
     # Copy the build output out of the container, make sure that _out exactly matches the build result
     if [ "$SYNC_OUT" = "true" ]; then
-        _rsync --delete "rsync://root@$RSYNC_IP:${RSYNCD_PORT}/out" ${OUT_DIR}
+        _rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/out" ${OUT_DIR}
     fi
     exit 1
 fi
@@ -178,15 +177,15 @@ _rsync \
     --exclude ".vagrant" \
     --exclude ".git" \
     --exclude ".bazeldnf" \
-    "rsync://root@$RSYNC_IP:${RSYNCD_PORT}/build" \
+    "rsync://root@127.0.0.1:${RSYNCD_PORT}/build" \
     ${KUBEVIRT_DIR}/
 
-_rsync --delete "rsync://root@$RSYNC_IP:${RSYNCD_PORT}/build/manifests/generated/" "${KUBEVIRT_DIR}/manifests/generated"
-_rsync --delete "rsync://root@$RSYNC_IP:${RSYNCD_PORT}/build/examples/" "${KUBEVIRT_DIR}/examples"
+_rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/build/manifests/generated/" "${KUBEVIRT_DIR}/manifests/generated"
+_rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/build/examples/" "${KUBEVIRT_DIR}/examples"
 if [ "$SYNC_VENDOR" = "true" ]; then
-    _rsync --delete "rsync://root@$RSYNC_IP:${RSYNCD_PORT}/vendor" "${VENDOR_DIR}/"
+    _rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/vendor" "${VENDOR_DIR}/"
 fi
 # Copy the build output out of the container, make sure that _out exactly matches the build result
 if [ "$SYNC_OUT" = "true" ]; then
-    _rsync --delete "rsync://root@$RSYNC_IP:${RSYNCD_PORT}/out" ${OUT_DIR}
+    _rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/out" ${OUT_DIR}
 fi
