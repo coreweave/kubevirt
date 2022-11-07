@@ -24,6 +24,12 @@ import (
 )
 
 const (
+	deleteNotifFail       = "Failed to process delete notification"
+	getObjectErrFmt       = "couldn't get object from tombstone %+v"
+	objectNotMigrationFmt = "tombstone contained object that is not a migration %#v"
+)
+
+const (
 	// FailedCreateVirtualMachineInstanceMigrationReason is added in an event if creating a VirtualMachineInstanceMigration failed.
 	FailedCreateVirtualMachineInstanceMigrationReason = "FailedCreate"
 	// SuccessfulCreateVirtualMachineInstanceMigrationReason is added in an event if creating a VirtualMachineInstanceMigration succeeded.
@@ -129,12 +135,12 @@ func (c *EvacuationController) enqueueVMI(obj interface{}) {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("couldn't get object from tombstone %+v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(getObjectErrFmt, obj)).Error(deleteNotifFail)
 			return
 		}
 		vmi, ok = tombstone.Obj.(*virtv1.VirtualMachineInstance)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a migration %#v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(objectNotMigrationFmt, obj)).Error(deleteNotifFail)
 			return
 		}
 	}
@@ -154,12 +160,12 @@ func (c *EvacuationController) nodeFromVMI(obj interface{}) string {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("couldn't get object from tombstone %+v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(getObjectErrFmt, obj)).Error(deleteNotifFail)
 			return ""
 		}
 		vmi, ok = tombstone.Obj.(*virtv1.VirtualMachineInstance)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a migration %#v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(objectNotMigrationFmt, obj)).Error(deleteNotifFail)
 			return ""
 		}
 	}
@@ -209,12 +215,12 @@ func (c *EvacuationController) enqueueMigration(obj interface{}) {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("couldn't get object from tombstone %+v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(getObjectErrFmt, obj)).Error(deleteNotifFail)
 			return
 		}
 		migration, ok = tombstone.Obj.(*virtv1.VirtualMachineInstanceMigration)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a migration %#v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(objectNotMigrationFmt, obj)).Error(deleteNotifFail)
 			return
 		}
 	}
@@ -418,7 +424,7 @@ func (c *EvacuationController) sync(node *k8sv1.Node, vmisOnNode []*virtv1.Virtu
 	for _, vmi := range selectedCandidates {
 		go func(vmi *virtv1.VirtualMachineInstance) {
 			defer wg.Done()
-			createdMigration, err := c.clientset.VirtualMachineInstanceMigration(vmi.Namespace).Create(GenerateNewMigration(vmi.Name, node.Name))
+			createdMigration, err := c.clientset.VirtualMachineInstanceMigration(vmi.Namespace).Create(GenerateNewMigration(vmi.Name, node.Name), &v1.CreateOptions{})
 			if err != nil {
 				c.migrationExpectations.CreationObserved(node.Name)
 				c.recorder.Eventf(vmi, k8sv1.EventTypeWarning, FailedCreateVirtualMachineInstanceMigrationReason, "Error creating a Migration: %v", err)
@@ -479,7 +485,7 @@ func (c *EvacuationController) filterRunningNonMigratingVMIs(vmis []*virtv1.Virt
 		}
 
 		// does not want to migrate
-		if vmi.Spec.EvictionStrategy == nil || *vmi.Spec.EvictionStrategy != virtv1.EvictionStrategyLiveMigrate {
+		if !migrationutils.VMIMigratableOnEviction(c.clusterConfig, vmi) {
 			continue
 		}
 		// can't migrate

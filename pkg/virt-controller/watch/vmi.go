@@ -23,12 +23,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
 
 	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,7 +36,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/trace"
 
+	traceUtils "kubevirt.io/kubevirt/pkg/util/trace"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
 
 	virtv1 "kubevirt.io/api/core/v1"
@@ -47,6 +49,11 @@ import (
 	kubevirttypes "kubevirt.io/kubevirt/pkg/util/types"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
+)
+
+const (
+	deleteNotifFailed        = "Failed to process delete notification"
+	tombstoneGetObjectErrFmt = "couldn't get object from tombstone %+v"
 )
 
 // Reasons for vmi events
@@ -108,6 +115,8 @@ const (
 	FailedMigrationReason = "FailedMigration"
 	// SuccessfulAbortMigrationReason is added when an attempt to abort migration completes successfully
 	SuccessfulAbortMigrationReason = "SuccessfulAbortMigration"
+	// MigrationTargetPodUnschedulable is added a migration target pod enters Unschedulable phase
+	MigrationTargetPodUnschedulable = "migrationTargetPodUnschedulable"
 	// FailedAbortMigrationReason is added when an attempt to abort migration fails
 	FailedAbortMigrationReason = "FailedAbortMigration"
 	// MissingAttachmentPodReason is set when we have a hotplugged volume, but the attachment pod is missing
@@ -245,11 +254,17 @@ func (c *VMIController) runWorker() {
 	}
 }
 
+var virtControllerVMIWorkQueueTracer = &traceUtils.Tracer{Threshold: time.Second}
+
 func (c *VMIController) Execute() bool {
 	key, quit := c.Queue.Get()
 	if quit {
 		return false
 	}
+
+	virtControllerVMIWorkQueueTracer.StartTrace(key.(string), "virt-controller VMI workqueue", trace.Field{Key: "Workqueue Key", Value: key})
+	defer virtControllerVMIWorkQueueTracer.StopTrace(key.(string))
+
 	defer c.Queue.Done(key)
 	err := c.execute(key.(string))
 
@@ -373,6 +388,8 @@ func (c *VMIController) hasOwnerVM(vmi *virtv1.VirtualMachineInstance) bool {
 }
 
 func (c *VMIController) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod, dataVolumes []*cdiv1.DataVolume, syncErr syncError) error {
+	key := controller.VirtualMachineInstanceKey(vmi)
+	defer virtControllerVMIWorkQueueTracer.StepTrace(key, "updateStatus", trace.Field{Key: "VMI Name", Value: vmi.Name})
 
 	hasFailedDataVolume := false
 	for _, dataVolume := range dataVolumes {
@@ -608,7 +625,7 @@ func (c *VMIController) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8
 	controller.SetVMIPhaseTransitionTimestamp(vmi, vmiCopy)
 
 	// If we detect a change on the vmi we update the vmi
-	vmiChanged := !reflect.DeepEqual(vmi.Status, vmiCopy.Status) || !reflect.DeepEqual(vmi.Finalizers, vmiCopy.Finalizers) || !reflect.DeepEqual(vmi.Annotations, vmiCopy.Annotations) || !reflect.DeepEqual(vmi.Labels, vmiCopy.Labels)
+	vmiChanged := !equality.Semantic.DeepEqual(vmi.Status, vmiCopy.Status) || !equality.Semantic.DeepEqual(vmi.Finalizers, vmiCopy.Finalizers) || !equality.Semantic.DeepEqual(vmi.Annotations, vmiCopy.Annotations) || !equality.Semantic.DeepEqual(vmi.Labels, vmiCopy.Labels)
 	if vmiChanged {
 		key := controller.VirtualMachineInstanceKey(vmi)
 		c.vmiExpectations.SetExpectations(key, 1, 0)
@@ -650,7 +667,7 @@ func preparePodPatch(oldPod, newPod *k8sv1.Pod) ([]byte, error) {
 func prepareVMIPatch(oldVMI, newVMI *virtv1.VirtualMachineInstance) ([]byte, error) {
 	var patchOps []string
 
-	if !reflect.DeepEqual(newVMI.Status.VolumeStatus, oldVMI.Status.VolumeStatus) {
+	if !equality.Semantic.DeepEqual(newVMI.Status.VolumeStatus, oldVMI.Status.VolumeStatus) {
 		// VolumeStatus changed which means either removed or added volumes.
 		newVolumeStatus, err := json.Marshal(newVMI.Status.VolumeStatus)
 		if err != nil {
@@ -687,7 +704,7 @@ func prepareVMIPatch(oldVMI, newVMI *virtv1.VirtualMachineInstance) ([]byte, err
 		log.Log.V(3).Object(oldVMI).Infof("Patching VMI conditions")
 	}
 
-	if !reflect.DeepEqual(newVMI.Status.ActivePods, oldVMI.Status.ActivePods) {
+	if !equality.Semantic.DeepEqual(newVMI.Status.ActivePods, oldVMI.Status.ActivePods) {
 		newPods, err := json.Marshal(newVMI.Status.ActivePods)
 		if err != nil {
 			return nil, err
@@ -712,7 +729,7 @@ func prepareVMIPatch(oldVMI, newVMI *virtv1.VirtualMachineInstance) ([]byte, err
 		}
 	}
 
-	if !reflect.DeepEqual(oldVMI.Labels, newVMI.Labels) {
+	if !equality.Semantic.DeepEqual(oldVMI.Labels, newVMI.Labels) {
 		newLabelBytes, err := json.Marshal(newVMI.Labels)
 		if err != nil {
 			return nil, err
@@ -897,10 +914,6 @@ func isPodReady(pod *k8sv1.Pod) bool {
 	return pod.Status.Phase == k8sv1.PodRunning
 }
 
-func isPodPending(pod *k8sv1.Pod) bool {
-	return pod.Status.Phase == k8sv1.PodPending
-}
-
 func isPodDownOrGoingDown(pod *k8sv1.Pod) bool {
 	return podIsDown(pod) || isComputeContainerDown(pod) || pod.DeletionTimestamp != nil
 }
@@ -959,6 +972,9 @@ func (c *VMIController) hotplugPodsReady(vmi *virtv1.VirtualMachineInstance, vir
 }
 
 func (c *VMIController) sync(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod, dataVolumes []*cdiv1.DataVolume) syncError {
+	key := controller.VirtualMachineInstanceKey(vmi)
+	defer virtControllerVMIWorkQueueTracer.StepTrace(key, "sync", trace.Field{Key: "VMI Name", Value: vmi.Name})
+
 	if vmi.DeletionTimestamp != nil {
 		err := c.deleteAllMatchingPods(vmi)
 		if err != nil {
@@ -1115,15 +1131,26 @@ func (c *VMIController) updatePVC(old, cur interface{}) {
 	if curPVC.DeletionTimestamp != nil {
 		return
 	}
-	if reflect.DeepEqual(curPVC.Status.Capacity, oldPVC.Status.Capacity) {
+	if equality.Semantic.DeepEqual(curPVC.Status.Capacity, oldPVC.Status.Capacity) {
 		// We only do something when the capacity changes
 		return
 	}
 
-	vmis, err := c.listVMIsMatchingPVC(curPVC.Namespace, curPVC.Name)
-	if err != nil {
-		log.Log.V(4).Object(curPVC).Errorf("Error encountered during pvc update: %v", err)
-		return
+	var err error
+	var vmis []*virtv1.VirtualMachineInstance
+	controllerRef := v1.GetControllerOf(curPVC)
+	if controllerRef != nil && controllerRef.Kind == "DataVolume" {
+		vmis, err = c.listVMIsMatchingDV(curPVC.Namespace, controllerRef.Name)
+		if err != nil {
+			log.Log.V(4).Object(curPVC).Errorf("Error encountered getting VMIs for DataVolume: %v", err)
+			return
+		}
+	} else {
+		vmis, err = c.listVMIsMatchingPVC(curPVC.Namespace, curPVC.Name)
+		if err != nil {
+			log.Log.V(4).Object(curPVC).Errorf("Error encountered getting VMIs for PVC: %v", err)
+			return
+		}
 	}
 	for _, vmi := range vmis {
 		log.Log.V(4).Object(curPVC).Infof("PVC updated for vmi %s", vmi.Name)
@@ -1138,7 +1165,7 @@ func (c *VMIController) addDataVolume(obj interface{}) {
 		return
 	}
 
-	vmis, err := c.listVMIsMatchingPVC(dataVolume.Namespace, dataVolume.Name)
+	vmis, err := c.listVMIsMatchingDV(dataVolume.Namespace, dataVolume.Name)
 	if err != nil {
 		return
 	}
@@ -1157,7 +1184,7 @@ func (c *VMIController) updateDataVolume(old, cur interface{}) {
 		return
 	}
 	if curDataVolume.DeletionTimestamp != nil {
-		labelChanged := !reflect.DeepEqual(curDataVolume.Labels, oldDataVolume.Labels)
+		labelChanged := !equality.Semantic.DeepEqual(curDataVolume.Labels, oldDataVolume.Labels)
 		// having a DataVOlume marked for deletion is enough
 		// to count as a deletion expectation
 		c.deleteDataVolume(curDataVolume)
@@ -1169,7 +1196,7 @@ func (c *VMIController) updateDataVolume(old, cur interface{}) {
 		return
 	}
 
-	vmis, err := c.listVMIsMatchingPVC(curDataVolume.Namespace, curDataVolume.Name)
+	vmis, err := c.listVMIsMatchingDV(curDataVolume.Namespace, curDataVolume.Name)
 	if err != nil {
 		log.Log.V(4).Object(curDataVolume).Errorf("Error encountered during datavolume update: %v", err)
 		return
@@ -1188,16 +1215,16 @@ func (c *VMIController) deleteDataVolume(obj interface{}) {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("couldn't get object from tombstone %+v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(tombstoneGetObjectErrFmt, obj)).Error(deleteNotifFailed)
 			return
 		}
 		dataVolume, ok = tombstone.Obj.(*cdiv1.DataVolume)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a dataVolume %#v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a dataVolume %#v", obj)).Error(deleteNotifFailed)
 			return
 		}
 	}
-	vmis, err := c.listVMIsMatchingPVC(dataVolume.Namespace, dataVolume.Name)
+	vmis, err := c.listVMIsMatchingDV(dataVolume.Namespace, dataVolume.Name)
 	if err != nil {
 		return
 	}
@@ -1245,7 +1272,7 @@ func (c *VMIController) updatePod(old, cur interface{}) {
 	}
 
 	if curPod.DeletionTimestamp != nil {
-		labelChanged := !reflect.DeepEqual(curPod.Labels, oldPod.Labels)
+		labelChanged := !equality.Semantic.DeepEqual(curPod.Labels, oldPod.Labels)
 		// having a pod marked for deletion is enough to count as a deletion expectation
 		c.deletePod(curPod)
 		if labelChanged {
@@ -1257,7 +1284,7 @@ func (c *VMIController) updatePod(old, cur interface{}) {
 
 	curControllerRef := controller.GetControllerOf(curPod)
 	oldControllerRef := controller.GetControllerOf(oldPod)
-	controllerRefChanged := !reflect.DeepEqual(curControllerRef, oldControllerRef)
+	controllerRefChanged := !equality.Semantic.DeepEqual(curControllerRef, oldControllerRef)
 	if controllerRefChanged {
 		// The ControllerRef was changed. Sync the old controller, if any.
 		if vmi := c.resolveControllerRef(oldPod.Namespace, oldControllerRef); vmi != nil {
@@ -1286,12 +1313,12 @@ func (c *VMIController) deletePod(obj interface{}) {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("couldn't get object from tombstone %+v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(tombstoneGetObjectErrFmt, obj)).Error(deleteNotifFailed)
 			return
 		}
 		pod, ok = tombstone.Obj.(*k8sv1.Pod)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a pod %#v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a pod %#v", obj)).Error(deleteNotifFailed)
 			return
 		}
 	}
@@ -1323,12 +1350,12 @@ func (c *VMIController) deleteVirtualMachineInstance(obj interface{}) {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("couldn't get object from tombstone %+v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf(tombstoneGetObjectErrFmt, obj)).Error(deleteNotifFailed)
 			return
 		}
 		vmi, ok = tombstone.Obj.(*virtv1.VirtualMachineInstance)
 		if !ok {
-			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a vmi %#v", obj)).Error("Failed to process delete notification")
+			log.Log.Reason(fmt.Errorf("tombstone contained object that is not a vmi %#v", obj)).Error(deleteNotifFailed)
 			return
 		}
 	}
@@ -1396,21 +1423,33 @@ func (c *VMIController) resolveControllerRef(namespace string, controllerRef *v1
 	return vmi.(*virtv1.VirtualMachineInstance)
 }
 
+func (c *VMIController) listVMIsMatchingDV(namespace string, dvName string) ([]*virtv1.VirtualMachineInstance, error) {
+	// TODO - refactor if/when dv/pvc do not have the same name
+	vmis, err := c.listVMIsMatchingPVC(namespace, dvName)
+	if err != nil {
+		return nil, err
+	}
+	objs, err := c.vmiInformer.GetIndexer().ByIndex("dv", namespace+"/"+dvName)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		vmi := obj.(*virtv1.VirtualMachineInstance)
+		vmis = append(vmis, vmi.DeepCopy())
+	}
+	return vmis, nil
+}
+
 // takes a PVC name and namespace and returns all VMIs from the VMI cache which use this PVC
 func (c *VMIController) listVMIsMatchingPVC(namespace string, pvcName string) ([]*virtv1.VirtualMachineInstance, error) {
-	objs, err := c.vmiInformer.GetIndexer().ByIndex(cache.NamespaceIndex, namespace)
+	objs, err := c.vmiInformer.GetIndexer().ByIndex("pvc", namespace+"/"+pvcName)
 	if err != nil {
 		return nil, err
 	}
 	vmis := []*virtv1.VirtualMachineInstance{}
 	for _, obj := range objs {
 		vmi := obj.(*virtv1.VirtualMachineInstance)
-		for _, volume := range vmi.Spec.Volumes {
-			if volume.VolumeSource.DataVolume != nil && volume.VolumeSource.DataVolume.Name == pvcName ||
-				volume.VolumeSource.PersistentVolumeClaim != nil && volume.VolumeSource.PersistentVolumeClaim.ClaimName == pvcName {
-				vmis = append(vmis, vmi)
-			}
-		}
+		vmis = append(vmis, vmi.DeepCopy())
 	}
 	return vmis, nil
 }
@@ -2036,6 +2075,7 @@ func (c *VMIController) updateVolumeStatus(vmi *virtv1.VirtualMachineInstance, v
 					AccessModes:  pvc.Spec.AccessModes,
 					VolumeMode:   pvc.Spec.VolumeMode,
 					Capacity:     pvc.Status.Capacity,
+					Requests:     pvc.Spec.Resources.Requests,
 					Preallocated: kubevirttypes.IsPreallocated(pvc.ObjectMeta.Annotations),
 				}
 				filesystemOverhead, err := c.getFilesystemOverhead(pvc)
