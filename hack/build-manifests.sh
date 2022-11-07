@@ -33,7 +33,7 @@ rm -rf "${TESTS_OUT_DIR}/tools"
 mkdir -p "${TESTS_OUT_DIR}/tools"
 templator=${TESTS_OUT_DIR}/tools/manifest-templator
 
-if [ -z "${GO_BUILD}" ]; then
+if [ "${KUBEVIRT_NO_BAZEL}" != "true" ]; then
     bazel run \
         --config=${HOST_ARCHITECTURE} \
         //:build-manifest-templator -- ${templator}
@@ -95,8 +95,11 @@ for arg in $args; do
         --virt-controller-sha=${VIRT_CONTROLLER_SHA} \
         --virt-handler-sha=${VIRT_HANDLER_SHA} \
         --virt-launcher-sha=${VIRT_LAUNCHER_SHA} \
+        --virt-exportproxy-sha=${VIRT_EXPORTPROXY_SHA} \
+        --virt-exportserver-sha=${VIRT_EXPORTSERVER_SHA} \
         --gs-sha=${GS_SHA} \
         --feature-gates=${feature_gates} \
+        --infra-replicas=${infra_replicas} \
         >${outfile}
 done
 

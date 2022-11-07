@@ -20,11 +20,10 @@
 package config
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 
@@ -38,13 +37,13 @@ var _ = Describe("ConfigMap", func() {
 	BeforeEach(func() {
 		var err error
 
-		ConfigMapSourceDir, err = ioutil.TempDir("", "configmap")
+		ConfigMapSourceDir, err = os.MkdirTemp("", "configmap")
 		Expect(err).NotTo(HaveOccurred())
 		os.MkdirAll(filepath.Join(ConfigMapSourceDir, "configmap-volume", "test-dir"), 0755)
 		os.OpenFile(filepath.Join(ConfigMapSourceDir, "configmap-volume", "test-dir", "test-file1"), os.O_RDONLY|os.O_CREATE, 0666)
 		os.OpenFile(filepath.Join(ConfigMapSourceDir, "configmap-volume", "test-file2"), os.O_RDONLY|os.O_CREATE, 0666)
 
-		ConfigMapDisksDir, err = ioutil.TempDir("", "configmap-disks")
+		ConfigMapDisksDir, err = os.MkdirTemp("", "configmap-disks")
 		Expect(err).NotTo(HaveOccurred())
 	})
 

@@ -20,10 +20,9 @@
 package cli
 
 import (
-	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -31,9 +30,7 @@ var _ = Describe("Libvirt Suite", func() {
 	Context("Upon attempt to connect to Libvirt", func() {
 		It("should time out while waiting for libvirt", func() {
 			_, err := NewConnectionWithTimeout("http://", "", "", 1*time.Microsecond, 100*time.Millisecond, 500*time.Millisecond)
-			msg := fmt.Sprintf("%v", err)
-			Expect(err).To(HaveOccurred())
-			Expect(msg).To(Equal("cannot connect to libvirt daemon: timed out waiting for the condition"))
+			Expect(err).To(MatchError("cannot connect to libvirt daemon: timed out waiting for the condition"))
 		})
 	})
 })

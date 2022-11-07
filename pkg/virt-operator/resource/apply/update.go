@@ -1,6 +1,6 @@
 package apply
 
-func (r *Reconciler) updateKubeVirtSystem(daemonSetsRolledOver, controllerDeploymentsRolledOver bool) (bool, error) {
+func (r *Reconciler) updateKubeVirtSystem(controllerDeploymentsRolledOver bool) (bool, error) {
 	// UPDATE PATH IS
 	// 1. daemonsets - ensures all compute nodes are updated to handle new features
 	// 2. wait for daemonsets to roll over
@@ -10,16 +10,10 @@ func (r *Reconciler) updateKubeVirtSystem(daemonSetsRolledOver, controllerDeploy
 
 	// create/update Daemonsets
 	for _, daemonSet := range r.targetStrategy.DaemonSets() {
-		err := r.syncDaemonSet(daemonSet)
-		if err != nil {
+		finished, err := r.syncDaemonSet(daemonSet)
+		if !finished || err != nil {
 			return false, err
 		}
-	}
-
-	// wait for daemonsets
-	if !daemonSetsRolledOver {
-		// not rolled out yet
-		return false, nil
 	}
 
 	// create/update Controller Deployments
@@ -40,9 +34,24 @@ func (r *Reconciler) updateKubeVirtSystem(daemonSetsRolledOver, controllerDeploy
 		return false, nil
 	}
 
+	// create/update ExportProxy Deployments
+	for _, deployment := range r.targetStrategy.ExportProxyDeployments() {
+		if r.exportProxyEnabled() {
+			deployment, err := r.syncDeployment(deployment)
+			if err != nil {
+				return false, err
+			}
+			err = r.syncPodDisruptionBudgetForDeployment(deployment)
+			if err != nil {
+				return false, err
+			}
+		} else if err := r.deleteDeployment(deployment); err != nil {
+			return false, err
+		}
+	}
+
 	// create/update API Deployments
 	for _, deployment := range r.targetStrategy.ApiDeployments() {
-		deployment := deployment.DeepCopy()
 		deployment, err := r.syncDeployment(deployment)
 		if err != nil {
 			return false, err

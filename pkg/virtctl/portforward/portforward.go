@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
@@ -157,7 +158,7 @@ func (o *PortForward) startStdoutStream(namespace, name string, port forwardedPo
 		return err
 	}
 
-	glog.Infof("forwarding to %s/%s:%d", namespace, name, port.remote)
+	glog.V(3).Infof("forwarding to %s/%s:%d", namespace, name, port.remote)
 	if err := streamer.Stream(kubecli.StreamOptions{
 		In:  os.Stdin,
 		Out: os.Stdout,

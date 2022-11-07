@@ -20,7 +20,7 @@
 package agentpoller
 
 import (
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -126,7 +126,6 @@ var _ = Describe("Qemu agent poller", func() {
 			expectedStatuses := []api.InterfaceStatus{}
 			expectedStatuses = append(expectedStatuses,
 				api.InterfaceStatus{
-					Name:          "",
 					Mac:           "0a:58:0a:f4:00:51",
 					Ip:            "10.244.0.81",
 					IPs:           []string{"10.244.0.81", "fe80::858:aff:fef4:51"},
@@ -134,7 +133,6 @@ var _ = Describe("Qemu agent poller", func() {
 				})
 			expectedStatuses = append(expectedStatuses,
 				api.InterfaceStatus{
-					Name:          "",
 					Mac:           "02:00:00:b0:17:66",
 					Ip:            "fe80::ff:feb0:1766",
 					IPs:           []string{"fe80::ff:feb0:1766"},
@@ -147,66 +145,6 @@ var _ = Describe("Qemu agent poller", func() {
 					IPs:           []string{"1.2.3.4", "fe80::ff:1111:2222"},
 					InterfaceName: "eth5",
 				})
-			Expect(interfaceStatuses).To(Equal(expectedStatuses))
-		})
-
-		It("should merge QEMU info and agent info", func() {
-			interfaceStatuses, err := parseInterfaces(JSONInput)
-			Expect(err).ToNot(HaveOccurred(), "should parse network inferfaces")
-
-			domInterfaces := []api.Interface{
-				{
-					MAC: &api.MAC{
-						MAC: "0a:58:0a:f4:00:51",
-					},
-					Alias: api.NewUserDefinedAlias("ovs"),
-				},
-				{
-					MAC: &api.MAC{
-						MAC: "02:00:00:b0:17:66",
-					},
-					Alias: api.NewUserDefinedAlias("net1"),
-				},
-				{
-					MAC: &api.MAC{
-						MAC: "02:11:11:b0:17:66",
-					},
-					Alias: api.NewUserDefinedAlias("net2"),
-				},
-			}
-
-			interfaceStatuses = MergeAgentStatusesWithDomainData(domInterfaces, interfaceStatuses)
-
-			expectedStatuses := []api.InterfaceStatus{}
-			expectedStatuses = append(expectedStatuses,
-				api.InterfaceStatus{
-					Name:          "ovs",
-					Mac:           "0a:58:0a:f4:00:51",
-					Ip:            "10.244.0.81",
-					IPs:           []string{"10.244.0.81", "fe80::858:aff:fef4:51"},
-					InterfaceName: "eth0",
-				})
-			expectedStatuses = append(expectedStatuses,
-				api.InterfaceStatus{
-					Name:          "net1",
-					Mac:           "02:00:00:b0:17:66",
-					Ip:            "fe80::ff:feb0:1766",
-					IPs:           []string{"fe80::ff:feb0:1766"},
-					InterfaceName: "eth1",
-				})
-			expectedStatuses = append(expectedStatuses,
-				api.InterfaceStatus{
-					Mac:           "02:00:00:22:11:11",
-					Ip:            "1.2.3.4",
-					IPs:           []string{"1.2.3.4", "fe80::ff:1111:2222"},
-					InterfaceName: "eth5",
-				})
-			expectedStatuses = append(expectedStatuses,
-				api.InterfaceStatus{
-					Name: "net2",
-					Mac:  "02:11:11:b0:17:66",
-				})
-
 			Expect(interfaceStatuses).To(Equal(expectedStatuses))
 		})
 
@@ -259,12 +197,8 @@ var _ = Describe("Qemu agent poller", func() {
 
 		It("should parse FSFreezeStatus", func() {
 			jsonInput := `{"return":"frozen"}`
-
-			fsFreezeStatus, err := ParseFSFreezeStatus(jsonInput)
 			expectedFSFreezeStatus := api.FSFreeze{Status: "frozen"}
-
-			Expect(err).ToNot(HaveOccurred(), "FSFreezeStatus should be parsed normally")
-			Expect(fsFreezeStatus).To(Equal(expectedFSFreezeStatus))
+			Expect(ParseFSFreezeStatus(jsonInput)).To(Equal(expectedFSFreezeStatus))
 		})
 
 		It("should not parse FSFreezeStatus", func() {
@@ -286,11 +220,7 @@ var _ = Describe("Qemu agent poller", func() {
                 }
             }`
 
-			hostname, err := parseHostname(jsonInput)
-			expectedHostname := "TestHost"
-
-			Expect(err).ToNot(HaveOccurred(), "hostname should be parser normally")
-			Expect(hostname).To(Equal(expectedHostname))
+			Expect(parseHostname(jsonInput)).To(Equal("TestHost"))
 		})
 
 		It("should parse Agent", func() {
@@ -300,11 +230,8 @@ var _ = Describe("Qemu agent poller", func() {
                 }
             }`
 
-			agent, err := parseAgent(jsonInput)
 			expectedAgent := AgentInfo{Version: "4.1"}
-
-			Expect(err).ToNot(HaveOccurred(), "agent version should be parsed normally")
-			Expect(agent).To(Equal(expectedAgent))
+			Expect(parseAgent(jsonInput)).To(Equal(expectedAgent))
 		})
 
 		It("should strip Agent response", func() {
@@ -325,14 +252,11 @@ var _ = Describe("Qemu agent poller", func() {
                 }
             }`
 
-			timezone, err := parseTimezone(jsonInput)
 			expectedTimezone := api.Timezone{
 				Zone:   "Prague",
 				Offset: 2,
 			}
-
-			Expect(err).ToNot(HaveOccurred(), "timezone should be parsed normally")
-			Expect(timezone).To(Equal(expectedTimezone))
+			Expect(parseTimezone(jsonInput)).To(Equal(expectedTimezone))
 		})
 
 		It("should parse Filesystem", func() {
@@ -349,7 +273,6 @@ var _ = Describe("Qemu agent poller", func() {
                 ]
             }`
 
-			filesystem, err := parseFilesystem(jsonInput)
 			expectedFilesystem := []api.Filesystem{
 				{
 					Name:       "main",
@@ -359,9 +282,7 @@ var _ = Describe("Qemu agent poller", func() {
 					UsedBytes:  33333,
 				},
 			}
-
-			Expect(err).ToNot(HaveOccurred(), "filesystem should be parsed normally")
-			Expect(filesystem).To(Equal(expectedFilesystem))
+			Expect(parseFilesystem(jsonInput)).To(Equal(expectedFilesystem))
 		})
 
 		It("should parse Users", func() {
@@ -376,7 +297,6 @@ var _ = Describe("Qemu agent poller", func() {
                 ]
             }`
 
-			users, err := parseUsers(jsonInput)
 			expectedUsers := []api.User{
 				{
 					Name:      "bob",
@@ -384,9 +304,7 @@ var _ = Describe("Qemu agent poller", func() {
 					LoginTime: 99999,
 				},
 			}
-
-			Expect(err).ToNot(HaveOccurred(), "users should be parsed normally")
-			Expect(users).To(Equal(expectedUsers))
+			Expect(parseUsers(jsonInput)).To(Equal(expectedUsers))
 		})
 	})
 })

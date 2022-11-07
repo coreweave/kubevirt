@@ -19,8 +19,10 @@ import (
 	virtv1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/util/lookup"
+	k6ttypes "kubevirt.io/kubevirt/pkg/util/types"
 )
 
 const (
@@ -85,6 +87,7 @@ func (c *NodeController) enqueueNode(obj interface{}) {
 	key, err := controller.KeyFunc(node)
 	if err != nil {
 		logger.Object(node).Reason(err).Error("Failed to extract key from node.")
+		return
 	}
 	c.Queue.Add(key)
 }
@@ -171,7 +174,9 @@ func (c *NodeController) execute(key string) error {
 
 	if unresponsive {
 		if nodeIsSchedulable(node) {
-			c.markNodeAsUnresponsive(node, logger)
+			if err := c.markNodeAsUnresponsive(node, logger); err != nil {
+				return err
+			}
 		}
 
 		err = c.checkNodeForOrphanedAndErroredVMIs(key, node, logger)
@@ -247,8 +252,11 @@ func (c *NodeController) createAndApplyFailedVMINodeUnresponsivePatch(vmi *virtv
 	c.recorder.Event(vmi, v1.EventTypeNormal, NodeUnresponsiveReason, fmt.Sprintf("virt-handler on node %s is not responsive, marking VMI as failed", vmi.Status.NodeName))
 	logger.V(2).Infof("Moving vmi %s in namespace %s on unresponsive node to failed state", vmi.Name, vmi.Namespace)
 
-	patch := generateFailedVMIPatch(vmi.Status.Reason)
-	_, err := c.clientset.VirtualMachineInstance(vmi.Namespace).Patch(vmi.Name, types.JSONPatchType, patch, &metav1.PatchOptions{})
+	patch, err := generateFailedVMIPatch(vmi.Status.Reason)
+	if err != nil {
+		return err
+	}
+	_, err = c.clientset.VirtualMachineInstance(vmi.Namespace).Patch(vmi.Name, types.JSONPatchType, patch, &metav1.PatchOptions{})
 	if err != nil {
 		logger.Reason(err).Errorf("Failed to move vmi %s in namespace %s to final state", vmi.Name, vmi.Namespace)
 		return err
@@ -257,14 +265,24 @@ func (c *NodeController) createAndApplyFailedVMINodeUnresponsivePatch(vmi *virtv
 	return nil
 }
 
-func generateFailedVMIPatch(reason string) []byte {
-	phasePatch := fmt.Sprintf(`{ "op": "replace", "path": "/status/phase", "value": "%s" }`, virtv1.Failed)
-	operation := "add"
+func generateFailedVMIPatch(reason string) ([]byte, error) {
+	reasonOp := "add"
 	if reason != "" {
-		operation = "replace"
+		reasonOp = "replace"
 	}
-	reasonPatch := fmt.Sprintf(`{ "op": "%s", "path": "/status/reason", "value": "%s" }`, operation, NodeUnresponsiveReason)
-	return []byte(fmt.Sprintf("[%s, %s]", phasePatch, reasonPatch))
+
+	return k6ttypes.GeneratePatchPayload(
+		k6ttypes.PatchOperation{
+			Op:    k6ttypes.PatchReplaceOp,
+			Path:  "/status/phase",
+			Value: virtv1.Failed,
+		},
+		k6ttypes.PatchOperation{
+			Op:    reasonOp,
+			Path:  "/status/reason",
+			Value: NodeUnresponsiveReason,
+		},
+	)
 }
 
 func (c *NodeController) requeueIfExists(key string, node *v1.Node) {

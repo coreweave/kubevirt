@@ -1,4 +1,4 @@
-// +build amd64
+//go:build amd64
 
 /*
  * This file is part of the KubeVirt project
@@ -56,6 +56,7 @@ import (
 	"unsafe"
 
 	"kubevirt.io/client-go/log"
+
 	util "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 )
 

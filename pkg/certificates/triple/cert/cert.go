@@ -18,17 +18,14 @@ package cert
 
 import (
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"math"
 	"math/big"
+	mathrand "math/rand"
 	"net"
 	"time"
 )
@@ -39,10 +36,11 @@ const (
 
 // Config contains the basic fields required for creating a certificate
 type Config struct {
-	CommonName   string
-	Organization []string
-	AltNames     AltNames
-	Usages       []x509.ExtKeyUsage
+	CommonName          string
+	Organization        []string
+	AltNames            AltNames
+	Usages              []x509.ExtKeyUsage
+	NotBefore, NotAfter *time.Time
 }
 
 // AltNames contains the domain names and IP addresses that will be added
@@ -62,7 +60,7 @@ func NewPrivateKey() (*rsa.PrivateKey, error) {
 func NewSelfSignedCACert(cfg Config, key crypto.Signer, duration time.Duration) (*x509.Certificate, error) {
 	now := time.Now()
 	tmpl := x509.Certificate{
-		SerialNumber: new(big.Int).SetInt64(0),
+		SerialNumber: new(big.Int).SetInt64(randomSerialNumber()),
 		Subject: pkix.Name{
 			CommonName:   cfg.CommonName,
 			Organization: cfg.Organization,
@@ -72,6 +70,13 @@ func NewSelfSignedCACert(cfg Config, key crypto.Signer, duration time.Duration) 
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
+		DNSNames:              cfg.AltNames.DNSNames,
+	}
+	if cfg.NotBefore != nil {
+		tmpl.NotBefore = *cfg.NotBefore
+	}
+	if cfg.NotAfter != nil {
+		tmpl.NotAfter = *cfg.NotAfter
 	}
 
 	certDERBytes, err := x509.CreateCertificate(cryptorand.Reader, &tmpl, &tmpl, key.Public(), key)
@@ -83,7 +88,7 @@ func NewSelfSignedCACert(cfg Config, key crypto.Signer, duration time.Duration) 
 
 // NewSignedCert creates a signed certificate using the given CA certificate and key
 func NewSignedCert(cfg Config, key crypto.Signer, caCert *x509.Certificate, caKey crypto.Signer, duration time.Duration) (*x509.Certificate, error) {
-	serial, err := rand.Int(rand.Reader, new(big.Int).SetInt64(math.MaxInt64))
+	serial, err := cryptorand.Int(cryptorand.Reader, new(big.Int).SetInt64(math.MaxInt64))
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +112,12 @@ func NewSignedCert(cfg Config, key crypto.Signer, caCert *x509.Certificate, caKe
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  cfg.Usages,
 	}
+	if cfg.NotBefore != nil {
+		certTmpl.NotBefore = *cfg.NotBefore
+	}
+	if cfg.NotAfter != nil {
+		certTmpl.NotAfter = *cfg.NotAfter
+	}
 	certDERBytes, err := x509.CreateCertificate(cryptorand.Reader, &certTmpl, caCert, key.Public(), caKey)
 	if err != nil {
 		return nil, err
@@ -114,21 +125,11 @@ func NewSignedCert(cfg Config, key crypto.Signer, caCert *x509.Certificate, caKe
 	return x509.ParseCertificate(certDERBytes)
 }
 
-// MakeEllipticPrivateKeyPEM creates an ECDSA private key
-func MakeEllipticPrivateKeyPEM() ([]byte, error) {
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
-	if err != nil {
-		return nil, err
-	}
-
-	derBytes, err := x509.MarshalECPrivateKey(privateKey)
-	if err != nil {
-		return nil, err
-	}
-
-	privateKeyPemBlock := &pem.Block{
-		Type:  ECPrivateKeyBlockType,
-		Bytes: derBytes,
-	}
-	return pem.EncodeToMemory(privateKeyPemBlock), nil
+// randomSerialNumber returns a random int64 serial number based on
+// time.Now. It is defined separately from the generator interface so
+// that the caller doesn't have to worry about an input template or
+// error - these are unnecessary when creating a random serial.
+func randomSerialNumber() int64 {
+	r := mathrand.New(mathrand.NewSource(time.Now().UTC().UnixNano()))
+	return r.Int63()
 }

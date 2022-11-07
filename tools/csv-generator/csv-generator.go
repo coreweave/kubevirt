@@ -40,12 +40,15 @@ func main() {
 	controllerSha := flag.String("controllerSha", "", "virt-controller image sha")
 	handlerSha := flag.String("handlerSha", "", "virt-handler image sha")
 	launcherSha := flag.String("launcherSha", "", "virt-launcher image sha")
+	exportProxySha := flag.String("exportProxySha", "", "virt-exportproxy image sha")
+	exportServerSha := flag.String("exportServerSha", "", "virt-exportserver image sha")
 	gsSha := flag.String("gsSha", "", "libguestfs-tools image sha")
 	kubeVirtLogo := flag.String("kubevirtLogo", "", "kubevirt logo data in base64")
 	csvVersion := flag.String("csvVersion", "", "the CSV version being generated")
 	replacesCsvVersion := flag.String("replacesCsvVersion", "", "the CSV version being replaced by this generated CSV")
 	csvCreatedAtTimestamp := flag.String("csvCreatedAtTimestamp", "", "creation timestamp set in the 'createdAt' annotation on the CSV")
 	dumpCRDs := flag.Bool("dumpCRDs", false, "dump CRDs along with CSV manifests to stdout")
+	virtOperatorImage := flag.String("virt-operator-image", "", "custom image for virt-operator")
 
 	flag.Parse()
 
@@ -62,11 +65,14 @@ func main() {
 		VirtControllerSha:    *controllerSha,
 		VirtHandlerSha:       *handlerSha,
 		VirtLauncherSha:      *launcherSha,
+		VirtExportProxySha:   *exportProxySha,
+		VirtExportServerSha:  *exportServerSha,
 		GsSha:                *gsSha,
 		ReplacesCsvVersion:   *replacesCsvVersion,
 		IconBase64:           *kubeVirtLogo,
 		Replicas:             2,
 		CreatedAtTimestamp:   *csvCreatedAtTimestamp,
+		VirtOperatorImage:    *virtOperatorImage,
 	}
 
 	operatorCsv, err := csv.NewClusterServiceVersion(&csvData)

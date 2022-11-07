@@ -23,13 +23,17 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice"
+
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"libvirt.org/go/libvirt"
 
 	v1 "kubevirt.io/api/core/v1"
+
+	netsriov "kubevirt.io/kubevirt/pkg/network/sriov"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice/sriov"
 )
@@ -162,6 +166,61 @@ var _ = Describe("SRIOV HostDevice", func() {
 			Expect(devices, err).To(Equal([]api.HostDevice{expectHostDevice1}))
 		})
 
+		DescribeTable("create two devices with custom guest PCI address",
+			func(iface1, iface2 v1.Interface) {
+				var expectedGuestPCIAddress1 *api.Address
+				var expectedGuestPCIAddress2 *api.Address
+
+				var err error
+				if iface1.PciAddress != "" {
+					expectedGuestPCIAddress1, err = device.NewPciAddressField(iface1.PciAddress)
+					Expect(err).NotTo(HaveOccurred())
+				}
+
+				if iface2.PciAddress != "" {
+					expectedGuestPCIAddress2, err = device.NewPciAddressField(iface2.PciAddress)
+					Expect(err).NotTo(HaveOccurred())
+				}
+
+				pool := newPCIAddressPoolStub("0000:81:00.0", "0000:81:01.0")
+				hostPCIAddress1 := api.Address{Type: "pci", Domain: "0x0000", Bus: "0x81", Slot: "0x00", Function: "0x0"}
+				hostPCIAddress2 := api.Address{Type: "pci", Domain: "0x0000", Bus: "0x81", Slot: "0x01", Function: "0x0"}
+
+				devices, err := sriov.CreateHostDevicesFromIfacesAndPool([]v1.Interface{iface1, iface2}, pool)
+				Expect(err).NotTo(HaveOccurred())
+
+				expectHostDevice1 := api.HostDevice{
+					Alias:   newSRIOVAlias(netname1),
+					Source:  api.HostDeviceSource{Address: &hostPCIAddress1},
+					Address: expectedGuestPCIAddress1,
+					Type:    "pci",
+					Managed: "no",
+				}
+
+				expectHostDevice2 := api.HostDevice{
+					Alias:   newSRIOVAlias(netname2),
+					Source:  api.HostDeviceSource{Address: &hostPCIAddress2},
+					Address: expectedGuestPCIAddress2,
+					Type:    "pci",
+					Managed: "no",
+				}
+
+				Expect(devices, err).To(Equal([]api.HostDevice{expectHostDevice1, expectHostDevice2}))
+			},
+			Entry("both interfaces have a custom guest PCI address",
+				newSRIOVInterfaceWithPCIAddress(netname1, "0000:20:00.0"),
+				newSRIOVInterfaceWithPCIAddress(netname2, "0000:20:01.0"),
+			),
+			Entry("only the first interface has a custom guest PCI address",
+				newSRIOVInterfaceWithPCIAddress(netname1, "0000:20:00.0"),
+				newSRIOVInterface(netname2),
+			),
+			Entry("only the second interface has a custom guest PCI address",
+				newSRIOVInterface(netname1),
+				newSRIOVInterfaceWithPCIAddress(netname2, "0000:20:01.0"),
+			),
+		)
+
 		It("creates 1 device that includes boot-order", func() {
 			iface := newSRIOVInterface(netname1)
 			val := uint(1)
@@ -180,38 +239,62 @@ var _ = Describe("SRIOV HostDevice", func() {
 			}
 			Expect(devices, err).To(Equal([]api.HostDevice{expectHostDevice1}))
 		})
-	})
 
-	Context("filter", func() {
-		It("filters 0 SRIOV devices, given non-SRIOV devices", func() {
-			var domainSpec api.DomainSpec
+		DescribeTable("create two devices with custom boot-order",
+			func(iface1, iface2 v1.Interface) {
+				var expectedBootOrder1 *api.BootOrder
+				var expectedBootOrder2 *api.BootOrder
 
-			domainSpec.Devices.HostDevices = append(
-				domainSpec.Devices.HostDevices,
-				api.HostDevice{Alias: api.NewUserDefinedAlias("non-sriov1")},
-				api.HostDevice{Alias: api.NewUserDefinedAlias("non-sriov2")},
-			)
-			Expect(sriov.FilterHostDevices(&domainSpec)).To(BeEmpty())
-		})
+				if iface1.BootOrder != nil {
+					expectedBootOrder1 = &api.BootOrder{Order: *iface1.BootOrder}
+				}
 
-		It("filters 2 SRIOV devices, given 2 SRIOV devices and 2 non-SRIOV devices", func() {
-			var domainSpec api.DomainSpec
+				if iface2.BootOrder != nil {
+					expectedBootOrder2 = &api.BootOrder{Order: *iface2.BootOrder}
+				}
 
-			hostDevice1 := api.HostDevice{Alias: api.NewUserDefinedAlias(sriov.AliasPrefix + "is-sriov1")}
-			hostDevice2 := api.HostDevice{Alias: api.NewUserDefinedAlias(sriov.AliasPrefix + "is-sriov2")}
-			domainSpec.Devices.HostDevices = append(
-				domainSpec.Devices.HostDevices,
-				hostDevice1,
-				api.HostDevice{Alias: api.NewUserDefinedAlias("non-sriov1")},
-				hostDevice2,
-				api.HostDevice{Alias: api.NewUserDefinedAlias("non-sriov2")},
-			)
-			Expect(sriov.FilterHostDevices(&domainSpec)).To(Equal([]api.HostDevice{hostDevice1, hostDevice2}))
-		})
+				pool := newPCIAddressPoolStub("0000:81:00.0", "0000:81:01.0")
+				hostPCIAddress1 := api.Address{Type: "pci", Domain: "0x0000", Bus: "0x81", Slot: "0x00", Function: "0x0"}
+				hostPCIAddress2 := api.Address{Type: "pci", Domain: "0x0000", Bus: "0x81", Slot: "0x01", Function: "0x0"}
+
+				devices, err := sriov.CreateHostDevicesFromIfacesAndPool([]v1.Interface{iface1, iface2}, pool)
+				Expect(err).NotTo(HaveOccurred())
+
+				expectHostDevice1 := api.HostDevice{
+					Alias:     newSRIOVAlias(netname1),
+					Source:    api.HostDeviceSource{Address: &hostPCIAddress1},
+					Type:      "pci",
+					Managed:   "no",
+					BootOrder: expectedBootOrder1,
+				}
+
+				expectHostDevice2 := api.HostDevice{
+					Alias:     newSRIOVAlias(netname2),
+					Source:    api.HostDeviceSource{Address: &hostPCIAddress2},
+					Type:      "pci",
+					Managed:   "no",
+					BootOrder: expectedBootOrder2,
+				}
+
+				Expect(devices, err).To(Equal([]api.HostDevice{expectHostDevice1, expectHostDevice2}))
+			},
+			Entry("both interfaces have a custom bootOrder",
+				newSRIOVInterfaceWithBootOrder(netname1, 1),
+				newSRIOVInterfaceWithBootOrder(netname2, 2),
+			),
+			Entry("only the first interface has a custom bootOrder",
+				newSRIOVInterfaceWithBootOrder(netname1, 1),
+				newSRIOVInterface(netname2),
+			),
+			Entry("only the second interface has a custom bootOrder",
+				newSRIOVInterface(netname1),
+				newSRIOVInterfaceWithBootOrder(netname2, 2),
+			),
+		)
 	})
 
 	Context("safe detachment", func() {
-		hostDevice := api.HostDevice{Alias: api.NewUserDefinedAlias(sriov.AliasPrefix + "net1")}
+		hostDevice := api.HostDevice{Alias: api.NewUserDefinedAlias(netsriov.AliasPrefix + "net1")}
 
 		It("ignores an empty list of devices", func() {
 			domainSpec := newDomainSpec()
@@ -220,7 +303,7 @@ var _ = Describe("SRIOV HostDevice", func() {
 			c.sendEvent("foo")
 			d := deviceDetacherStub{}
 			Expect(sriov.SafelyDetachHostDevices(domainSpec, c, d, 0)).To(Succeed())
-			Expect(len(c.EventChannel())).To(Equal(1))
+			Expect(c.EventChannel()).To(HaveLen(1))
 		})
 
 		It("fails to register a callback", func() {
@@ -230,7 +313,7 @@ var _ = Describe("SRIOV HostDevice", func() {
 			c.sendEvent("foo")
 			d := deviceDetacherStub{}
 			Expect(sriov.SafelyDetachHostDevices(domainSpec, c, d, 0)).To(HaveOccurred())
-			Expect(len(c.EventChannel())).To(Equal(1))
+			Expect(c.EventChannel()).To(HaveLen(1))
 		})
 
 		It("fails to detach device", func() {
@@ -240,7 +323,7 @@ var _ = Describe("SRIOV HostDevice", func() {
 			c.sendEvent("foo")
 			d := deviceDetacherStub{fail: true}
 			Expect(sriov.SafelyDetachHostDevices(domainSpec, c, d, 0)).To(HaveOccurred())
-			Expect(len(c.EventChannel())).To(Equal(1))
+			Expect(c.EventChannel()).To(HaveLen(1))
 		})
 
 		It("fails on timeout due to no detach event", func() {
@@ -258,7 +341,7 @@ var _ = Describe("SRIOV HostDevice", func() {
 			c.sendEvent("non-sriov")
 			d := deviceDetacherStub{}
 			Expect(sriov.SafelyDetachHostDevices(domainSpec, c, d, 10*time.Millisecond)).To(HaveOccurred())
-			Expect(len(c.EventChannel())).To(Equal(0))
+			Expect(c.EventChannel()).To(BeEmpty())
 		})
 
 		// Failure to deregister the callback only emits a logging error.
@@ -272,7 +355,7 @@ var _ = Describe("SRIOV HostDevice", func() {
 		})
 
 		It("succeeds detaching 2 sriov devices", func() {
-			hostDevice2 := api.HostDevice{Alias: api.NewUserDefinedAlias(sriov.AliasPrefix + "net2")}
+			hostDevice2 := api.HostDevice{Alias: api.NewUserDefinedAlias(netsriov.AliasPrefix + "net2")}
 			domainSpec := newDomainSpec(hostDevice, hostDevice2)
 
 			c := newCallbackerStub(false, false)
@@ -281,140 +364,6 @@ var _ = Describe("SRIOV HostDevice", func() {
 			d := deviceDetacherStub{}
 			Expect(sriov.SafelyDetachHostDevices(domainSpec, c, d, 10*time.Millisecond)).To(Succeed())
 		})
-	})
-
-	Context("attachment", func() {
-		hostDevice := api.HostDevice{Alias: api.NewUserDefinedAlias("net1")}
-
-		It("ignores nil list of devices", func() {
-			Expect(sriov.AttachHostDevices(deviceAttacherStub{}, nil)).Should(Succeed())
-		})
-
-		It("ignores an empty list of devices", func() {
-			Expect(sriov.AttachHostDevices(deviceAttacherStub{}, []api.HostDevice{})).Should(Succeed())
-		})
-
-		It("succeeds to attach device", func() {
-			Expect(sriov.AttachHostDevices(deviceAttacherStub{}, []api.HostDevice{hostDevice})).Should(Succeed())
-		})
-
-		It("succeeds to attach more than one device", func() {
-			hostDevice2 := api.HostDevice{Alias: api.NewUserDefinedAlias("net2")}
-
-			Expect(sriov.AttachHostDevices(deviceAttacherStub{}, []api.HostDevice{hostDevice, hostDevice2})).Should(Succeed())
-		})
-
-		It("fails to attach device", func() {
-			obj := deviceAttacherStub{fail: true}
-			Expect(sriov.AttachHostDevices(obj, []api.HostDevice{hostDevice})).ShouldNot(Succeed())
-		})
-
-		It("error should contain at least the Alias of each device that failed to attach", func() {
-			obj := deviceAttacherStub{fail: true}
-			hostDevice2 := api.HostDevice{Alias: api.NewUserDefinedAlias("net2")}
-			err := sriov.AttachHostDevices(obj, []api.HostDevice{hostDevice, hostDevice2})
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(And(
-				ContainSubstring(hostDevice.Alias.GetName()),
-				ContainSubstring(hostDevice2.Alias.GetName())))
-		})
-	})
-
-	Context("difference", func() {
-		table.DescribeTable("should return the correct host-devices set comparing by host-devices's Alias.Name",
-			func(hostDevices, removeHostDevices, expectedHostDevices []api.HostDevice) {
-				Expect(sriov.DifferenceHostDevicesByAlias(hostDevices, removeHostDevices)).To(ConsistOf(expectedHostDevices))
-			},
-			table.Entry("empty set and zero elements to filter",
-				// slice A
-				[]api.HostDevice{},
-				// slice B
-				[]api.HostDevice{},
-				// expected
-				[]api.HostDevice{},
-			),
-			table.Entry("empty set and at least one element to filter",
-				// slice A
-				[]api.HostDevice{},
-				// slice B
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-					{Alias: api.NewUserDefinedAlias("hostdev1")},
-				},
-				// expected
-				[]api.HostDevice{},
-			),
-			table.Entry("valid set and zero elements to filter",
-				// slice A
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev1")},
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-					{Alias: api.NewUserDefinedAlias("hostdev3")},
-				},
-				// slice B
-				[]api.HostDevice{},
-				// expected
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev1")},
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-					{Alias: api.NewUserDefinedAlias("hostdev3")},
-				},
-			),
-			table.Entry("valid set and at least one element to filter",
-				// slice A
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev4")},
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-					{Alias: api.NewUserDefinedAlias("hostdev3")},
-					{Alias: api.NewUserDefinedAlias("hostdev1")},
-				},
-				// slice B
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev4")},
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-				},
-				// expected
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev1")},
-					{Alias: api.NewUserDefinedAlias("hostdev3")},
-				},
-			),
-
-			table.Entry("valid set and a set that includes all elements from the first set",
-				// slice A
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev4")},
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-				},
-				// slice B
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev4")},
-					{Alias: api.NewUserDefinedAlias("hostdev1")},
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-					{Alias: api.NewUserDefinedAlias("hostdev3")},
-				},
-				// expected
-				[]api.HostDevice{},
-			),
-			table.Entry("valid set and larger set to to filter",
-				// slice A
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev4")},
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-				},
-				// slice B
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev4")},
-					{Alias: api.NewUserDefinedAlias("hostdev1")},
-					{Alias: api.NewUserDefinedAlias("hostdev7")},
-					{Alias: api.NewUserDefinedAlias("hostdev3")},
-				},
-				// expected
-				[]api.HostDevice{
-					{Alias: api.NewUserDefinedAlias("hostdev2")},
-				},
-			),
-		)
 	})
 })
 
@@ -425,7 +374,21 @@ func newDomainSpec(hostDevices ...api.HostDevice) *api.DomainSpec {
 }
 
 func newSRIOVAlias(netName string) *api.Alias {
-	return api.NewUserDefinedAlias(sriov.AliasPrefix + netName)
+	return api.NewUserDefinedAlias(netsriov.AliasPrefix + netName)
+}
+
+func newSRIOVInterfaceWithPCIAddress(name, customPCIAddress string) v1.Interface {
+	iface := newSRIOVInterface(name)
+	iface.PciAddress = customPCIAddress
+
+	return iface
+}
+
+func newSRIOVInterfaceWithBootOrder(name string, bootOrder uint) v1.Interface {
+	iface := newSRIOVInterface(name)
+	iface.BootOrder = &bootOrder
+
+	return iface
 }
 
 type stubPCIAddressPool struct {
@@ -458,22 +421,11 @@ func (d deviceDetacherStub) DetachDeviceFlags(data string, flags libvirt.DomainD
 	return nil
 }
 
-type deviceAttacherStub struct {
-	fail bool
-}
-
-func (d deviceAttacherStub) AttachDeviceFlags(data string, flags libvirt.DomainDeviceModifyFlags) error {
-	if d.fail {
-		return fmt.Errorf("attach device error")
-	}
-	return nil
-}
-
 func newCallbackerStub(failRegister, failDeregister bool) *callbackerStub {
 	return &callbackerStub{
 		failRegister:   failRegister,
 		failDeregister: failDeregister,
-		eventChan:      make(chan interface{}, sriov.MaxConcurrentHotPlugDevicesEvents),
+		eventChan:      make(chan interface{}, hostdevice.MaxConcurrentHotPlugDevicesEvents),
 	}
 }
 

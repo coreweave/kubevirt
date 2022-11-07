@@ -7,10 +7,11 @@ import (
 	jsonpatch "github.com/evanphx/json-patch"
 
 	promclientfake "kubevirt.io/client-go/generated/prometheus-operator/clientset/versioned/fake"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	extclientfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
@@ -20,6 +21,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
 
@@ -61,10 +63,6 @@ var _ = Describe("Apply Prometheus", func() {
 		kv = &v1.KubeVirt{}
 	})
 
-	AfterEach(func() {
-		ctrl.Finish()
-	})
-
 	It("should not patch ServiceMonitor on sync when they are equal", func() {
 
 		sm := components.NewServiceMonitorCR("namespace", "mNamespace", true)
@@ -81,7 +79,7 @@ var _ = Describe("Apply Prometheus", func() {
 			expectations: expectations,
 		}
 
-		Expect(r.createOrUpdateServiceMonitor(sm)).To(BeNil())
+		Expect(r.createOrUpdateServiceMonitor(sm)).To(Succeed())
 	})
 
 	It("should patch ServiceMonitor on sync when they are equal", func() {
@@ -116,10 +114,10 @@ var _ = Describe("Apply Prometheus", func() {
 			patched = true
 
 			obj, err := json.Marshal(sm)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			obj, err = patch.Apply(obj)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			sm := &promv1.ServiceMonitor{}
 			Expect(json.Unmarshal(obj, sm)).To(Succeed())
@@ -128,7 +126,7 @@ var _ = Describe("Apply Prometheus", func() {
 			return true, sm, nil
 		})
 
-		Expect(r.createOrUpdateServiceMonitor(requiredSM)).To(BeNil())
+		Expect(r.createOrUpdateServiceMonitor(requiredSM)).To(Succeed())
 		Expect(patched).To(BeTrue())
 	})
 
@@ -148,7 +146,7 @@ var _ = Describe("Apply Prometheus", func() {
 			expectations: expectations,
 		}
 
-		Expect(r.createOrUpdatePrometheusRule(pr)).To(BeNil())
+		Expect(r.createOrUpdatePrometheusRule(pr)).To(Succeed())
 	})
 
 	It("should patch PrometheusRules on sync when they are equal", func() {
@@ -184,20 +182,20 @@ var _ = Describe("Apply Prometheus", func() {
 			patched = true
 
 			obj, err := json.Marshal(pr)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			obj, err = patch.Apply(obj)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			pr := &promv1.PrometheusRule{}
 			Expect(json.Unmarshal(obj, pr)).To(Succeed())
 			Expect(pr.Spec.Groups).To(Equal(updatedGroups))
-			Expect(len(pr.Spec.Groups)).To(Equal(1))
+			Expect(pr.Spec.Groups).To(HaveLen(1))
 
 			return true, pr, nil
 		})
 
-		Expect(r.createOrUpdatePrometheusRule(requiredPR)).To(BeNil())
+		Expect(r.createOrUpdatePrometheusRule(requiredPR)).To(Succeed())
 		Expect(patched).To(BeTrue())
 	})
 })

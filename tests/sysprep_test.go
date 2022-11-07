@@ -27,17 +27,23 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	"kubevirt.io/kubevirt/tests/exec"
+	"kubevirt.io/kubevirt/tests/framework/checks"
+
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/libstorage"
 	"kubevirt.io/kubevirt/tests/util"
 )
 
@@ -243,11 +249,11 @@ var getWindowsSysprepVMISpec = func() v1.VirtualMachineInstanceSpec {
 				Disks: []v1.Disk{
 					{
 						Name:       windowsSealedDisk,
-						DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: "sata"}},
+						DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusSATA}},
 					},
 					{
 						Name:       "sysprep",
-						DiskDevice: v1.DiskDevice{CDRom: &v1.CDRomTarget{Bus: "sata"}},
+						DiskDevice: v1.DiskDevice{CDRom: &v1.CDRomTarget{Bus: v1.DiskBusSATA}},
 					},
 				},
 			},
@@ -290,11 +296,11 @@ var _ = Describe("[Serial][Sysprep][sig-compute]Syspreped VirtualMachineInstance
 	var windowsVMI *v1.VirtualMachineInstance
 
 	BeforeEach(func() {
+		const OSWindowsSysprep = "windows-sysprep"
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
-		tests.BeforeTestCleanup()
-		tests.SkipIfMissingRequiredImage(virtClient, tests.DiskWindowsSysprep)
-		tests.CreatePVC(tests.OSWindowsSysprep, "35Gi", tests.Config.StorageClassWindows, true)
+		checks.SkipIfMissingRequiredImage(virtClient, tests.DiskWindowsSysprep)
+		libstorage.CreatePVC(OSWindowsSysprep, "35Gi", libstorage.Config.StorageClassWindows, true)
 		answerFileWithKey := insertProductKeyToAnswerFileTemplate(answerFileTemplate)
 		tests.CreateConfigMap("sysprepautounattend", map[string]string{"Autounattend.xml": answerFileWithKey, "Unattend.xml": answerFileWithKey})
 		windowsVMI = tests.NewRandomVMI()
@@ -311,19 +317,7 @@ var _ = Describe("[Serial][Sysprep][sig-compute]Syspreped VirtualMachineInstance
 
 		BeforeEach(func() {
 			By("Creating winrm-cli pod for the future use")
-			winrmcliPod = &k8sv1.Pod{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: winrmCli},
-				Spec: k8sv1.PodSpec{
-					Containers: []k8sv1.Container{
-						{
-							Name:    winrmCli,
-							Image:   fmt.Sprintf("%s/%s:%s", flags.KubeVirtUtilityRepoPrefix, winrmCli, flags.KubeVirtUtilityVersionTag),
-							Command: []string{"sleep"},
-							Args:    []string{"3600"},
-						},
-					},
-				},
-			}
+			winrmcliPod = winRMCliPod()
 			winrmcliPod, err = virtClient.CoreV1().Pods(util.NamespaceTestDefault).Create(context.Background(), winrmcliPod, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
@@ -350,7 +344,7 @@ var _ = Describe("[Serial][Sysprep][sig-compute]Syspreped VirtualMachineInstance
 			command := append(cli, "echo works")
 			Eventually(func() error {
 				fmt.Printf("Running \"%s\" command via winrm-cli\n", command)
-				output, err = tests.ExecuteCommandOnPod(
+				output, err = exec.ExecuteCommandOnPod(
 					virtClient,
 					winrmcliPod,
 					winrmcliPod.Spec.Containers[0].Name,
@@ -361,6 +355,32 @@ var _ = Describe("[Serial][Sysprep][sig-compute]Syspreped VirtualMachineInstance
 			}, time.Minute*10, time.Second*60).ShouldNot(HaveOccurred())
 			By("Checking that the Windows VirtualMachineInstance has expected UUID")
 			Expect(output).Should(ContainSubstring("works"))
-		}, 720)
+		})
 	})
 })
+
+func winRMCliPod() *k8sv1.Pod {
+	user := int64(1001)
+	return &k8sv1.Pod{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: winrmCli},
+		Spec: k8sv1.PodSpec{
+			Containers: []k8sv1.Container{
+				{
+					Name:    winrmCli,
+					Image:   fmt.Sprintf("%s/%s:%s", flags.KubeVirtUtilityRepoPrefix, winrmCli, flags.KubeVirtUtilityVersionTag),
+					Command: []string{"sleep"},
+					Args:    []string{"3600"},
+					SecurityContext: &k8sv1.SecurityContext{
+						AllowPrivilegeEscalation: pointer.Bool(false),
+						Capabilities:             &k8sv1.Capabilities{Drop: []k8sv1.Capability{"ALL"}},
+					},
+				},
+			},
+			SecurityContext: &k8sv1.PodSecurityContext{
+				RunAsNonRoot:   pointer.Bool(true),
+				RunAsUser:      &user,
+				SeccompProfile: &k8sv1.SeccompProfile{Type: k8sv1.SeccompProfileTypeRuntimeDefault},
+			},
+		},
+	}
+}

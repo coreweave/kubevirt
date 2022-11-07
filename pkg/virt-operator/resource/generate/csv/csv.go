@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"k8s.io/utils/pointer"
+
 	"github.com/coreos/go-semver/semver"
 	csvv1 "github.com/operator-framework/operator-lifecycle-manager/pkg/api/apis/operators/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,9 +32,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	virtv1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 )
+
+const xDescriptorText = "urn:alm:descriptor:text"
 
 type NewClusterServiceVersionData struct {
 	Namespace            string
@@ -47,11 +52,14 @@ type NewClusterServiceVersionData struct {
 	VirtControllerSha    string
 	VirtHandlerSha       string
 	VirtLauncherSha      string
+	VirtExportProxySha   string
+	VirtExportServerSha  string
 	GsSha                string
 	Replicas             int
 	IconBase64           string
 	ReplacesCsvVersion   string
 	CreatedAtTimestamp   string
+	VirtOperatorImage    string
 }
 
 type csvClusterPermissions struct {
@@ -145,14 +153,17 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 		data.DockerPrefix,
 		data.ImagePrefix,
 		data.OperatorImageVersion,
-		v1.PullPolicy(data.ImagePullPolicy),
 		data.Verbosity,
 		data.KubeVirtVersion,
 		data.VirtApiSha,
 		data.VirtControllerSha,
 		data.VirtHandlerSha,
 		data.VirtLauncherSha,
-		data.GsSha)
+		data.VirtExportProxySha,
+		data.VirtExportServerSha,
+		data.GsSha,
+		data.VirtOperatorImage,
+		v1.PullPolicy(data.ImagePullPolicy))
 	if err != nil {
 		return nil, err
 	}
@@ -160,8 +171,7 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 	imageVersion := components.AddVersionSeparatorPrefix(data.OperatorImageVersion)
 
 	if data.Replicas > 0 && *deployment.Spec.Replicas != int32(data.Replicas) {
-		replicas := int32(data.Replicas)
-		deployment.Spec.Replicas = &replicas
+		deployment.Spec.Replicas = pointer.Int32(int32(data.Replicas))
 	}
 
 	clusterRules := rbac.NewOperatorClusterRole().Rules
@@ -313,13 +323,13 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 								Description:  "The ImageRegistry to use for the KubeVirt components.",
 								DisplayName:  "ImageRegistry",
 								Path:         "imageRegistry",
-								XDescriptors: []string{"urn:alm:descriptor:text"},
+								XDescriptors: []string{xDescriptorText},
 							},
 							{
 								Description:  "The ImageTag to use for the KubeVirt components.",
 								DisplayName:  "ImageTag",
 								Path:         "imageTag",
-								XDescriptors: []string{"urn:alm:descriptor:text"},
+								XDescriptors: []string{xDescriptorText},
 							},
 						},
 						StatusDescriptors: []csvv1.StatusDescriptor{
@@ -339,31 +349,31 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 								Description:  "The observed version of the KubeVirt deployment.",
 								DisplayName:  "Observed KubeVirt Version",
 								Path:         "observedKubeVirtVersion",
-								XDescriptors: []string{"urn:alm:descriptor:text"},
+								XDescriptors: []string{xDescriptorText},
 							},
 							{
 								Description:  "The targeted version of the KubeVirt deployment.",
 								DisplayName:  "Target KubeVirt Version",
 								Path:         "targetKubeVirtVersion",
-								XDescriptors: []string{"urn:alm:descriptor:text"},
+								XDescriptors: []string{xDescriptorText},
 							},
 							{
 								Description:  "The observed registry of the KubeVirt deployment.",
 								DisplayName:  "Observed KubeVirt registry",
 								Path:         "ObservedKubeVirtRegistry",
-								XDescriptors: []string{"urn:alm:descriptor:text"},
+								XDescriptors: []string{xDescriptorText},
 							},
 							{
 								Description:  "The targeted registry of the KubeVirt deployment.",
 								DisplayName:  "Target KubeVirt registry",
 								Path:         "TargetKubeVirtRegistry",
-								XDescriptors: []string{"urn:alm:descriptor:text"},
+								XDescriptors: []string{xDescriptorText},
 							},
 							{
 								Description:  "The version of the KubeVirt Operator.",
 								DisplayName:  "KubeVirt Operator Version",
 								Path:         "operatorVersion",
-								XDescriptors: []string{"urn:alm:descriptor:text"},
+								XDescriptors: []string{xDescriptorText},
 							},
 						},
 					},

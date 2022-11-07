@@ -22,10 +22,14 @@
 package dhcp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
+	"kubevirt.io/client-go/log"
+
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/network/cache"
 	netdriver "kubevirt.io/kubevirt/pkg/network/driver"
 )
@@ -49,15 +53,22 @@ type ConfigGenerator interface {
 	Generate() (*cache.DHCPConfig, error)
 }
 
-func NewBridgeConfigurator(cacheFactory cache.InterfaceCacheFactory, launcherPID string, advertisingIfaceName string, handler netdriver.NetworkHandler, podInterfaceName string,
+func NewBridgeConfigurator(cacheCreator cacheCreator, launcherPID string, advertisingIfaceName string, handler netdriver.NetworkHandler, podInterfaceName string,
 	vmiSpecIfaces []v1.Interface, vmiSpecIface *v1.Interface, subdomain string) *configurator {
 	return &configurator{
 		podInterfaceName:     podInterfaceName,
 		advertisingIfaceName: advertisingIfaceName,
 		handler:              handler,
 		dhcpStartedDirectory: defaultDHCPStartedDirectory,
-		configGenerator: &BridgeConfigGenerator{handler: handler, cacheFactory: cacheFactory, podInterfaceName: podInterfaceName, launcherPID: launcherPID,
-			vmiSpecIfaces: vmiSpecIfaces, vmiSpecIface: vmiSpecIface, subdomain: subdomain},
+		configGenerator: &BridgeConfigGenerator{
+			handler:          handler,
+			podInterfaceName: podInterfaceName,
+			cacheCreator:     cacheCreator,
+			launcherPID:      launcherPID,
+			vmiSpecIfaces:    vmiSpecIfaces,
+			vmiSpecIface:     vmiSpecIface,
+			subdomain:        subdomain,
+		},
 	}
 }
 
@@ -79,7 +90,7 @@ func (d *configurator) EnsureDHCPServerStarted(podInterfaceName string, dhcpConf
 	}
 	dhcpStartedFile := d.getDHCPStartedFilePath(podInterfaceName)
 	_, err := os.Stat(dhcpStartedFile)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		if err := d.handler.StartDHCP(&dhcpConfig, d.advertisingIfaceName, dhcpOptions); err != nil {
 			return fmt.Errorf("failed to start DHCP server for interface %s", podInterfaceName)
 		}
@@ -87,7 +98,11 @@ func (d *configurator) EnsureDHCPServerStarted(podInterfaceName string, dhcpConf
 		if err != nil {
 			return fmt.Errorf("failed to create dhcp started file %s: %s", dhcpStartedFile, err)
 		}
-		newFile.Close()
+
+		if err := newFile.Close(); err != nil {
+			log.Log.Warningf(
+				"failed to close the DHCP readiness file descriptor %d: %v", int(newFile.Fd()), err)
+		}
 	}
 	return nil
 }

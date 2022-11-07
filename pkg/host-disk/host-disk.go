@@ -27,14 +27,18 @@ import (
 	"syscall"
 
 	"kubevirt.io/client-go/log"
+
 	ephemeraldiskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	"kubevirt.io/kubevirt/pkg/safepath"
+	"kubevirt.io/kubevirt/pkg/unsafepath"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 
 	v1 "kubevirt.io/api/core/v1"
+
+	"kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/util"
-	"kubevirt.io/kubevirt/pkg/util/types"
 )
 
 var pvcBaseDir = "/var/run/kubevirt-private/vmi-disks"
@@ -78,7 +82,10 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance) error {
 				continue
 			}
 
-			replaceForHostDisk(volumeSource, volume.Name, pvcVolume)
+			err := replaceForHostDisk(volumeSource, volume.Name, pvcVolume)
+			if err != nil {
+				return err
+			}
 			// PersistenVolumeClaim is replaced by HostDisk
 			volumeSource.PersistentVolumeClaim = nil
 		}
@@ -87,7 +94,10 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance) error {
 				continue
 			}
 
-			replaceForHostDisk(volumeSource, volume.Name, pvcVolume)
+			err := replaceForHostDisk(volumeSource, volume.Name, pvcVolume)
+			if err != nil {
+				return err
+			}
 			// PersistenVolumeClaim is replaced by HostDisk
 			volumeSource.DataVolume = nil
 		}
@@ -95,16 +105,25 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance) error {
 	return nil
 }
 
-func replaceForHostDisk(volumeSource *v1.VolumeSource, volumeName string, pvcVolume map[string]v1.VolumeStatus) {
+func replaceForHostDisk(volumeSource *v1.VolumeSource, volumeName string, pvcVolume map[string]v1.VolumeStatus) error {
 	volumeStatus := pvcVolume[volumeName]
 	isShared := types.HasSharedAccessMode(volumeStatus.PersistentVolumeClaimInfo.AccessModes)
 	file := getPVCDiskImgPath(volumeName, "disk.img")
+	capacity := volumeStatus.PersistentVolumeClaimInfo.Capacity[k8sv1.ResourceStorage]
+	// The host-disk must be 1MiB-aligned. If the volume specifies a misaligned size, shrink it down to the nearest multiple of 1MiB
+	size := util.AlignImageSizeTo1MiB(capacity.Value(), log.Log.V(2))
+	if size == 0 {
+		return fmt.Errorf("the size for volume %s is too low, must be at least 1MiB", volumeName)
+	}
+	capacity.Set(size)
 	volumeSource.HostDisk = &v1.HostDisk{
 		Path:     file,
 		Type:     v1.HostDiskExistsOrCreate,
-		Capacity: volumeStatus.PersistentVolumeClaimInfo.Capacity[k8sv1.ResourceStorage],
+		Capacity: capacity,
 		Shared:   &isShared,
 	}
+
+	return nil
 }
 
 func shouldSkipVolumeSource(passthoughFSVolumes map[string]struct{}, hotplugVolumes map[string]bool, pvcVolume map[string]v1.VolumeStatus, volumeName string) bool {
@@ -121,10 +140,8 @@ func shouldSkipVolumeSource(passthoughFSVolumes map[string]struct{}, hotplugVolu
 	}
 
 	volumeStatus, ok := pvcVolume[volumeName]
-	if !ok ||
-		volumeStatus.PersistentVolumeClaimInfo.VolumeMode == nil ||
-		*volumeStatus.PersistentVolumeClaimInfo.VolumeMode == k8sv1.PersistentVolumeBlock {
-
+	if !ok || types.IsPVCBlock(volumeStatus.PersistentVolumeClaimInfo.VolumeMode) {
+		log.Log.V(4).Infof("this volume %s is block, will not be replaced by HostDisk", volumeName)
 		// This is not a disk on a file system, so skip it.
 		return true
 	}
@@ -179,10 +196,10 @@ type DiskImgCreator struct {
 	recorder               record.EventRecorder
 	lessPVCSpaceToleration int
 	minimumPVCReserveBytes uint64
-	mountRoot              string
+	mountRoot              *safepath.Path
 }
 
-func NewHostDiskCreator(recorder record.EventRecorder, lessPVCSpaceToleration int, minimumPVCReserveBytes uint64, mountRoot string) DiskImgCreator {
+func NewHostDiskCreator(recorder record.EventRecorder, lessPVCSpaceToleration int, minimumPVCReserveBytes uint64, mountRoot *safepath.Path) DiskImgCreator {
 	return DiskImgCreator{
 		dirBytesAvailableFunc:  dirBytesAvailable,
 		recorder:               recorder,
@@ -212,8 +229,8 @@ func shouldMountHostDisk(hostDisk *v1.HostDisk) bool {
 }
 
 func (hdc *DiskImgCreator) mountHostDiskAndSetOwnership(vmi *v1.VirtualMachineInstance, volumeName string, hostDisk *v1.HostDisk) error {
-	diskPath := GetMountedHostDiskPathFromHandler(hdc.mountRoot, volumeName, hostDisk.Path)
-	diskDir := GetMountedHostDiskDirFromHandler(hdc.mountRoot, volumeName)
+	diskPath := GetMountedHostDiskPathFromHandler(unsafepath.UnsafeAbsolute(hdc.mountRoot.Raw()), volumeName, hostDisk.Path)
+	diskDir := GetMountedHostDiskDirFromHandler(unsafepath.UnsafeAbsolute(hdc.mountRoot.Raw()), volumeName)
 	fileExists, err := ephemeraldiskutils.FileExists(diskPath)
 	if err != nil {
 		return err
@@ -224,7 +241,7 @@ func (hdc *DiskImgCreator) mountHostDiskAndSetOwnership(vmi *v1.VirtualMachineIn
 		}
 	}
 	// Change file ownership to the qemu user.
-	if err := ephemeraldiskutils.DefaultOwnershipManager.SetFileOwnership(diskPath); err != nil {
+	if err := ephemeraldiskutils.DefaultOwnershipManager.UnsafeSetFileOwnership(diskPath); err != nil {
 		log.Log.Reason(err).Errorf("Couldn't set Ownership on %s: %v", diskPath, err)
 		return err
 	}

@@ -17,9 +17,10 @@ limitations under the License.
 package v1beta1
 
 import (
+	ocpconfigv1 "github.com/openshift/api/config/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
+	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/api"
 )
 
 // DataVolume is an abstraction on top of PersistentVolumeClaims to allow easy population of those PersistentVolumeClaims with relation to VirtualMachines
@@ -196,6 +197,12 @@ type DataVolumeSourceHTTP struct {
 	// CertConfigMap is a configmap reference, containing a Certificate Authority(CA) public key, and a base64 encoded pem certificate
 	// +optional
 	CertConfigMap string `json:"certConfigMap,omitempty"`
+	// ExtraHeaders is a list of strings containing extra headers to include with HTTP transfer requests
+	// +optional
+	ExtraHeaders []string `json:"extraHeaders,omitempty"`
+	// SecretExtraHeaders is a list of Secret references, each containing an extra HTTP header that may include sensitive information
+	// +optional
+	SecretExtraHeaders []string `json:"secretExtraHeaders,omitempty"`
 }
 
 // DataVolumeSourceImageIO provides the parameters to create a Data Volume from an imageio source
@@ -222,6 +229,8 @@ type DataVolumeSourceVDDK struct {
 	Thumbprint string `json:"thumbprint,omitempty"`
 	// SecretRef provides a reference to a secret containing the username and password needed to access the vCenter or ESXi host
 	SecretRef string `json:"secretRef,omitempty"`
+	// InitImageURL is an optional URL to an image containing an extracted VDDK library, overrides v2v-vmware config map
+	InitImageURL string `json:"initImageURL,omitempty"`
 }
 
 // DataVolumeSourceRef defines an indirect reference to the source of data for the DataVolume
@@ -242,6 +251,8 @@ const (
 
 // DataVolumeStatus contains the current status of the DataVolume
 type DataVolumeStatus struct {
+	// ClaimName is the name of the underlying PVC used by the DataVolume.
+	ClaimName string `json:"claimName,omitempty"`
 	//Phase is the current phase of the data volume
 	Phase    DataVolumePhase    `json:"phase,omitempty"`
 	Progress DataVolumeProgress `json:"progress,omitempty"`
@@ -250,7 +261,7 @@ type DataVolumeStatus struct {
 	Conditions   []DataVolumeCondition `json:"conditions,omitempty" optional:"true"`
 }
 
-//DataVolumeList provides the needed parameters to do request a list of Data Volumes from the system
+// DataVolumeList provides the needed parameters to do request a list of Data Volumes from the system
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type DataVolumeList struct {
 	metav1.TypeMeta `json:",inline"`
@@ -348,7 +359,7 @@ const DataVolumeCloneSourceSubresource = "source"
 // see https://github.com/kubernetes/code-generator/issues/59
 // +genclient:nonNamespaced
 
-//StorageProfile provides a CDI specific recommendation for storage parameters
+// StorageProfile provides a CDI specific recommendation for storage parameters
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
@@ -362,7 +373,7 @@ type StorageProfile struct {
 	Status StorageProfileStatus `json:"status,omitempty"`
 }
 
-//StorageProfileSpec defines specification for StorageProfile
+// StorageProfileSpec defines specification for StorageProfile
 type StorageProfileSpec struct {
 	// CloneStrategy defines the preferred method for performing a CDI clone
 	CloneStrategy *CDICloneStrategy `json:"cloneStrategy,omitempty"`
@@ -370,7 +381,7 @@ type StorageProfileSpec struct {
 	ClaimPropertySets []ClaimPropertySet `json:"claimPropertySets,omitempty"`
 }
 
-//StorageProfileStatus provides the most recently observed status of the StorageProfile
+// StorageProfileStatus provides the most recently observed status of the StorageProfile
 type StorageProfileStatus struct {
 	// The StorageClass name for which capabilities are defined
 	StorageClass *string `json:"storageClass,omitempty"`
@@ -394,7 +405,7 @@ type ClaimPropertySet struct {
 	VolumeMode *corev1.PersistentVolumeMode `json:"volumeMode,omitempty" protobuf:"bytes,6,opt,name=volumeMode,casttype=PersistentVolumeMode"`
 }
 
-//StorageProfileList provides the needed parameters to request a list of StorageProfile from the system
+// StorageProfileList provides the needed parameters to request a list of StorageProfile from the system
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type StorageProfileList struct {
 	metav1.TypeMeta `json:",inline"`
@@ -409,6 +420,7 @@ type StorageProfileList struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
+// +kubebuilder:resource:shortName=das,categories=all
 type DataSource struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -431,21 +443,33 @@ type DataSourceSource struct {
 
 // DataSourceStatus provides the most recently observed status of the DataSource
 type DataSourceStatus struct {
+	// Source is the current source of the data referenced by the DataSource
+	Source     DataSourceSource      `json:"source,omitempty"`
 	Conditions []DataSourceCondition `json:"conditions,omitempty" optional:"true"`
 }
 
 // DataSourceCondition represents the state of a data source condition
 type DataSourceCondition struct {
-	Type               DataSourceConditionType `json:"type" description:"type of condition ie. Ready"`
-	Status             corev1.ConditionStatus  `json:"status" description:"status of the condition, one of True, False, Unknown"`
-	LastTransitionTime metav1.Time             `json:"lastTransitionTime,omitempty"`
-	LastHeartbeatTime  metav1.Time             `json:"lastHeartbeatTime,omitempty"`
-	Reason             string                  `json:"reason,omitempty" description:"reason for the condition's last transition"`
-	Message            string                  `json:"message,omitempty" description:"human-readable message indicating details about last transition"`
+	Type           DataSourceConditionType `json:"type" description:"type of condition ie. Ready"`
+	ConditionState `json:",inline"`
 }
 
 // DataSourceConditionType is the string representation of known condition types
 type DataSourceConditionType string
+
+const (
+	// DataSourceReady is the condition that indicates if the data source is ready to be consumed
+	DataSourceReady DataSourceConditionType = "Ready"
+)
+
+// ConditionState represents the state of a condition
+type ConditionState struct {
+	Status             corev1.ConditionStatus `json:"status" description:"status of the condition, one of True, False, Unknown"`
+	LastTransitionTime metav1.Time            `json:"lastTransitionTime,omitempty"`
+	LastHeartbeatTime  metav1.Time            `json:"lastHeartbeatTime,omitempty"`
+	Reason             string                 `json:"reason,omitempty" description:"reason for the condition's last transition"`
+	Message            string                 `json:"message,omitempty" description:"human-readable message indicating details about last transition"`
+}
 
 // DataSourceList provides the needed parameters to do request a list of Data Sources from the system
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -462,6 +486,7 @@ type DataSourceList struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
+// +kubebuilder:resource:shortName=dic;dics,categories=all
 type DataImportCron struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -472,17 +497,23 @@ type DataImportCron struct {
 
 // DataImportCronSpec defines specification for DataImportCron
 type DataImportCronSpec struct {
-	// Source specifies where to poll disk images from
-	Source DataImportCronSource `json:"source"`
+	// Template specifies template for the DVs to be created
+	Template DataVolume `json:"template"`
 	// Schedule specifies in cron format when and how often to look for new imports
 	Schedule string `json:"schedule"`
 	// GarbageCollect specifies whether old PVCs should be cleaned up after a new PVC is imported.
-	// Options are currently "Never" and "Outdated", defaults to "Never".
+	// Options are currently "Outdated" and "Never", defaults to "Outdated".
 	// +optional
 	GarbageCollect *DataImportCronGarbageCollect `json:"garbageCollect,omitempty"`
+	// Number of import PVCs to keep when garbage collecting. Default is 3.
+	// +optional
+	ImportsToKeep *int32 `json:"importsToKeep,omitempty"`
 	// ManagedDataSource specifies the name of the corresponding DataSource this cron will manage.
 	// DataSource has to be in the same namespace.
 	ManagedDataSource string `json:"managedDataSource"`
+	// RetentionPolicy specifies whether the created DataVolumes and DataSources are retained when their DataImportCron is deleted. Default is RatainAll.
+	// +optional
+	RetentionPolicy *DataImportCronRetentionPolicy `json:"retentionPolicy,omitempty"`
 }
 
 // DataImportCronGarbageCollect represents the DataImportCron garbage collection mode
@@ -495,13 +526,20 @@ const (
 	DataImportCronGarbageCollectOutdated DataImportCronGarbageCollect = "Outdated"
 )
 
-// DataImportCronSource defines where to poll and import disk images from
-type DataImportCronSource struct {
-	Registry *DataVolumeSourceRegistry `json:"registry"`
-}
+// DataImportCronRetentionPolicy represents the DataImportCron retention policy
+type DataImportCronRetentionPolicy string
+
+const (
+	// DataImportCronRetainNone specifies that the created DataVolumes and DataSources are deleted when their DataImportCron is deleted
+	DataImportCronRetainNone DataImportCronRetentionPolicy = "None"
+	// DataImportCronRetainAll specifies that the created DataVolumes and DataSources are retained when their DataImportCron is deleted
+	DataImportCronRetainAll DataImportCronRetentionPolicy = "All"
+)
 
 // DataImportCronStatus provides the most recently observed status of the DataImportCron
 type DataImportCronStatus struct {
+	// CurrentImports are the imports in progress. Currently only a single import is supported.
+	CurrentImports []ImportStatus `json:"currentImports,omitempty"`
 	// LastImportedPVC is the last imported PVC
 	LastImportedPVC *DataVolumeSourcePVC `json:"lastImportedPVC,omitempty"`
 	// LastExecutionTimestamp is the time of the last polling
@@ -511,18 +549,30 @@ type DataImportCronStatus struct {
 	Conditions          []DataImportCronCondition `json:"conditions,omitempty" optional:"true"`
 }
 
+// ImportStatus of a currently in progress import
+type ImportStatus struct {
+	// DataVolumeName is the currently in progress import DataVolume
+	DataVolumeName string `json:"DataVolumeName"`
+	// Digest of the currently imported image
+	Digest string `json:"Digest"`
+}
+
 // DataImportCronCondition represents the state of a data import cron condition
 type DataImportCronCondition struct {
-	Type               DataImportCronConditionType `json:"type" description:"type of condition ie. Progressing, UpToDate"`
-	Status             corev1.ConditionStatus      `json:"status" description:"status of the condition, one of True, False, Unknown"`
-	LastTransitionTime metav1.Time                 `json:"lastTransitionTime,omitempty"`
-	LastHeartbeatTime  metav1.Time                 `json:"lastHeartbeatTime,omitempty"`
-	Reason             string                      `json:"reason,omitempty" description:"reason for the condition's last transition"`
-	Message            string                      `json:"message,omitempty" description:"human-readable message indicating details about last transition"`
+	Type           DataImportCronConditionType `json:"type" description:"type of condition ie. Progressing, UpToDate"`
+	ConditionState `json:",inline"`
 }
 
 // DataImportCronConditionType is the string representation of known condition types
 type DataImportCronConditionType string
+
+const (
+	// DataImportCronProgressing is the condition that indicates import is progressing
+	DataImportCronProgressing DataImportCronConditionType = "Progressing"
+
+	// DataImportCronUpToDate is the condition that indicates latest import is up to date
+	DataImportCronUpToDate DataImportCronConditionType = "UpToDate"
+)
 
 // DataImportCronList provides the needed parameters to do request a list of DataImportCrons from the system
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -607,13 +657,13 @@ type CDICloneStrategy string
 
 const (
 	// CloneStrategyHostAssisted specifies slower, host-assisted copy
-	CloneStrategyHostAssisted = "copy"
+	CloneStrategyHostAssisted CDICloneStrategy = "copy"
 
 	// CloneStrategySnapshot specifies snapshot-based copying
-	CloneStrategySnapshot = "snapshot"
+	CloneStrategySnapshot CDICloneStrategy = "snapshot"
 
 	// CloneStrategyCsiClone specifies csi volume clone based cloning
-	CloneStrategyCsiClone = "csi-clone"
+	CloneStrategyCsiClone CDICloneStrategy = "csi-clone"
 )
 
 // CDIUninstallStrategy defines the state to leave CDI on uninstall
@@ -635,7 +685,7 @@ type CDIStatus struct {
 	sdkapi.Status `json:",inline"`
 }
 
-//CDIList provides the needed parameters to do request a list of CDIs from the system
+// CDIList provides the needed parameters to do request a list of CDIs from the system
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type CDIList struct {
 	metav1.TypeMeta `json:",inline"`
@@ -663,12 +713,12 @@ type CDIConfig struct {
 	Status CDIConfigStatus `json:"status,omitempty"`
 }
 
-//Percent is a string that can only be a value between [0,1)
+// Percent is a string that can only be a value between [0,1)
 // (Note: we actually rely on reconcile to reject invalid values)
 // +kubebuilder:validation:Pattern=`^(0(?:\.\d{1,3})?|1)$`
 type Percent string
 
-//FilesystemOverhead defines the reserved size for PVCs with VolumeMode: Filesystem
+// FilesystemOverhead defines the reserved size for PVCs with VolumeMode: Filesystem
 type FilesystemOverhead struct {
 	// Global is how much space of a Filesystem volume should be reserved for overhead. This value is used unless overridden by a more specific value (per storageClass)
 	Global Percent `json:"global,omitempty"`
@@ -676,7 +726,7 @@ type FilesystemOverhead struct {
 	StorageClass map[string]Percent `json:"storageClass,omitempty"`
 }
 
-//CDIConfigSpec defines specification for user configuration
+// CDIConfigSpec defines specification for user configuration
 type CDIConfigSpec struct {
 	// Override the URL used when uploading to a DataVolume
 	UploadProxyURLOverride *string `json:"uploadProxyURLOverride,omitempty"`
@@ -695,9 +745,14 @@ type CDIConfigSpec struct {
 	Preallocation *bool `json:"preallocation,omitempty"`
 	// InsecureRegistries is a list of TLS disabled registries
 	InsecureRegistries []string `json:"insecureRegistries,omitempty"`
+	// DataVolumeTTLSeconds is the time in seconds after DataVolume completion it can be garbage collected. The default is 0 sec. To disable GC use -1.
+	// +optional
+	DataVolumeTTLSeconds *int32 `json:"dataVolumeTTLSeconds,omitempty"`
+	// TLSSecurityProfile is used by operators to apply cluster-wide TLS security settings to operands.
+	TLSSecurityProfile *ocpconfigv1.TLSSecurityProfile `json:"tlsSecurityProfile,omitempty"`
 }
 
-//CDIConfigStatus provides the most recently observed status of the CDI Config resource
+// CDIConfigStatus provides the most recently observed status of the CDI Config resource
 type CDIConfigStatus struct {
 	// The calculated upload proxy URL
 	UploadProxyURL *string `json:"uploadProxyURL,omitempty"`
@@ -714,7 +769,7 @@ type CDIConfigStatus struct {
 	Preallocation bool `json:"preallocation,omitempty"`
 }
 
-//CDIConfigList provides the needed parameters to do request a list of CDIConfigs from the system
+// CDIConfigList provides the needed parameters to do request a list of CDIConfigs from the system
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type CDIConfigList struct {
 	metav1.TypeMeta `json:",inline"`
@@ -724,7 +779,7 @@ type CDIConfigList struct {
 	Items []CDIConfig `json:"items"`
 }
 
-//ImportProxy provides the information on how to configure the importer pod proxy.
+// ImportProxy provides the information on how to configure the importer pod proxy.
 type ImportProxy struct {
 	// HTTPProxy is the URL http://<username>:<pswd>@<ip>:<port> of the import proxy for HTTP requests.  Empty means unset and will not result in the import pod env var.
 	// +optional

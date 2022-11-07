@@ -26,42 +26,59 @@ import (
 	"strconv"
 	"time"
 
+	"kubevirt.io/client-go/log"
+
 	expect "github.com/google/goexpect"
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	. "kubevirt.io/kubevirt/tests/framework/matcher"
-	"kubevirt.io/kubevirt/tests/util"
-
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
-	"kubevirt.io/client-go/log"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
-	"kubevirt.io/kubevirt/tests"
-	"kubevirt.io/kubevirt/tests/console"
-	cd "kubevirt.io/kubevirt/tests/containerdisk"
-	"kubevirt.io/kubevirt/tests/libvmi"
 
 	virtctl "kubevirt.io/kubevirt/pkg/virtctl/vm"
+	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/clientcmd"
+	"kubevirt.io/kubevirt/tests/console"
+	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/framework/checks"
+	. "kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libdv"
+	"kubevirt.io/kubevirt/tests/libnode"
+	"kubevirt.io/kubevirt/tests/libstorage"
+	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/util"
 )
 
 const (
+	dataMessage             = "data/message"
+	addingVolumeRunningVM   = "Adding volume to running VM"
+	verifyingVolumeDiskInVM = "Verifying the volume and disk are in the VM and VMI"
+	removingVolumeFromVM    = "removing volume from VM"
+	verifyingVolumeNotExist = "Verifying the volume no longer exists in VM"
+
 	virtCtlNamespace       = "--namespace"
 	virtCtlVolumeName      = "--volume-name=%s"
+	virtCtlCache           = "--cache=%s"
 	verifyCannotAccessDisk = "ls: %s: No such file or directory"
-
-	waitVolumeRequestProcessError = "waiting on all VolumeRequests to be processed"
-
-	expectReturn = "echo $?\n"
 
 	testNewVolume1 = "some-new-volume1"
 	testNewVolume2 = "some-new-volume2"
+
+	waitDiskTemplateError         = "waiting on new disk to appear in template"
+	waitVolumeTemplateError       = "waiting on new volume to appear in template"
+	waitVolumeRequestProcessError = "waiting on all VolumeRequests to be processed"
 )
+
+type addVolumeFunction func(name, namespace, volumeName, claimName string, bus v1.DiskBus, dryRun bool, cache v1.DriverCache)
+type removeVolumeFunction func(name, namespace, volumeName string, dryRun bool)
+type storageClassFunction func() (string, bool)
 
 var _ = SIGDescribe("Hotplug", func() {
 	var err error
@@ -70,29 +87,21 @@ var _ = SIGDescribe("Hotplug", func() {
 	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
-
-		tests.BeforeTestCleanup()
 	})
 
-	newVirtualMachineInstanceWithContainerDisk := func() (*v1.VirtualMachineInstance, *cdiv1.DataVolume) {
-		vmiImage := cd.ContainerDiskFor(cd.ContainerDiskCirros)
-		return tests.NewRandomVMIWithEphemeralDiskAndUserdata(vmiImage, "echo Hi\n"), nil
-	}
-
-	createVirtualMachine := func(running bool, template *v1.VirtualMachineInstance) *v1.VirtualMachine {
-		By("Creating VirtualMachine")
-		vm := tests.NewRandomVirtualMachine(template, running)
-		newVM, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Create(vm)
-		Expect(err).ToNot(HaveOccurred())
-		return newVM
+	getDryRunOption := func(dryRun bool) []string {
+		if dryRun {
+			return []string{metav1.DryRunAll}
+		}
+		return nil
 	}
 
 	deleteVirtualMachine := func(vm *v1.VirtualMachine) error {
 		return virtClient.VirtualMachine(util.NamespaceTestDefault).Delete(vm.Name, &metav1.DeleteOptions{})
 	}
 
-	getAddVolumeOptions := func(volumeName, bus string, volumeSource *v1.HotplugVolumeSource) *v1.AddVolumeOptions {
-		return &v1.AddVolumeOptions{
+	getAddVolumeOptions := func(volumeName string, bus v1.DiskBus, volumeSource *v1.HotplugVolumeSource, dryRun bool, cache v1.DriverCache) *v1.AddVolumeOptions {
+		opts := &v1.AddVolumeOptions{
 			Name: volumeName,
 			Disk: &v1.Disk{
 				DiskDevice: v1.DiskDevice{
@@ -103,7 +112,14 @@ var _ = SIGDescribe("Hotplug", func() {
 				Serial: volumeName,
 			},
 			VolumeSource: volumeSource,
+			DryRun:       getDryRunOption(dryRun),
 		}
+		if cache == v1.CacheNone ||
+			cache == v1.CacheWriteThrough ||
+			cache == v1.CacheWriteBack {
+			opts.Disk.Cache = cache
+		}
+		return opts
 	}
 	addVolumeVMIWithSource := func(name, namespace string, volumeOptions *v1.AddVolumeOptions) {
 		Eventually(func() error {
@@ -111,20 +127,20 @@ var _ = SIGDescribe("Hotplug", func() {
 		}, 3*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 	}
 
-	addDVVolumeVMI := func(name, namespace, volumeName, claimName, bus string) {
+	addDVVolumeVMI := func(name, namespace, volumeName, claimName string, bus v1.DiskBus, dryRun bool, cache v1.DriverCache) {
 		addVolumeVMIWithSource(name, namespace, getAddVolumeOptions(volumeName, bus, &v1.HotplugVolumeSource{
 			DataVolume: &v1.DataVolumeSource{
 				Name: claimName,
 			},
-		}))
+		}, dryRun, cache))
 	}
 
-	addPVCVolumeVMI := func(name, namespace, volumeName, claimName, bus string) {
+	addPVCVolumeVMI := func(name, namespace, volumeName, claimName string, bus v1.DiskBus, dryRun bool, cache v1.DriverCache) {
 		addVolumeVMIWithSource(name, namespace, getAddVolumeOptions(volumeName, bus, &v1.HotplugVolumeSource{
 			PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: claimName,
 			}},
-		}))
+		}, dryRun, cache))
 	}
 
 	addVolumeVMWithSource := func(name, namespace string, volumeOptions *v1.AddVolumeOptions) {
@@ -133,49 +149,64 @@ var _ = SIGDescribe("Hotplug", func() {
 		}, 3*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 	}
 
-	addDVVolumeVM := func(name, namespace, volumeName, claimName, bus string) {
+	addDVVolumeVM := func(name, namespace, volumeName, claimName string, bus v1.DiskBus, dryRun bool, cache v1.DriverCache) {
 		addVolumeVMWithSource(name, namespace, getAddVolumeOptions(volumeName, bus, &v1.HotplugVolumeSource{
 			DataVolume: &v1.DataVolumeSource{
 				Name: claimName,
 			},
-		}))
+		}, dryRun, cache))
 	}
 
-	addPVCVolumeVM := func(name, namespace, volumeName, claimName, bus string) {
+	addPVCVolumeVM := func(name, namespace, volumeName, claimName string, bus v1.DiskBus, dryRun bool, cache v1.DriverCache) {
 		addVolumeVMWithSource(name, namespace, getAddVolumeOptions(volumeName, bus, &v1.HotplugVolumeSource{
 			PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: claimName,
 			}},
-		}))
+		}, dryRun, cache))
 	}
 
-	addVolumeVirtctl := func(name, namespace, volumeName, claimName, bus string) {
+	addVolumeVirtctl := func(name, namespace, volumeName, claimName string, bus v1.DiskBus, dryRun bool, cache v1.DriverCache) {
 		By("Invoking virtlctl addvolume")
-		addvolumeCommand := tests.NewRepeatableVirtctlCommand(virtctl.COMMAND_ADDVOLUME, name, fmt.Sprintf(virtCtlVolumeName, claimName), virtCtlNamespace, namespace)
+		commandAndArgs := []string{virtctl.COMMAND_ADDVOLUME, name, fmt.Sprintf(virtCtlVolumeName, claimName), virtCtlNamespace, namespace}
+		if dryRun {
+			commandAndArgs = append(commandAndArgs, "--dry-run")
+		}
+		if cache == v1.CacheNone ||
+			cache == v1.CacheWriteThrough ||
+			cache == v1.CacheWriteBack {
+			commandAndArgs = append(commandAndArgs, fmt.Sprintf(virtCtlCache, cache))
+		}
+		addvolumeCommand := clientcmd.NewRepeatableVirtctlCommand(commandAndArgs...)
 		Eventually(func() error {
 			return addvolumeCommand()
 		}, 3*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 	}
 
-	removeVolumeVMI := func(name, namespace, volumeName string) {
+	removeVolumeVMI := func(name, namespace, volumeName string, dryRun bool) {
 		Eventually(func() error {
 			return virtClient.VirtualMachineInstance(namespace).RemoveVolume(name, &v1.RemoveVolumeOptions{
-				Name: volumeName,
+				Name:   volumeName,
+				DryRun: getDryRunOption(dryRun),
 			})
 		}, 3*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 	}
 
-	removeVolumeVM := func(name, namespace, volumeName string) {
+	removeVolumeVM := func(name, namespace, volumeName string, dryRun bool) {
 		Eventually(func() error {
 			return virtClient.VirtualMachine(namespace).RemoveVolume(name, &v1.RemoveVolumeOptions{
-				Name: volumeName,
+				Name:   volumeName,
+				DryRun: getDryRunOption(dryRun),
 			})
 		}, 3*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 	}
 
-	removeVolumeVirtctl := func(name, namespace, volumeName string) {
+	removeVolumeVirtctl := func(name, namespace, volumeName string, dryRun bool) {
 		By("Invoking virtlctl removevolume")
-		removeVolumeCommand := tests.NewRepeatableVirtctlCommand(virtctl.COMMAND_REMOVEVOLUME, name, fmt.Sprintf(virtCtlVolumeName, volumeName), virtCtlNamespace, namespace)
+		commandAndArgs := []string{virtctl.COMMAND_REMOVEVOLUME, name, fmt.Sprintf(virtCtlVolumeName, volumeName), virtCtlNamespace, namespace}
+		if dryRun {
+			commandAndArgs = append(commandAndArgs, "--dry-run")
+		}
+		removeVolumeCommand := clientcmd.NewRepeatableVirtctlCommand(commandAndArgs...)
 		Eventually(func() error {
 			return removeVolumeCommand()
 		}, 3*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
@@ -210,7 +241,7 @@ var _ = SIGDescribe("Hotplug", func() {
 		}, 90*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 	}
 
-	verifyVolumeStatus := func(vmi *v1.VirtualMachineInstance, phase v1.VolumePhase, volumeNames ...string) {
+	verifyVolumeStatus := func(vmi *v1.VirtualMachineInstance, phase v1.VolumePhase, cache v1.DriverCache, volumeNames ...string) {
 		By("Verify the volume status of the hotplugged volume is ready")
 		nameMap := make(map[string]bool)
 		for _, volumeName := range volumeNames {
@@ -236,56 +267,89 @@ var _ = SIGDescribe("Hotplug", func() {
 				return fmt.Errorf("waiting on volume statuses for hotplug disks to be ready")
 			}
 
+			// verify disk cache mode in spec
+			for _, disk := range updatedVMI.Spec.Domain.Devices.Disks {
+				if _, ok := nameMap[disk.Name]; ok && disk.Cache != cache {
+					return fmt.Errorf("Expected disk cache mode is %s, but %s in actual", cache, string(disk.Cache))
+				}
+			}
+
 			return nil
 		}, 360*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 	}
 
+	verifyNoVolumeAttached := func(vmi *v1.VirtualMachineInstance, volumeNames ...string) {
+		By("Verify that the number of attached volumes does not change")
+		volumeNamesMap := make(map[string]struct{}, len(volumeNames))
+		for _, volumeName := range volumeNames {
+			volumeNamesMap[volumeName] = struct{}{}
+		}
+		Consistently(func() error {
+			currentVMI, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			foundVolume := 0
+			for _, volumeStatus := range currentVMI.Status.VolumeStatus {
+				if _, ok := volumeNamesMap[volumeStatus.Name]; ok && volumeStatus.HotplugVolume != nil && volumeStatus.Target != "" {
+					if volumeStatus.Phase == v1.VolumeReady {
+						foundVolume++
+					}
+				}
+			}
+			if foundVolume != 0 {
+				return fmt.Errorf("a volume has been attached")
+			}
+			return nil
+		}, 60*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
+	}
+
 	verifyCreateData := func(vmi *v1.VirtualMachineInstance, device string) {
 		batch := []expect.Batcher{
-			&expect.BSnd{S: fmt.Sprintf("sudo mkfs.ext4 %s\n", device)},
+			&expect.BSnd{S: fmt.Sprintf("sudo mkfs.ext4 -F %s\n", device)},
 			&expect.BExp{R: console.PromptExpression},
-			&expect.BSnd{S: expectReturn},
+			&expect.BSnd{S: tests.EchoLastReturnValue},
 			&expect.BExp{R: console.RetValue("0")},
 			&expect.BSnd{S: fmt.Sprintf("sudo mkdir -p %s\n", filepath.Join("/test", filepath.Base(device)))},
 			&expect.BExp{R: console.PromptExpression},
 			&expect.BSnd{S: fmt.Sprintf("sudo mount %s %s\n", device, filepath.Join("/test", filepath.Base(device)))},
 			&expect.BExp{R: console.PromptExpression},
-			&expect.BSnd{S: expectReturn},
+			&expect.BSnd{S: tests.EchoLastReturnValue},
 			&expect.BExp{R: console.RetValue("0")},
 			&expect.BSnd{S: fmt.Sprintf("sudo mkdir -p %s\n", filepath.Join("/test", filepath.Base(device), "data"))},
 			&expect.BExp{R: console.PromptExpression},
-			&expect.BSnd{S: expectReturn},
+			&expect.BSnd{S: tests.EchoLastReturnValue},
 			&expect.BExp{R: console.RetValue("0")},
 			&expect.BSnd{S: fmt.Sprintf("sudo chmod a+w %s\n", filepath.Join("/test", filepath.Base(device), "data"))},
 			&expect.BExp{R: console.PromptExpression},
-			&expect.BSnd{S: expectReturn},
+			&expect.BSnd{S: tests.EchoLastReturnValue},
 			&expect.BExp{R: console.RetValue("0")},
-			&expect.BSnd{S: fmt.Sprintf("echo '%s' > %s\n", vmi.UID, filepath.Join("/test", filepath.Base(device), "data/message"))},
+			&expect.BSnd{S: fmt.Sprintf("echo '%s' > %s\n", vmi.UID, filepath.Join("/test", filepath.Base(device), dataMessage))},
 			&expect.BExp{R: console.PromptExpression},
-			&expect.BSnd{S: expectReturn},
+			&expect.BSnd{S: tests.EchoLastReturnValue},
 			&expect.BExp{R: console.RetValue("0")},
-			&expect.BSnd{S: fmt.Sprintf("cat %s\n", filepath.Join("/test", filepath.Base(device), "data/message"))},
+			&expect.BSnd{S: fmt.Sprintf("cat %s\n", filepath.Join("/test", filepath.Base(device), dataMessage))},
 			&expect.BExp{R: string(vmi.UID)},
-			&expect.BSnd{S: "sync\n"},
+			&expect.BSnd{S: syncName},
 			&expect.BExp{R: console.PromptExpression},
-			&expect.BSnd{S: "sync\n"},
+			&expect.BSnd{S: syncName},
 			&expect.BExp{R: console.PromptExpression},
 		}
 		Expect(console.SafeExpectBatch(vmi, batch, 20)).To(Succeed())
 	}
 
 	verifyWriteReadData := func(vmi *v1.VirtualMachineInstance, device string) {
-		dataFile := filepath.Join("/test", filepath.Base(device), "data/message")
+		dataFile := filepath.Join("/test", filepath.Base(device), dataMessage)
 		batch := []expect.Batcher{
 			&expect.BSnd{S: fmt.Sprintf("echo '%s' > %s\n", vmi.UID, dataFile)},
 			&expect.BExp{R: console.PromptExpression},
-			&expect.BSnd{S: expectReturn},
+			&expect.BSnd{S: tests.EchoLastReturnValue},
 			&expect.BExp{R: console.RetValue("0")},
 			&expect.BSnd{S: fmt.Sprintf("cat %s\n", dataFile)},
 			&expect.BExp{R: string(vmi.UID)},
-			&expect.BSnd{S: "sync\n"},
+			&expect.BSnd{S: syncName},
 			&expect.BExp{R: console.PromptExpression},
-			&expect.BSnd{S: "sync\n"},
+			&expect.BSnd{S: syncName},
 			&expect.BExp{R: console.PromptExpression},
 		}
 		Expect(console.SafeExpectBatch(vmi, batch, 20)).To(Succeed())
@@ -296,7 +360,7 @@ var _ = SIGDescribe("Hotplug", func() {
 			return console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: fmt.Sprintf("sudo ls %s\n", volumeName)},
 				&expect.BExp{R: volumeName},
-				&expect.BSnd{S: expectReturn},
+				&expect.BSnd{S: tests.EchoLastReturnValue},
 				&expect.BExp{R: console.RetValue("0")},
 			}, 10)
 		}, 40*time.Second, 2*time.Second).Should(Succeed())
@@ -363,13 +427,8 @@ var _ = SIGDescribe("Hotplug", func() {
 	}
 
 	createAndStartWFFCStorageHotplugVM := func() *v1.VirtualMachine {
-		hasWffc := tests.HasBindingModeWaitForFirstConsumer()
-		if !hasWffc {
-			Skip("Skip no local wffc storage class available")
-		}
-
-		template := libvmi.NewCirros()
-		vm := createVirtualMachine(true, template)
+		vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Create(tests.NewRandomVirtualMachine(libvmi.NewCirros(), true))
+		Expect(err).ToNot(HaveOccurred())
 		Eventually(func() bool {
 			vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
@@ -411,12 +470,53 @@ var _ = SIGDescribe("Hotplug", func() {
 		if volumeMode == corev1.PersistentVolumeBlock {
 			accessMode = corev1.ReadWriteMany
 		}
+
 		By("Creating DataVolume")
-		dvBlock := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, sc, "64Mi", accessMode, volumeMode)
-		_, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(dvBlock.Namespace).Create(context.Background(), dvBlock, metav1.CreateOptions{})
-		Expect(err).To(BeNil())
-		Eventually(ThisDV(dvBlock), 240).Should(HaveSucceeded())
+		dvBlock := libdv.NewDataVolume(
+			libdv.WithBlankImageSource(),
+			libdv.WithPVC(
+				libdv.PVCWithStorageClass(sc),
+				libdv.PVCWithVolumeSize(cd.BlankVolumeSize),
+				libdv.PVCWithAccessMode(accessMode),
+				libdv.PVCWithVolumeMode(volumeMode),
+			),
+			libdv.WithForceBindAnnotation(),
+		)
+
+		dvBlock, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(util.NamespaceTestDefault).Create(context.Background(), dvBlock, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		libstorage.EventuallyDV(dvBlock, 240, HaveSucceeded())
 		return dvBlock
+	}
+
+	verifyAttachDetachVolume := func(vm *v1.VirtualMachine, addVolumeFunc addVolumeFunction, removeVolumeFunc removeVolumeFunction, sc string, volumeMode corev1.PersistentVolumeMode, vmiOnly, waitToStart bool) {
+		dv := createDataVolumeAndWaitForImport(sc, volumeMode)
+
+		vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		if waitToStart {
+			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
+		}
+		By(addingVolumeRunningVM)
+		addVolumeFunc(vm.Name, vm.Namespace, "testvolume", dv.Name, v1.DiskBusSCSI, false, "")
+		By(verifyingVolumeDiskInVM)
+		if !vmiOnly {
+			verifyVolumeAndDiskVMAdded(virtClient, vm, "testvolume")
+		}
+		vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		verifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
+		verifyVolumeStatus(vmi, v1.VolumeReady, "", "testvolume")
+		getVmiConsoleAndLogin(vmi)
+		targets := verifyHotplugAttachedAndUseable(vmi, []string{"testvolume"})
+		verifySingleAttachmentPod(vmi)
+		By(removingVolumeFromVM)
+		removeVolumeFunc(vm.Name, vm.Namespace, "testvolume", false)
+		if !vmiOnly {
+			By(verifyingVolumeNotExist)
+			verifyVolumeAndDiskVMRemoved(vm, "testvolume")
+		}
+		verifyVolumeNolongerAccessible(vmi, targets[0])
 	}
 
 	Context("Offline VM", func() {
@@ -425,8 +525,8 @@ var _ = SIGDescribe("Hotplug", func() {
 		)
 		BeforeEach(func() {
 			By("Creating VirtualMachine")
-			template, _ := newVirtualMachineInstanceWithContainerDisk()
-			vm = createVirtualMachine(false, template)
+			vm, err = virtClient.VirtualMachine(util.NamespaceTestDefault).Create(tests.NewRandomVirtualMachine(libvmi.NewCirros(), false))
+			Expect(err).ToNot(HaveOccurred())
 		})
 
 		AfterEach(func() {
@@ -434,87 +534,86 @@ var _ = SIGDescribe("Hotplug", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		table.DescribeTable("Should add volumes on an offline VM", func(addVolumeFunc func(name, namespace, volumeName, claimName, bus string), removeVolumeFunc func(name, namespace, volumeName string)) {
+		DescribeTable("Should add volumes on an offline VM", func(addVolumeFunc addVolumeFunction, removeVolumeFunc removeVolumeFunction) {
 			By("Adding test volumes")
-			addVolumeFunc(vm.Name, vm.Namespace, testNewVolume1, "madeup", "scsi")
-			addVolumeFunc(vm.Name, vm.Namespace, testNewVolume2, "madeup", "scsi")
+			addVolumeFunc(vm.Name, vm.Namespace, testNewVolume1, "madeup", v1.DiskBusSCSI, false, "")
+			addVolumeFunc(vm.Name, vm.Namespace, testNewVolume2, "madeup", v1.DiskBusSCSI, false, "")
 			By("Verifying the volumes have been added to the template spec")
-			tests.VerifyVolumeAndDiskVMAdded(virtClient, vm, testNewVolume1, testNewVolume2)
+			verifyVolumeAndDiskVMAdded(virtClient, vm, testNewVolume1, testNewVolume2)
 			By("Removing new volumes from VM")
-			removeVolumeFunc(vm.Name, vm.Namespace, testNewVolume1)
-			removeVolumeFunc(vm.Name, vm.Namespace, testNewVolume2)
+			removeVolumeFunc(vm.Name, vm.Namespace, testNewVolume1, false)
+			removeVolumeFunc(vm.Name, vm.Namespace, testNewVolume2, false)
 
 			verifyVolumeAndDiskVMRemoved(vm, testNewVolume1, testNewVolume2)
 		},
-			table.Entry("with DataVolume", addDVVolumeVM, removeVolumeVM),
-			table.Entry("with PersistentVolume", addPVCVolumeVM, removeVolumeVM),
+			Entry("with DataVolume", addDVVolumeVM, removeVolumeVM),
+			Entry("with PersistentVolume", addPVCVolumeVM, removeVolumeVM),
 		)
 	})
 
 	Context("WFFC storage", func() {
 		var (
 			vm *v1.VirtualMachine
+			sc string
+		)
+		const (
+			numPVs = 3
 		)
 
 		BeforeEach(func() {
-			pvList, err := virtClient.CoreV1().PersistentVolumes().List(context.TODO(), metav1.ListOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			// Verify we have at least 3 available file system PVs
-			count := 0
-			for _, pv := range pvList.Items {
-				if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 || (pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == corev1.PersistentVolumeBlock) {
-					// Not a local volume filesystem PV
-					continue
-				}
-				if pv.Spec.ClaimRef == nil {
-					count++
-				}
+			var exists bool
+			sc, exists = libstorage.GetRWOFileSystemStorageClass()
+			if !exists || !libstorage.IsStorageClassBindingModeWaitForFirstConsumer(sc) {
+				Skip("Skip no wffc storage class available")
 			}
-			if count < 3 {
-				Skip("Not enough available filesystem local storage PVs available")
-			}
+			libstorage.CheckNoProvisionerStorageClassPVs(sc, numPVs)
+
 			vm = createAndStartWFFCStorageHotplugVM()
 		})
 
-		table.DescribeTable("Should be able to add and use WFFC local storage", func(addVolumeFunc func(name, namespace, volumeName, claimName, bus string), removeVolumeFunc func(name, namespace, volumeName string)) {
-			tests.SkipIfNonRoot(virtClient, "root owned disk.img")
+		DescribeTable("Should be able to add and use WFFC local storage", func(addVolumeFunc addVolumeFunction, removeVolumeFunc removeVolumeFunction) {
+			checks.SkipIfNonRoot("root owned disk.img")
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
 			dvNames := make([]string, 0)
-			for i := 0; i < 3; i++ {
-				dv := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, tests.Config.StorageClassLocal, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
-				_, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.TODO(), dv, metav1.CreateOptions{})
-				Expect(err).To(BeNil())
+			for i := 0; i < numPVs; i++ {
+				dv := libdv.NewDataVolume(
+					libdv.WithBlankImageSource(),
+					libdv.WithPVC(libdv.PVCWithStorageClass(sc), libdv.PVCWithVolumeSize(cd.BlankVolumeSize)),
+				)
+
+				dv, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(util.NamespaceTestDefault).Create(context.TODO(), dv, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
 				dvNames = append(dvNames, dv.Name)
 			}
 
-			for i := 0; i < 3; i++ {
+			for i := 0; i < numPVs; i++ {
 				By("Adding volume " + strconv.Itoa(i) + " to running VM, dv name:" + dvNames[i])
-				addVolumeFunc(vm.Name, vm.Namespace, dvNames[i], dvNames[i], "scsi")
+				addVolumeFunc(vm.Name, vm.Namespace, dvNames[i], dvNames[i], v1.DiskBusSCSI, false, "")
 			}
 
 			vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
-			tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, dvNames...)
-			verifyVolumeStatus(vmi, v1.VolumeReady, dvNames...)
+			verifyVolumeAndDiskVMIAdded(virtClient, vmi, dvNames...)
+			verifyVolumeStatus(vmi, v1.VolumeReady, "", dvNames...)
 			getVmiConsoleAndLogin(vmi)
 			verifyHotplugAttachedAndUseable(vmi, dvNames)
 			verifySingleAttachmentPod(vmi)
 			for _, volumeName := range dvNames {
 				By("removing volume " + volumeName + " from VM")
-				removeVolumeFunc(vm.Name, vm.Namespace, volumeName)
+				removeVolumeFunc(vm.Name, vm.Namespace, volumeName, false)
 			}
 			for _, volumeName := range dvNames {
 				verifyVolumeNolongerAccessible(vmi, volumeName)
 			}
 		},
-			table.Entry("calling endpoints directly", addDVVolumeVMI, removeVolumeVMI),
-			table.Entry("using virtctl", addVolumeVirtctl, removeVolumeVirtctl),
+			Entry("calling endpoints directly", addDVVolumeVMI, removeVolumeVMI),
+			Entry("using virtctl", addVolumeVirtctl, removeVolumeVirtctl),
 		)
 	})
 
-	Context("[rook-ceph]", func() {
+	Context("[storage-req]", func() {
 		Context("Online VM", func() {
 			var (
 				vm *v1.VirtualMachine
@@ -540,18 +639,20 @@ var _ = SIGDescribe("Hotplug", func() {
 
 			BeforeEach(func() {
 				exists := false
-				sc, exists = tests.GetCephStorageClass()
+				sc, exists = libstorage.GetRWXBlockStorageClass()
 				if !exists {
-					Skip("Skip OCS tests when Ceph is not present")
+					Skip("Skip test when RWXBlock storage class is not present")
 				}
 
-				template := libvmi.NewCirros()
 				node := findCPUManagerWorkerNode()
+				opts := []libvmi.Option{}
 				if node != "" {
-					template.Spec.NodeSelector = make(map[string]string)
-					template.Spec.NodeSelector[corev1.LabelHostname] = node
+					opts = append(opts, libvmi.WithNodeSelectorFor(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node}}))
 				}
-				vm = createVirtualMachine(true, template)
+				vmi := libvmi.NewCirros(opts...)
+
+				vm, err = virtClient.VirtualMachine(util.NamespaceTestDefault).Create(tests.NewRandomVirtualMachine(vmi, true))
+				Expect(err).ToNot(HaveOccurred())
 				Eventually(func() bool {
 					vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
@@ -559,45 +660,19 @@ var _ = SIGDescribe("Hotplug", func() {
 				}, 300*time.Second, 1*time.Second).Should(BeTrue())
 			})
 
-			table.DescribeTable("should add/remove volume", func(addVolumeFunc func(name, namespace, volumeName, claimName, bus string), removeVolumeFunc func(name, namespace, volumeName string), volumeMode corev1.PersistentVolumeMode, vmiOnly, waitToStart bool) {
-				dv := createDataVolumeAndWaitForImport(sc, volumeMode)
-
-				vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				if waitToStart {
-					tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
-				}
-				By("Adding volume to running VM")
-				addVolumeFunc(vm.Name, vm.Namespace, "testvolume", dv.Name, "scsi")
-				By("Verifying the volume and disk are in the VM and VMI")
-				if !vmiOnly {
-					tests.VerifyVolumeAndDiskVMAdded(virtClient, vm, "testvolume")
-				}
-				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
-				verifyVolumeStatus(vmi, v1.VolumeReady, "testvolume")
-				getVmiConsoleAndLogin(vmi)
-				targets := verifyHotplugAttachedAndUseable(vmi, []string{"testvolume"})
-				verifySingleAttachmentPod(vmi)
-				By("removing volume from VM")
-				removeVolumeFunc(vm.Name, vm.Namespace, "testvolume")
-				if !vmiOnly {
-					By("Verifying the volume no longer exists in VM")
-					verifyVolumeAndDiskVMRemoved(vm, "testvolume")
-				}
-				verifyVolumeNolongerAccessible(vmi, targets[0])
+			DescribeTable("should add/remove volume", func(addVolumeFunc addVolumeFunction, removeVolumeFunc removeVolumeFunction, volumeMode corev1.PersistentVolumeMode, vmiOnly, waitToStart bool) {
+				verifyAttachDetachVolume(vm, addVolumeFunc, removeVolumeFunc, sc, volumeMode, vmiOnly, waitToStart)
 			},
-				table.Entry("with DataVolume immediate attach", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false, false),
-				table.Entry("with PersistentVolume immediate attach", addPVCVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false, false),
-				table.Entry("with DataVolume wait for VM to finish starting", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false, true),
-				table.Entry("with PersistentVolume wait for VM to finish starting", addPVCVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false, true),
-				table.Entry("with DataVolume immediate attach, VMI directly", addDVVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true, false),
-				table.Entry("with PersistentVolume immediate attach, VMI directly", addPVCVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true, false),
-				table.Entry("with Block DataVolume immediate attach", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeBlock, false, false),
+				Entry("with DataVolume immediate attach", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false, false),
+				Entry("with PersistentVolume immediate attach", addPVCVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false, false),
+				Entry("with DataVolume wait for VM to finish starting", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false, true),
+				Entry("with PersistentVolume wait for VM to finish starting", addPVCVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false, true),
+				Entry("with DataVolume immediate attach, VMI directly", addDVVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true, false),
+				Entry("with PersistentVolume immediate attach, VMI directly", addPVCVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true, false),
+				Entry("with Block DataVolume immediate attach", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeBlock, false, false),
 			)
 
-			table.DescribeTable("Should be able to add and remove multiple volumes", func(addVolumeFunc func(name, namespace, volumeName, claimName, bus string), removeVolumeFunc func(name, namespace, volumeName string), volumeMode corev1.PersistentVolumeMode, vmiOnly bool) {
+			DescribeTable("Should be able to add and remove multiple volumes", func(addVolumeFunc addVolumeFunction, removeVolumeFunc removeVolumeFunction, volumeMode corev1.PersistentVolumeMode, vmiOnly bool) {
 				vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				getVmiConsoleAndLogin(vmi)
@@ -606,26 +681,26 @@ var _ = SIGDescribe("Hotplug", func() {
 				for i := 0; i < 5; i++ {
 					volumeName := fmt.Sprintf("volume%d", i)
 					dv := createDataVolumeAndWaitForImport(sc, volumeMode)
-					By("Adding volume to running VM")
-					addVolumeFunc(vm.Name, vm.Namespace, volumeName, dv.Name, "scsi")
+					By(addingVolumeRunningVM)
+					addVolumeFunc(vm.Name, vm.Namespace, volumeName, dv.Name, v1.DiskBusSCSI, false, "")
 					testVolumes = append(testVolumes, volumeName)
-					verifyVolumeStatus(vmi, v1.VolumeReady, testVolumes...)
+					verifyVolumeStatus(vmi, v1.VolumeReady, "", testVolumes...)
 				}
-				By("Verifying the volume and disk are in the VM and VMI")
+				By(verifyingVolumeDiskInVM)
 				if !vmiOnly {
-					tests.VerifyVolumeAndDiskVMAdded(virtClient, vm, testVolumes...)
+					verifyVolumeAndDiskVMAdded(virtClient, vm, testVolumes...)
 				}
 				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
-				tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, testVolumes...)
-				verifyVolumeStatus(vmi, v1.VolumeReady, testVolumes...)
+				verifyVolumeAndDiskVMIAdded(virtClient, vmi, testVolumes...)
+				verifyVolumeStatus(vmi, v1.VolumeReady, "", testVolumes...)
 				targets := verifyHotplugAttachedAndUseable(vmi, testVolumes)
 				verifySingleAttachmentPod(vmi)
 				for _, volumeName := range testVolumes {
 					By("removing volume " + volumeName + " from VM")
-					removeVolumeFunc(vm.Name, vm.Namespace, volumeName)
+					removeVolumeFunc(vm.Name, vm.Namespace, volumeName, false)
 					if !vmiOnly {
-						By("Verifying the volume no longer exists in VM")
+						By(verifyingVolumeNotExist)
 						verifyVolumeAndDiskVMRemoved(vm, volumeName)
 					}
 				}
@@ -633,12 +708,12 @@ var _ = SIGDescribe("Hotplug", func() {
 					verifyVolumeNolongerAccessible(vmi, targets[i])
 				}
 			},
-				table.Entry("with VMs", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false),
-				table.Entry("with VMIs", addDVVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true),
-				table.Entry("with VMs and block", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeBlock, false),
+				Entry("with VMs", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false),
+				Entry("with VMIs", addDVVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true),
+				Entry("with VMs and block", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeBlock, false),
 			)
 
-			table.DescribeTable("Should be able to add and remove and re-add multiple volumes", func(addVolumeFunc func(name, namespace, volumeName, claimName, bus string), removeVolumeFunc func(name, namespace, volumeName string), volumeMode corev1.PersistentVolumeMode, vmiOnly bool) {
+			DescribeTable("Should be able to add and remove and re-add multiple volumes", func(addVolumeFunc addVolumeFunction, removeVolumeFunc removeVolumeFunction, volumeMode corev1.PersistentVolumeMode, vmiOnly bool) {
 				vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
@@ -653,18 +728,18 @@ var _ = SIGDescribe("Hotplug", func() {
 
 				for i := 0; i < 4; i++ {
 					By("Adding volume " + strconv.Itoa(i) + " to running VM, dv name:" + dvNames[i])
-					addVolumeFunc(vm.Name, vm.Namespace, testVolumes[i], dvNames[i], "scsi")
+					addVolumeFunc(vm.Name, vm.Namespace, testVolumes[i], dvNames[i], v1.DiskBusSCSI, false, "")
 				}
 
-				By("Verifying the volume and disk are in the VM and VMI")
+				By(verifyingVolumeDiskInVM)
 				if !vmiOnly {
-					tests.VerifyVolumeAndDiskVMAdded(virtClient, vm, testVolumes[:len(testVolumes)-1]...)
+					verifyVolumeAndDiskVMAdded(virtClient, vm, testVolumes[:len(testVolumes)-1]...)
 				}
 				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
-				tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, testVolumes[:len(testVolumes)-1]...)
+				verifyVolumeAndDiskVMIAdded(virtClient, vmi, testVolumes[:len(testVolumes)-1]...)
 				waitForAttachmentPodToRun(vmi)
-				verifyVolumeStatus(vmi, v1.VolumeReady, testVolumes[:len(testVolumes)-1]...)
+				verifyVolumeStatus(vmi, v1.VolumeReady, "", testVolumes[:len(testVolumes)-1]...)
 				verifySingleAttachmentPod(vmi)
 				By("removing volume sdc, with dv" + dvNames[2])
 				Eventually(func() string {
@@ -678,7 +753,7 @@ var _ = SIGDescribe("Hotplug", func() {
 					return vmi.Status.VolumeStatus[5].Target
 				}, 40*time.Second, 2*time.Second).Should(Equal("sdd"))
 
-				removeVolumeFunc(vm.Name, vm.Namespace, testVolumes[2])
+				removeVolumeFunc(vm.Name, vm.Namespace, testVolumes[2], false)
 				Eventually(func() string {
 					vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
@@ -686,7 +761,7 @@ var _ = SIGDescribe("Hotplug", func() {
 				}, 40*time.Second, 2*time.Second).Should(Equal("sdd"))
 
 				By("Adding remaining volume, it should end up in the spot that was just cleared")
-				addVolumeFunc(vm.Name, vm.Namespace, testVolumes[4], dvNames[4], "scsi")
+				addVolumeFunc(vm.Name, vm.Namespace, testVolumes[4], dvNames[4], v1.DiskBusSCSI, false, "")
 				Eventually(func() string {
 					vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
@@ -698,7 +773,7 @@ var _ = SIGDescribe("Hotplug", func() {
 					return ""
 				}, 40*time.Second, 2*time.Second).Should(Equal("sdc"))
 				By("Adding intermediate volume, it should end up at the end")
-				addVolumeFunc(vm.Name, vm.Namespace, testVolumes[2], dvNames[2], "scsi")
+				addVolumeFunc(vm.Name, vm.Namespace, testVolumes[2], dvNames[2], v1.DiskBusSCSI, false, "")
 				Eventually(func() string {
 					vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
@@ -711,17 +786,17 @@ var _ = SIGDescribe("Hotplug", func() {
 				}, 40*time.Second, 2*time.Second).Should(Equal("sde"))
 				verifySingleAttachmentPod(vmi)
 				for _, volumeName := range testVolumes {
-					By("removing volume from VM")
-					removeVolumeFunc(vm.Name, vm.Namespace, volumeName)
+					By(removingVolumeFromVM)
+					removeVolumeFunc(vm.Name, vm.Namespace, volumeName, false)
 					if !vmiOnly {
-						By("Verifying the volume no longer exists in VM")
+						By(verifyingVolumeNotExist)
 						verifyVolumeAndDiskVMRemoved(vm, volumeName)
 					}
 				}
 			},
-				table.Entry("with VMs", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false),
-				table.Entry("with VMIs", addDVVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true),
-				table.Entry("[Serial] with VMs and block", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeBlock, false),
+				Entry("with VMs", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false),
+				Entry("with VMIs", addDVVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true),
+				Entry("[Serial] with VMs and block", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeBlock, false),
 			)
 
 			It("should permanently add hotplug volume when added to VM, but still unpluggable after restart", func() {
@@ -731,20 +806,20 @@ var _ = SIGDescribe("Hotplug", func() {
 				Expect(err).ToNot(HaveOccurred())
 				tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
 
-				By("Adding volume to running VM")
-				addDVVolumeVM(vm.Name, vm.Namespace, "testvolume", dvBlock.Name, "scsi")
-				By("Verifying the volume and disk are in the VM and VMI")
-				tests.VerifyVolumeAndDiskVMAdded(virtClient, vm, "testvolume")
+				By(addingVolumeRunningVM)
+				addDVVolumeVM(vm.Name, vm.Namespace, "testvolume", dvBlock.Name, v1.DiskBusSCSI, false, "")
+				By(verifyingVolumeDiskInVM)
+				verifyVolumeAndDiskVMAdded(virtClient, vm, "testvolume")
 				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
-				tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
-				verifyVolumeStatus(vmi, v1.VolumeReady, "testvolume")
+				verifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
+				verifyVolumeStatus(vmi, v1.VolumeReady, "", "testvolume")
 				verifySingleAttachmentPod(vmi)
 
 				By("Verifying the volume is attached and usable")
 				getVmiConsoleAndLogin(vmi)
 				targets := verifyHotplugAttachedAndUseable(vmi, []string{"testvolume"})
-				Expect(len(targets)).To(Equal(1))
+				Expect(targets).To(HaveLen(1))
 
 				By("stopping VM")
 				vm = tests.StopVirtualMachine(vm)
@@ -755,15 +830,15 @@ var _ = SIGDescribe("Hotplug", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Verifying that the hotplugged volume is hotpluggable after a restart")
-				tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
-				verifyVolumeStatus(vmi, v1.VolumeReady, "testvolume")
+				verifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
+				verifyVolumeStatus(vmi, v1.VolumeReady, "", "testvolume")
 
 				By("Verifying the hotplug device is auto-mounted during booting")
 				getVmiConsoleAndLogin(vmi)
 				verifyVolumeAccessible(vmi, targets[0])
 
 				By("Remove volume from a running VM")
-				removeVolumeVM(vm.Name, vm.Namespace, "testvolume")
+				removeVolumeVM(vm.Name, vm.Namespace, "testvolume", false)
 				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
@@ -777,12 +852,12 @@ var _ = SIGDescribe("Hotplug", func() {
 				Expect(err).ToNot(HaveOccurred())
 				tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
 
-				By("Adding volume to running VM")
-				err = virtClient.VirtualMachine(vm.Namespace).AddVolume(vm.Name, getAddVolumeOptions("disk0", "scsi", &v1.HotplugVolumeSource{
+				By(addingVolumeRunningVM)
+				err = virtClient.VirtualMachine(vm.Namespace).AddVolume(vm.Name, getAddVolumeOptions("disk0", v1.DiskBusSCSI, &v1.HotplugVolumeSource{
 					DataVolume: &v1.DataVolumeSource{
 						Name: dvBlock.Name,
 					},
-				}))
+				}, false, ""))
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("conflicts with an existing volume of the same name on the vmi template"))
 			})
@@ -796,19 +871,19 @@ var _ = SIGDescribe("Hotplug", func() {
 				tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
 				getVmiConsoleAndLogin(vmi)
 
-				By("Adding volume to running VM")
-				addDVVolumeVM(vm.Name, vm.Namespace, "block", dvBlock.Name, "scsi")
-				addDVVolumeVM(vm.Name, vm.Namespace, "fs", dvFileSystem.Name, "scsi")
-				tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, "block", "fs")
+				By(addingVolumeRunningVM)
+				addDVVolumeVM(vm.Name, vm.Namespace, "block", dvBlock.Name, v1.DiskBusSCSI, false, "")
+				addDVVolumeVM(vm.Name, vm.Namespace, "fs", dvFileSystem.Name, v1.DiskBusSCSI, false, "")
+				verifyVolumeAndDiskVMIAdded(virtClient, vmi, "block", "fs")
 
-				verifyVolumeStatus(vmi, v1.VolumeReady, "block", "fs")
+				verifyVolumeStatus(vmi, v1.VolumeReady, "", "block", "fs")
 				targets := getTargetsFromVolumeStatus(vmi, "block", "fs")
 				for i := 0; i < 2; i++ {
 					verifyVolumeAccessible(vmi, targets[i])
 				}
 				verifySingleAttachmentPod(vmi)
-				removeVolumeVMI(vmi.Name, vmi.Namespace, "block")
-				removeVolumeVMI(vmi.Name, vmi.Namespace, "fs")
+				removeVolumeVMI(vmi.Name, vmi.Namespace, "block", false)
+				removeVolumeVMI(vmi.Name, vmi.Namespace, "fs", false)
 
 				for i := 0; i < 2; i++ {
 					verifyVolumeNolongerAccessible(vmi, targets[i])
@@ -848,9 +923,9 @@ var _ = SIGDescribe("Hotplug", func() {
 
 			BeforeEach(func() {
 				exists := false
-				sc, exists = tests.GetCephStorageClass()
+				sc, exists = libstorage.GetRWXBlockStorageClass()
 				if !exists {
-					Skip("Skip OCS tests when Ceph is not present")
+					Skip("Skip test when RWXBlock storage class is not present")
 				}
 
 				// Workaround for the issue with CPU manager and runc prior to version v1.0.0:
@@ -861,7 +936,7 @@ var _ = SIGDescribe("Hotplug", func() {
 				// a node without CPU manager.
 				sourceNode = ""
 				targetNode = ""
-				for _, node := range util.GetAllSchedulableNodes(virtClient).Items {
+				for _, node := range libnode.GetAllSchedulableNodes(virtClient).Items {
 					labels := node.GetLabels()
 					if val, ok := labels[v1.CPUManager]; ok && val == "true" {
 						// Use a node with CPU manager as migration source
@@ -878,17 +953,20 @@ var _ = SIGDescribe("Hotplug", func() {
 				}
 				// Ensure the virt-launcher pod is scheduled on the chosen source node and then
 				// migrated to the proper target.
-				tests.AddLabelToNode(sourceNode, hotplugLabelKey, hotplugLabelValue)
-				vmi, _ = newVirtualMachineInstanceWithContainerDisk()
+				libnode.AddLabelToNode(sourceNode, hotplugLabelKey, hotplugLabelValue)
+				vmi = libvmi.NewCirros(
+					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+					libvmi.WithNetwork(v1.DefaultPodNetwork()),
+				)
 				vmi.Spec.NodeSelector = map[string]string{hotplugLabelKey: hotplugLabelValue}
 				vmi = tests.RunVMIAndExpectLaunch(vmi, 240)
-				tests.AddLabelToNode(targetNode, hotplugLabelKey, hotplugLabelValue)
+				libnode.AddLabelToNode(targetNode, hotplugLabelKey, hotplugLabelValue)
 			})
 
 			AfterEach(func() {
 				// Cleanup node labels
-				tests.RemoveLabelFromNode(sourceNode, hotplugLabelKey)
-				tests.RemoveLabelFromNode(targetNode, hotplugLabelKey)
+				libnode.RemoveLabelFromNode(sourceNode, hotplugLabelKey)
+				libnode.RemoveLabelFromNode(targetNode, hotplugLabelKey)
 			})
 
 			It("should allow live migration with attached hotplug volumes", func() {
@@ -905,12 +983,12 @@ var _ = SIGDescribe("Hotplug", func() {
 				verifyIsMigratable(vmi, true)
 
 				By("Adding volume to running VMI")
-				addVolumeFunc(vmi.Name, vmi.Namespace, volumeName, dv.Name, "scsi")
+				addVolumeFunc(vmi.Name, vmi.Namespace, volumeName, dv.Name, v1.DiskBusSCSI, false, "")
 				By("Verifying the volume and disk are in the VMI")
 				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
-				tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, volumeName)
-				verifyVolumeStatus(vmi, v1.VolumeReady, volumeName)
+				verifyVolumeAndDiskVMIAdded(virtClient, vmi, volumeName)
+				verifyVolumeStatus(vmi, v1.VolumeReady, "", volumeName)
 
 				By("Verifying the VMI is still migrateable")
 				verifyIsMigratable(vmi, true)
@@ -918,7 +996,7 @@ var _ = SIGDescribe("Hotplug", func() {
 				By("Verifying the volume is attached and usable")
 				getVmiConsoleAndLogin(vmi)
 				targets := verifyHotplugAttachedAndUseable(vmi, []string{volumeName})
-				Expect(len(targets) == 1).To(BeTrue())
+				Expect(targets).To(HaveLen(1))
 
 				By("Starting the migration multiple times")
 				for i := 0; i < numberOfMigrations; i++ {
@@ -930,7 +1008,7 @@ var _ = SIGDescribe("Hotplug", func() {
 							sourceAttachmentPods = append(sourceAttachmentPods, volumeStatus.HotplugVolume.AttachPodName)
 						}
 					}
-					Expect(len(sourceAttachmentPods) == 1).To(BeTrue())
+					Expect(sourceAttachmentPods).To(HaveLen(1))
 
 					migration := tests.NewRandomMigration(vmi.Name, vmi.Namespace)
 					migrationUID := tests.RunMigrationAndExpectCompletion(virtClient, migration, tests.MigrationWaitTime)
@@ -947,14 +1025,107 @@ var _ = SIGDescribe("Hotplug", func() {
 				}
 
 				By("Verifying the volume can be detached and reattached after migration")
-				removeVolumeFunc(vmi.Name, vmi.Namespace, volumeName)
+				removeVolumeFunc(vmi.Name, vmi.Namespace, volumeName, false)
 				verifyVolumeNolongerAccessible(vmi, targets[0])
-				addVolumeFunc(vmi.Name, vmi.Namespace, volumeName, dv.Name, "scsi")
+				addVolumeFunc(vmi.Name, vmi.Namespace, volumeName, dv.Name, v1.DiskBusSCSI, false, "")
 				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
-				tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, volumeName)
-				verifyVolumeStatus(vmi, v1.VolumeReady, volumeName)
+				verifyVolumeAndDiskVMIAdded(virtClient, vmi, volumeName)
+				verifyVolumeStatus(vmi, v1.VolumeReady, "", volumeName)
 			})
+		})
+
+		Context("disk mutating sidecar", func() {
+			const (
+				hookSidecarImage     = "example-disk-mutation-hook-sidecar"
+				sidecarContainerName = "hook-sidecar-0"
+				newDiskImgName       = "kubevirt-disk.img"
+			)
+
+			var (
+				vm *v1.VirtualMachine
+				dv *cdiv1.DataVolume
+			)
+
+			renderSidecar := func() map[string]string {
+				return map[string]string{
+					"hooks.kubevirt.io/hookSidecars":         fmt.Sprintf(`[{"image": "%s/%s:%s", "imagePullPolicy": "IfNotPresent"}]`, flags.KubeVirtUtilityRepoPrefix, hookSidecarImage, flags.KubeVirtUtilityVersionTag),
+					"diskimage.vm.kubevirt.io/bootImageName": newDiskImgName,
+				}
+			}
+
+			BeforeEach(func() {
+				if !libstorage.HasCDI() {
+					Skip("Skip tests when CDI is not present")
+				}
+			})
+
+			AfterEach(func() {
+				if vm != nil {
+					err := virtClient.VirtualMachine(vm.Namespace).Delete(vm.Name, &metav1.DeleteOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					vm = nil
+				}
+				libstorage.DeleteDataVolume(&dv)
+			})
+
+			DescribeTable("should be able to add and remove volumes", func(addVolumeFunc addVolumeFunction, removeVolumeFunc removeVolumeFunction, storageClassFunc storageClassFunction, volumeMode corev1.PersistentVolumeMode, vmiOnly bool) {
+				sc, exists := storageClassFunc()
+				if !exists {
+					Skip("Skip test when appropriate storage class is not available")
+				}
+
+				var err error
+				url := cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskCirros)
+
+				storageClass, foundSC := libstorage.GetRWXFileSystemStorageClass()
+				if !foundSC {
+					Skip("Skip test when Filesystem storage is not present")
+				}
+
+				dv = libdv.NewDataVolume(
+					libdv.WithNamespace(util.NamespaceTestDefault),
+					libdv.WithRegistryURLSource(url),
+					libdv.WithPVC(
+						libdv.PVCWithStorageClass(storageClass),
+						libdv.PVCWithVolumeSize("256Mi"),
+						libdv.PVCWithReadWriteManyAccessMode(),
+					),
+					libdv.WithForceBindAnnotation(),
+				)
+
+				dv, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.Background(), dv, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				By("waiting for the dv import to pvc to finish")
+				libstorage.EventuallyDV(dv, 180, HaveSucceeded())
+
+				By("rename disk image on PVC")
+				pvc, err := virtClient.CoreV1().PersistentVolumeClaims(dv.Namespace).Get(context.Background(), dv.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				tests.RenameImgFile(pvc, newDiskImgName)
+
+				By("start VM with disk mutation sidecar")
+				vmi := tests.NewRandomVMIWithDataVolume(dv.Name)
+				vmi.ObjectMeta.Annotations = renderSidecar()
+				tests.AddUserData(vmi, "cloud-init", "#!/bin/bash\necho 'hello'\n")
+
+				vm := tests.NewRandomVirtualMachine(vmi, true)
+				vm, err = virtClient.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+				Expect(err).ToNot(HaveOccurred())
+
+				Eventually(func() bool {
+					vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					return vm.Status.Ready
+				}, 300*time.Second, 1*time.Second).Should(BeTrue())
+
+				verifyAttachDetachVolume(vm, addVolumeFunc, removeVolumeFunc, sc, volumeMode, vmiOnly, true)
+			},
+				Entry("with DataVolume and running VM", addDVVolumeVM, removeVolumeVM, libstorage.GetRWOBlockStorageClass, corev1.PersistentVolumeFilesystem, false),
+				Entry("with DataVolume and VMI directly", addDVVolumeVMI, removeVolumeVMI, libstorage.GetRWOBlockStorageClass, corev1.PersistentVolumeFilesystem, true),
+				Entry("[Serial] with Block DataVolume immediate attach", addDVVolumeVM, removeVolumeVM, libstorage.GetRWOBlockStorageClass, corev1.PersistentVolumeBlock, false),
+			)
 		})
 	})
 
@@ -963,25 +1134,36 @@ var _ = SIGDescribe("Hotplug", func() {
 			vm *v1.VirtualMachine
 		)
 
+		const (
+			hotplugPvPath = "/mnt/local-storage/hotplug-test"
+		)
+
+		storageClassHostPath := "host-path"
+		immediateBinding := storagev1.VolumeBindingImmediate
+
 		BeforeEach(func() {
-			// Setup second PVC to use in this context
-			pvNode := tests.CreateHostPathPv(tests.CustomHostPath, tests.HostPathCustom)
-			tests.CreateHostPathPVC(tests.CustomHostPath, "1Gi")
-			template := libvmi.NewCirros()
+			libstorage.CreateStorageClass(storageClassHostPath, &immediateBinding)
+			pvNode := libstorage.CreateHostPathPvWithSizeAndStorageClass(tests.CustomHostPath, hotplugPvPath, "1Gi", storageClassHostPath)
+			libstorage.CreatePVC(tests.CustomHostPath, "1Gi", storageClassHostPath, false)
+
+			opts := []libvmi.Option{}
 			if pvNode != "" {
-				template.Spec.NodeSelector = make(map[string]string)
-				template.Spec.NodeSelector[corev1.LabelHostname] = pvNode
+				opts = append(opts, libvmi.WithNodeSelectorFor(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: pvNode}}))
 			}
-			vm = createVirtualMachine(true, template)
+			vmi := libvmi.NewCirros(opts...)
+
+			vm, err = virtClient.VirtualMachine(util.NamespaceTestDefault).Create(tests.NewRandomVirtualMachine(vmi, true))
+			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() bool {
 				vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return vm.Status.Ready
 			}, 300*time.Second, 1*time.Second).Should(BeTrue())
-		}, 120)
+		})
 
 		AfterEach(func() {
 			tests.DeletePvAndPvc(fmt.Sprintf("%s-disk-for-tests", tests.CustomHostPath))
+			libstorage.DeleteStorageClass(storageClassHostPath)
 		})
 
 		It("should attach a hostpath based volume to running VM", func() {
@@ -989,22 +1171,22 @@ var _ = SIGDescribe("Hotplug", func() {
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
 
-			By("Adding volume to running VM")
+			By(addingVolumeRunningVM)
 			name := fmt.Sprintf("disk-%s", tests.CustomHostPath)
-			addPVCVolumeVMI(vm.Name, vm.Namespace, "testvolume", name, "scsi")
+			addPVCVolumeVMI(vm.Name, vm.Namespace, "testvolume", name, v1.DiskBusSCSI, false, "")
 
-			By("Verifying the volume and disk are in the VM and VMI")
+			By(verifyingVolumeDiskInVM)
 			vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
-			tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
-			verifyVolumeStatus(vmi, v1.VolumeReady, "testvolume")
+			verifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
+			verifyVolumeStatus(vmi, v1.VolumeReady, "", "testvolume")
 
 			getVmiConsoleAndLogin(vmi)
 			targets := getTargetsFromVolumeStatus(vmi, "testvolume")
 			verifyVolumeAccessible(vmi, targets[0])
 			verifySingleAttachmentPod(vmi)
-			By("removing volume from VM")
-			removeVolumeVMI(vm.Name, vm.Namespace, "testvolume")
+			By(removingVolumeFromVM)
+			removeVolumeVMI(vm.Name, vm.Namespace, "testvolume", false)
 			verifyVolumeNolongerAccessible(vmi, targets[0])
 		})
 	})
@@ -1015,41 +1197,51 @@ var _ = SIGDescribe("Hotplug", func() {
 		)
 
 		BeforeEach(func() {
-			template := libvmi.NewCirros()
+			vmi := libvmi.NewCirros()
 			policy := v1.IOThreadsPolicyShared
-			template.Spec.Domain.IOThreadsPolicy = &policy
-			vm = createVirtualMachine(true, template)
+			vmi.Spec.Domain.IOThreadsPolicy = &policy
+			vm, err = virtClient.VirtualMachine(util.NamespaceTestDefault).Create(tests.NewRandomVirtualMachine(vmi, true))
+			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() bool {
 				vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return vm.Status.Ready
 			}, 300*time.Second, 1*time.Second).Should(BeTrue())
-		}, 120)
+		})
 
 		It("should allow adding and removing hotplugged volumes", func() {
-			dv := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, tests.Config.StorageClassLocal, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
-			_, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.TODO(), dv, metav1.CreateOptions{})
-			Expect(err).To(BeNil())
+			sc, exists := libstorage.GetRWOFileSystemStorageClass()
+			if !exists {
+				Skip("Skip no filesystem storage class available")
+			}
+
+			dv := libdv.NewDataVolume(
+				libdv.WithBlankImageSource(),
+				libdv.WithPVC(libdv.PVCWithStorageClass(sc), libdv.PVCWithVolumeSize(cd.BlankVolumeSize)),
+			)
+
+			dv, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(util.NamespaceTestDefault).Create(context.TODO(), dv, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
 
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
 
-			By("Adding volume to running VM")
-			addPVCVolumeVMI(vm.Name, vm.Namespace, "testvolume", dv.Name, "scsi")
+			By(addingVolumeRunningVM)
+			addPVCVolumeVMI(vm.Name, vm.Namespace, "testvolume", dv.Name, v1.DiskBusSCSI, false, "")
 
-			By("Verifying the volume and disk are in the VM and VMI")
+			By(verifyingVolumeDiskInVM)
 			vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
-			tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
-			verifyVolumeStatus(vmi, v1.VolumeReady, "testvolume")
+			verifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
+			verifyVolumeStatus(vmi, v1.VolumeReady, "", "testvolume")
 
 			getVmiConsoleAndLogin(vmi)
 			targets := getTargetsFromVolumeStatus(vmi, "testvolume")
 			verifyVolumeAccessible(vmi, targets[0])
 			verifySingleAttachmentPod(vmi)
-			By("removing volume from VM")
-			removeVolumeVMI(vm.Name, vm.Namespace, "testvolume")
+			By(removingVolumeFromVM)
+			removeVolumeVMI(vm.Name, vm.Namespace, "testvolume", false)
 			verifyVolumeNolongerAccessible(vmi, targets[0])
 		})
 	})
@@ -1060,43 +1252,51 @@ var _ = SIGDescribe("Hotplug", func() {
 		)
 
 		BeforeEach(func() {
-			tests.CreateAllSeparateDeviceHostPathPvs(tests.CustomHostPath)
-			vm = createVirtualMachine(true, libvmi.NewCirros())
+			libstorage.CreateAllSeparateDeviceHostPathPvs(tests.CustomHostPath)
+			vm, err = virtClient.VirtualMachine(util.NamespaceTestDefault).Create(tests.NewRandomVirtualMachine(libvmi.NewCirros(), true))
+			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() bool {
 				vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return vm.Status.Ready
 			}, 300*time.Second, 1*time.Second).Should(BeTrue())
-		}, 120)
+		})
 
 		AfterEach(func() {
-			tests.DeleteAllSeparateDeviceHostPathPvs()
+			libstorage.DeleteAllSeparateDeviceHostPathPvs()
 		})
 
 		It("should attach a hostpath based volume to running VM", func() {
-			dv := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, tests.Config.StorageClassHostPathSeparateDevice, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
-			_, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.TODO(), dv, metav1.CreateOptions{})
-			Expect(err).To(BeNil())
+			dv := libdv.NewDataVolume(
+				libdv.WithBlankImageSource(),
+				libdv.WithPVC(
+					libdv.PVCWithStorageClass(libstorage.StorageClassHostPathSeparateDevice),
+					libdv.PVCWithVolumeSize(cd.BlankVolumeSize),
+				),
+			)
+
+			dv, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(util.NamespaceTestDefault).Create(context.TODO(), dv, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
 
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
 
-			By("Adding volume to running VM")
-			addPVCVolumeVMI(vm.Name, vm.Namespace, "testvolume", dv.Name, "scsi")
+			By(addingVolumeRunningVM)
+			addPVCVolumeVMI(vm.Name, vm.Namespace, "testvolume", dv.Name, v1.DiskBusSCSI, false, "")
 
-			By("Verifying the volume and disk are in the VM and VMI")
+			By(verifyingVolumeDiskInVM)
 			vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
-			tests.VerifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
-			verifyVolumeStatus(vmi, v1.VolumeReady, "testvolume")
+			verifyVolumeAndDiskVMIAdded(virtClient, vmi, "testvolume")
+			verifyVolumeStatus(vmi, v1.VolumeReady, "", "testvolume")
 
 			getVmiConsoleAndLogin(vmi)
 			targets := getTargetsFromVolumeStatus(vmi, "testvolume")
 			verifyVolumeAccessible(vmi, targets[0])
 			verifySingleAttachmentPod(vmi)
-			By("removing volume from VM")
-			removeVolumeVMI(vm.Name, vm.Namespace, "testvolume")
+			By(removingVolumeFromVM)
+			removeVolumeVMI(vm.Name, vm.Namespace, "testvolume", false)
 			verifyVolumeNolongerAccessible(vmi, targets[0])
 		})
 	})
@@ -1104,40 +1304,172 @@ var _ = SIGDescribe("Hotplug", func() {
 	Context("virtctl", func() {
 		var (
 			vm *v1.VirtualMachine
+			sc string
 		)
 
 		BeforeEach(func() {
+			var exists bool
+			sc, exists = libstorage.GetRWOFileSystemStorageClass()
+			if !exists || !libstorage.IsStorageClassBindingModeWaitForFirstConsumer(sc) {
+				Skip("Skip no wffc storage class available")
+			}
 			vm = createAndStartWFFCStorageHotplugVM()
 		})
 
-		It("should add volume", func() {
+		DescribeTable("should add volume according to options", func(dryRun bool) {
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
-			dv := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, tests.Config.StorageClassLocal, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
-			_, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.TODO(), dv, metav1.CreateOptions{})
-			Expect(err).To(BeNil())
+
+			dv := libdv.NewDataVolume(
+				libdv.WithBlankImageSource(),
+				libdv.WithPVC(libdv.PVCWithStorageClass(sc), libdv.PVCWithVolumeSize(cd.BlankVolumeSize)),
+			)
+
+			dv, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(util.NamespaceTestDefault).Create(context.TODO(), dv, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() error {
-				_, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Get(context.TODO(), dv.Name, metav1.GetOptions{})
+				_, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(util.NamespaceTestDefault).Get(context.TODO(), dv.Name, metav1.GetOptions{})
+				return err
+			}, 40*time.Second, 2*time.Second).Should(Succeed())
+
+			vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			addVolumeVirtctl(vmi.Name, vmi.Namespace, "", dv.Name, "", dryRun, v1.CacheWriteBack)
+			if dryRun {
+				verifyNoVolumeAttached(vmi, dv.Name)
+			} else {
+				verifyVolumeStatus(vmi, v1.VolumeReady, v1.CacheWriteBack, dv.Name)
+				getVmiConsoleAndLogin(vmi)
+				targets := getTargetsFromVolumeStatus(vmi, dv.Name)
+				verifyVolumeAccessible(vmi, targets[0])
+				verifySingleAttachmentPod(vmi)
+			}
+		},
+			Entry("with default", false),
+			Entry("[test_id:7803]with dry-run", true),
+		)
+
+		DescribeTable("should remove volume according to options", func(dryRun bool) {
+			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
+			dv := libdv.NewDataVolume(
+				libdv.WithBlankImageSource(),
+				libdv.WithPVC(libdv.PVCWithStorageClass(sc), libdv.PVCWithVolumeSize(cd.BlankVolumeSize)),
+			)
+
+			dv, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(util.NamespaceTestDefault).Create(context.TODO(), dv, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			Eventually(func() error {
+				_, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(util.NamespaceTestDefault).Get(context.TODO(), dv.Name, metav1.GetOptions{})
 				return err
 			}, 40*time.Second, 2*time.Second).Should(Succeed())
 
 			vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
-			addVolumeVirtctl(vmi.Name, vmi.Namespace, "", dv.Name, "")
-			verifyVolumeStatus(vmi, v1.VolumeReady, dv.Name)
+			addVolumeVirtctl(vmi.Name, vmi.Namespace, "", dv.Name, "", false, "")
+			verifyVolumeStatus(vmi, v1.VolumeReady, "", dv.Name)
 
 			getVmiConsoleAndLogin(vmi)
 			targets := getTargetsFromVolumeStatus(vmi, dv.Name)
 			verifyVolumeAccessible(vmi, targets[0])
 			verifySingleAttachmentPod(vmi)
 
-			By("Invoking virtlctl removevolume")
-			removeVolumeCommand := tests.NewRepeatableVirtctlCommand(virtctl.COMMAND_REMOVEVOLUME, vmi.Name, fmt.Sprintf(virtCtlVolumeName, dv.Name), virtCtlNamespace, vmi.Namespace)
-			err = removeVolumeCommand()
-			Expect(err).ToNot(HaveOccurred())
-			verifyVolumeNolongerAccessible(vmi, targets[0])
-		})
+			removeVolumeVirtctl(vmi.Name, vmi.Namespace, dv.Name, dryRun)
+			if dryRun {
+				Consistently(func() error {
+					verifyVolumeStatus(vmi, v1.VolumeReady, "", dv.Name)
+					getVmiConsoleAndLogin(vmi)
+					targets := getTargetsFromVolumeStatus(vmi, dv.Name)
+					verifyVolumeAccessible(vmi, targets[0])
+					verifySingleAttachmentPod(vmi)
+					return nil
+				}, 60*time.Second, 1*time.Second).Should(BeNil())
+			} else {
+				verifyVolumeNolongerAccessible(vmi, targets[0])
+			}
+		},
+			Entry("with default", false),
+			Entry("[test_id:7829]with dry-run", true),
+		)
 	})
 })
+
+func verifyVolumeAndDiskVMAdded(virtClient kubecli.KubevirtClient, vm *v1.VirtualMachine, volumeNames ...string) {
+	nameMap := make(map[string]bool)
+	for _, volumeName := range volumeNames {
+		nameMap[volumeName] = true
+	}
+	log.Log.Infof("Checking %d volumes", len(volumeNames))
+	Eventually(func() error {
+		updatedVM, err := virtClient.VirtualMachine(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		if len(updatedVM.Status.VolumeRequests) > 0 {
+			return fmt.Errorf(waitVolumeRequestProcessError)
+		}
+
+		foundVolume := 0
+		foundDisk := 0
+
+		for _, volume := range updatedVM.Spec.Template.Spec.Volumes {
+			if _, ok := nameMap[volume.Name]; ok {
+				foundVolume++
+			}
+		}
+		for _, disk := range updatedVM.Spec.Template.Spec.Domain.Devices.Disks {
+			if _, ok := nameMap[disk.Name]; ok {
+				foundDisk++
+			}
+		}
+
+		if foundDisk != len(volumeNames) {
+			return fmt.Errorf(waitDiskTemplateError)
+		}
+		if foundVolume != len(volumeNames) {
+			return fmt.Errorf(waitVolumeTemplateError)
+		}
+
+		return nil
+	}, 90*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
+}
+
+func verifyVolumeAndDiskVMIAdded(virtClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, volumeNames ...string) {
+	nameMap := make(map[string]bool)
+	for _, volumeName := range volumeNames {
+		nameMap[volumeName] = true
+	}
+	Eventually(func() error {
+		updatedVMI, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		foundVolume := 0
+		foundDisk := 0
+
+		for _, volume := range updatedVMI.Spec.Volumes {
+			if _, ok := nameMap[volume.Name]; ok {
+				foundVolume++
+			}
+		}
+		for _, disk := range updatedVMI.Spec.Domain.Devices.Disks {
+			if _, ok := nameMap[disk.Name]; ok {
+				foundDisk++
+			}
+		}
+
+		if foundDisk != len(volumeNames) {
+			return fmt.Errorf(waitDiskTemplateError)
+		}
+		if foundVolume != len(volumeNames) {
+			return fmt.Errorf(waitVolumeTemplateError)
+		}
+
+		return nil
+	}, 90*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
+}

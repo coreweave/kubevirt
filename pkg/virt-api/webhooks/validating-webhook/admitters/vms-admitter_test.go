@@ -23,12 +23,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/client-go/api"
 
@@ -40,10 +40,13 @@ import (
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/cache"
 
+	instancetypeapi "kubevirt.io/api/instancetype"
+	instancetypev1alpha2 "kubevirt.io/api/instancetype/v1alpha2"
+
 	v1 "kubevirt.io/api/core/v1"
-	flavorv1alpha1 "kubevirt.io/api/flavor/v1alpha1"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
-	"kubevirt.io/kubevirt/pkg/flavor"
+
+	"kubevirt.io/kubevirt/pkg/instancetype"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -51,11 +54,11 @@ import (
 
 var _ = Describe("Validating VM Admitter", func() {
 	config, crdInformer, kvInformer := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
-	var ctrl *gomock.Controller
 	var vmsAdmitter *VMsAdmitter
-	var vmiInformer cache.SharedIndexInformer
 	var dataSourceInformer cache.SharedIndexInformer
-	var flavorMethods *testutils.MockFlavorMethods
+	var instancetypeMethods *testutils.MockInstancetypeMethods
+	var mockVMIClient *kubecli.MockVirtualMachineInstanceInterface
+	var virtClient *kubecli.MockKubevirtClient
 
 	enableFeatureGate := func(featureGate string) {
 		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, &v1.KubeVirt{
@@ -85,23 +88,21 @@ var _ = Describe("Validating VM Admitter", func() {
 	runStrategyHalted := v1.RunStrategyHalted
 
 	BeforeEach(func() {
-		vmiInformer, _ = testutils.NewFakeInformerFor(&v1.VirtualMachineInstance{})
 		dataSourceInformer, _ = testutils.NewFakeInformerFor(&cdiv1.DataSource{})
-		flavorMethods = testutils.NewMockFlavorMethods()
+		instancetypeMethods = testutils.NewMockInstancetypeMethods()
 
-		ctrl = gomock.NewController(GinkgoT())
+		ctrl := gomock.NewController(GinkgoT())
+		mockVMIClient = kubecli.NewMockVirtualMachineInstanceInterface(ctrl)
+		virtClient = kubecli.NewMockKubevirtClient(ctrl)
 		vmsAdmitter = &VMsAdmitter{
-			DataSourceInformer: dataSourceInformer,
-			VMIInformer:        vmiInformer,
-			ClusterConfig:      config,
-			FlavorMethods:      flavorMethods,
+			VirtClient:          virtClient,
+			DataSourceInformer:  dataSourceInformer,
+			ClusterConfig:       config,
+			InstancetypeMethods: instancetypeMethods,
 			cloneAuthFunc: func(pvcNamespace, pvcName, saNamespace, saName string) (bool, string, error) {
 				return true, "", nil
 			},
 		}
-	})
-	AfterEach(func() {
-		ctrl.Finish()
 	})
 
 	It("reject invalid VirtualMachineInstance spec", func() {
@@ -120,8 +121,28 @@ var _ = Describe("Validating VM Admitter", func() {
 
 		resp := admitVm(vmsAdmitter, vm)
 		Expect(resp.Allowed).To(BeFalse())
-		Expect(len(resp.Result.Details.Causes)).To(Equal(1))
+		Expect(resp.Result.Details.Causes).To(HaveLen(1))
 		Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.template.spec.domain.devices.disks[0].name"))
+	})
+
+	It("should allow VM with missing volume disk or filesystem", func() {
+		vmi := api.NewMinimalVMI("testvmi")
+		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+			Name: "testvol",
+			VolumeSource: v1.VolumeSource{
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
+			},
+		})
+		vm := &v1.VirtualMachine{
+			Spec: v1.VirtualMachineSpec{
+				Running: &notRunning,
+				Template: &v1.VirtualMachineInstanceTemplateSpec{
+					Spec: vmi.Spec,
+				},
+			},
+		}
+		resp := admitVm(vmsAdmitter, vm)
+		Expect(resp.Allowed).To(BeTrue())
 	})
 
 	It("should accept valid vmi spec", func() {
@@ -149,7 +170,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		Expect(resp.Allowed).To(BeTrue())
 	})
 
-	table.DescribeTable("should reject VolumeRequests on a migrating vm", func(requests []v1.VirtualMachineVolumeRequest) {
+	DescribeTable("should reject VolumeRequests on a migrating vm", func(requests []v1.VirtualMachineVolumeRequest) {
 		now := metav1.Now()
 		vmi := api.NewMinimalVMI("testvmi")
 		vmi.Status = v1.VirtualMachineInstanceStatus{
@@ -194,12 +215,12 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		}
 
-		vmsAdmitter.VMIInformer.GetIndexer().Add(vmi)
-
+		virtClient.EXPECT().VirtualMachineInstance(gomock.Any()).Return(mockVMIClient)
+		mockVMIClient.EXPECT().Get(gomock.Any(), gomock.Any()).Return(vmi, nil)
 		resp := vmsAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 	},
-		table.Entry("with valid request to add volume", []v1.VirtualMachineVolumeRequest{
+		Entry("with valid request to add volume", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "testdisk2",
@@ -219,7 +240,7 @@ var _ = Describe("Validating VM Admitter", func() {
 				},
 			},
 		}),
-		table.Entry("with valid request to remove volume", []v1.VirtualMachineVolumeRequest{
+		Entry("with valid request to remove volume", []v1.VirtualMachineVolumeRequest{
 			{
 				RemoveVolumeOptions: &v1.RemoveVolumeOptions{
 					Name: "testdisk",
@@ -228,7 +249,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		}),
 	)
 
-	table.DescribeTable("should validate VolumeRequest on running vm", func(requests []v1.VirtualMachineVolumeRequest, isValid bool) {
+	DescribeTable("should validate VolumeRequest on running vm", func(requests []v1.VirtualMachineVolumeRequest, isValid bool) {
 		vmi := api.NewMinimalVMI("testvmi")
 		vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
 			Name: "testdisk",
@@ -307,11 +328,12 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		})
 
-		vmsAdmitter.VMIInformer.GetIndexer().Add(vmi)
+		virtClient.EXPECT().VirtualMachineInstance(gomock.Any()).Return(mockVMIClient)
+		mockVMIClient.EXPECT().Get(gomock.Any(), gomock.Any()).Return(vmi, nil)
 		resp := admitVm(vmsAdmitter, vm)
 		Expect(resp.Allowed).To(Equal(isValid))
 	},
-		table.Entry("with valid request to add volume", []v1.VirtualMachineVolumeRequest{
+		Entry("with valid request to add volume", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "testdisk2",
@@ -333,7 +355,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		},
 			true),
-		table.Entry("with invalid request to add volume that conflicts with running vmi", []v1.VirtualMachineVolumeRequest{
+		Entry("with invalid request to add volume that conflicts with running vmi", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "testpvcdisk-extra",
@@ -354,7 +376,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		},
 			false),
-		table.Entry("with valid request to add volume that is identical to one in vmi", []v1.VirtualMachineVolumeRequest{
+		Entry("with valid request to add volume that is identical to one in vmi", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "a-pvcdisk",
@@ -449,7 +471,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			true),
 	)
 
-	table.DescribeTable("should validate VolumeRequest on offline vm", func(requests []v1.VirtualMachineVolumeRequest, isValid bool) {
+	DescribeTable("should validate VolumeRequest on offline vm", func(requests []v1.VirtualMachineVolumeRequest, isValid bool) {
 		vmi := api.NewMinimalVMI("testvmi")
 		vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
 			Name: "testdisk",
@@ -491,7 +513,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		resp := admitVm(vmsAdmitter, vm)
 		Expect(resp.Allowed).To(Equal(isValid))
 	},
-		table.Entry("with valid request to add volume", []v1.VirtualMachineVolumeRequest{
+		Entry("with valid request to add volume", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "testdisk2",
@@ -513,7 +535,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		},
 			true),
 
-		table.Entry("with invalid request to add the same volume twice", []v1.VirtualMachineVolumeRequest{
+		Entry("with invalid request to add the same volume twice", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "testdisk2",
@@ -552,7 +574,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		},
 			false),
-		table.Entry("with invalid request to add volume that already exists", []v1.VirtualMachineVolumeRequest{
+		Entry("with invalid request to add volume that already exists", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "testdisk",
@@ -574,7 +596,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		},
 			false),
 
-		table.Entry("with valid request to add the exact same volume that already exists.", []v1.VirtualMachineVolumeRequest{
+		Entry("with valid request to add the exact same volume that already exists.", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "testdisk",
@@ -595,7 +617,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		},
 			false),
-		table.Entry("with valid request to remove volume", []v1.VirtualMachineVolumeRequest{
+		Entry("with valid request to remove volume", []v1.VirtualMachineVolumeRequest{
 			{
 				RemoveVolumeOptions: &v1.RemoveVolumeOptions{
 					Name: "testdisk",
@@ -603,7 +625,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		},
 			true),
-		table.Entry("with invalid request to remove same volume twice", []v1.VirtualMachineVolumeRequest{
+		Entry("with invalid request to remove same volume twice", []v1.VirtualMachineVolumeRequest{
 			{
 				RemoveVolumeOptions: &v1.RemoveVolumeOptions{
 					Name: "testdisk",
@@ -616,11 +638,11 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		},
 			false),
-		table.Entry("with invalid request with no options", []v1.VirtualMachineVolumeRequest{
+		Entry("with invalid request with no options", []v1.VirtualMachineVolumeRequest{
 			{},
 		},
 			false),
-		table.Entry("with invalid request with multiple options", []v1.VirtualMachineVolumeRequest{
+		Entry("with invalid request with multiple options", []v1.VirtualMachineVolumeRequest{
 			{
 				AddVolumeOptions: &v1.AddVolumeOptions{
 					Name: "testdisk2",
@@ -719,7 +741,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		testutils.AddDataVolumeAPI(crdInformer)
 		resp := admitVm(vmsAdmitter, vm)
 		Expect(resp.Allowed).To(BeFalse())
-		Expect(len(resp.Result.Details.Causes)).To(Equal(1))
+		Expect(resp.Result.Details.Causes).To(HaveLen(1))
 		Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.dataVolumeTemplate[0]"))
 	})
 
@@ -733,7 +755,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			disableFeatureGates()
 		})
 
-		table.DescribeTable("should accept valid volumes",
+		DescribeTable("should accept valid volumes",
 			func(volumeSource v1.VolumeSource) {
 				vmi := api.NewMinimalVMI("testvmi")
 				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
@@ -743,18 +765,18 @@ var _ = Describe("Validating VM Admitter", func() {
 
 				testutils.AddDataVolumeAPI(crdInformer)
 				causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-				Expect(len(causes)).To(Equal(0))
+				Expect(causes).To(BeEmpty())
 			},
-			table.Entry("with pvc volume source", v1.VolumeSource{PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{}}),
-			table.Entry("with cloud-init volume source", v1.VolumeSource{CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: "fake", NetworkData: "fake"}}),
-			table.Entry("with containerDisk volume source", v1.VolumeSource{ContainerDisk: testutils.NewFakeContainerDiskSource()}),
-			table.Entry("with ephemeral volume source", v1.VolumeSource{Ephemeral: &v1.EphemeralVolumeSource{}}),
-			table.Entry("with emptyDisk volume source", v1.VolumeSource{EmptyDisk: &v1.EmptyDiskSource{}}),
-			table.Entry("with dataVolume volume source", v1.VolumeSource{DataVolume: &v1.DataVolumeSource{Name: "fake"}}),
-			table.Entry("with hostDisk volume source", v1.VolumeSource{HostDisk: &v1.HostDisk{Path: "fake", Type: v1.HostDiskExistsOrCreate}}),
-			table.Entry("with configMap volume source", v1.VolumeSource{ConfigMap: &v1.ConfigMapVolumeSource{LocalObjectReference: k8sv1.LocalObjectReference{Name: "fake"}}}),
-			table.Entry("with secret volume source", v1.VolumeSource{Secret: &v1.SecretVolumeSource{SecretName: "fake"}}),
-			table.Entry("with serviceAccount volume source", v1.VolumeSource{ServiceAccount: &v1.ServiceAccountVolumeSource{ServiceAccountName: "fake"}}),
+			Entry("with pvc volume source", v1.VolumeSource{PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{}}),
+			Entry("with cloud-init volume source", v1.VolumeSource{CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: "fake", NetworkData: "fake"}}),
+			Entry("with containerDisk volume source", v1.VolumeSource{ContainerDisk: testutils.NewFakeContainerDiskSource()}),
+			Entry("with ephemeral volume source", v1.VolumeSource{Ephemeral: &v1.EphemeralVolumeSource{}}),
+			Entry("with emptyDisk volume source", v1.VolumeSource{EmptyDisk: &v1.EmptyDiskSource{}}),
+			Entry("with dataVolume volume source", v1.VolumeSource{DataVolume: &v1.DataVolumeSource{Name: "fake"}}),
+			Entry("with hostDisk volume source", v1.VolumeSource{HostDisk: &v1.HostDisk{Path: "fake", Type: v1.HostDiskExistsOrCreate}}),
+			Entry("with configMap volume source", v1.VolumeSource{ConfigMap: &v1.ConfigMapVolumeSource{LocalObjectReference: k8sv1.LocalObjectReference{Name: "fake"}}}),
+			Entry("with secret volume source", v1.VolumeSource{Secret: &v1.SecretVolumeSource{SecretName: "fake"}}),
+			Entry("with serviceAccount volume source", v1.VolumeSource{ServiceAccount: &v1.ServiceAccountVolumeSource{ServiceAccountName: "fake"}}),
 		)
 		It("should reject DataVolume when feature gate is disabled", func() {
 			vmi := api.NewMinimalVMI("testvmi")
@@ -766,7 +788,7 @@ var _ = Describe("Validating VM Admitter", func() {
 
 			testutils.RemoveDataVolumeAPI(crdInformer)
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0]"))
 		})
 		It("should reject DataVolume when DataVolume name is not set", func() {
@@ -779,7 +801,7 @@ var _ = Describe("Validating VM Admitter", func() {
 
 			testutils.AddDataVolumeAPI(crdInformer)
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(string(causes[0].Type)).To(Equal("FieldValueRequired"))
 			Expect(causes[0].Field).To(Equal("fake[0].name"))
 			Expect(causes[0].Message).To(Equal("DataVolume 'name' must be set"))
@@ -792,7 +814,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0]"))
 		})
 		It("should reject volume with multiple volume sources set", func() {
@@ -807,7 +829,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0]"))
 		})
 		It("should reject volumes with duplicate names", func() {
@@ -827,30 +849,11 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[1].name"))
 		})
-		It("should reject volume count > arrayLenMax", func() {
-			vmi := api.NewMinimalVMI("testvmi")
-			for i := 0; i <= arrayLenMax; i++ {
-				name := strconv.Itoa(i)
 
-				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
-					Name: "testvolume" + name,
-					VolumeSource: v1.VolumeSource{
-						ContainerDisk: testutils.NewFakeContainerDiskSource(),
-					},
-				})
-			}
-
-			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
-			Expect(string(causes[0].Type)).To(Equal("FieldValueInvalid"))
-			Expect(causes[0].Field).To(Equal("fake"))
-			Expect(causes[0].Message).To(Equal(fmt.Sprintf("fake list exceeds the %d element limit in length", arrayLenMax)))
-		})
-
-		table.DescribeTable("should verify cloud-init userdata length", func(userDataLen int, expectedErrors int, base64Encode bool) {
+		DescribeTable("should verify cloud-init userdata length", func(userDataLen int, expectedErrors int, base64Encode bool) {
 			vmi := api.NewMinimalVMI("testvmi")
 
 			// generate fake userdata
@@ -868,20 +871,20 @@ var _ = Describe("Validating VM Admitter", func() {
 			}
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(expectedErrors))
+			Expect(causes).To(HaveLen(expectedErrors))
 			for _, cause := range causes {
 				Expect(cause.Field).To(ContainSubstring("fake[0].cloudInitNoCloud"))
 			}
 		},
-			table.Entry("should accept userdata under max limit", 10, 0, false),
-			table.Entry("should accept userdata equal max limit", cloudInitUserMaxLen, 0, false),
-			table.Entry("should reject userdata greater than max limit", cloudInitUserMaxLen+1, 1, false),
-			table.Entry("should accept userdata base64 under max limit", 10, 0, true),
-			table.Entry("should accept userdata base64 equal max limit", cloudInitUserMaxLen, 0, true),
-			table.Entry("should reject userdata base64 greater than max limit", cloudInitUserMaxLen+1, 1, true),
+			Entry("should accept userdata under max limit", 10, 0, false),
+			Entry("should accept userdata equal max limit", cloudInitUserMaxLen, 0, false),
+			Entry("should reject userdata greater than max limit", cloudInitUserMaxLen+1, 1, false),
+			Entry("should accept userdata base64 under max limit", 10, 0, true),
+			Entry("should accept userdata base64 equal max limit", cloudInitUserMaxLen, 0, true),
+			Entry("should reject userdata base64 greater than max limit", cloudInitUserMaxLen+1, 1, true),
 		)
 
-		table.DescribeTable("should verify cloud-init networkdata length", func(networkDataLen int, expectedErrors int, base64Encode bool) {
+		DescribeTable("should verify cloud-init networkdata length", func(networkDataLen int, expectedErrors int, base64Encode bool) {
 			vmi := api.NewMinimalVMI("testvmi")
 
 			// generate fake networkdata
@@ -900,17 +903,17 @@ var _ = Describe("Validating VM Admitter", func() {
 			}
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(expectedErrors))
+			Expect(causes).To(HaveLen(expectedErrors))
 			for _, cause := range causes {
 				Expect(cause.Field).To(ContainSubstring("fake[0].cloudInitNoCloud"))
 			}
 		},
-			table.Entry("should accept networkdata under max limit", 10, 0, false),
-			table.Entry("should accept networkdata equal max limit", cloudInitNetworkMaxLen, 0, false),
-			table.Entry("should reject networkdata greater than max limit", cloudInitNetworkMaxLen+1, 1, false),
-			table.Entry("should accept networkdata base64 under max limit", 10, 0, true),
-			table.Entry("should accept networkdata base64 equal max limit", cloudInitNetworkMaxLen, 0, true),
-			table.Entry("should reject networkdata base64 greater than max limit", cloudInitNetworkMaxLen+1, 1, true),
+			Entry("should accept networkdata under max limit", 10, 0, false),
+			Entry("should accept networkdata equal max limit", cloudInitNetworkMaxLen, 0, false),
+			Entry("should reject networkdata greater than max limit", cloudInitNetworkMaxLen+1, 1, false),
+			Entry("should accept networkdata base64 under max limit", 10, 0, true),
+			Entry("should accept networkdata base64 equal max limit", cloudInitNetworkMaxLen, 0, true),
+			Entry("should reject networkdata base64 greater than max limit", cloudInitNetworkMaxLen+1, 1, true),
 		)
 
 		It("should reject cloud-init with invalid base64 userdata", func() {
@@ -925,7 +928,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].cloudInitNoCloud.userDataBase64"))
 		})
 
@@ -942,7 +945,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].cloudInitNoCloud.networkDataBase64"))
 		})
 
@@ -961,7 +964,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].cloudInitNoCloud"))
 		})
 
@@ -981,7 +984,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].cloudInitNoCloud"))
 		})
 
@@ -994,7 +997,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(2))
+			Expect(causes).To(HaveLen(2))
 			Expect(causes[0].Field).To(Equal("fake[0].hostDisk.path"))
 			Expect(causes[1].Field).To(Equal("fake[0].hostDisk.type"))
 		})
@@ -1010,7 +1013,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].hostDisk.path"))
 		})
 
@@ -1026,7 +1029,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].hostDisk.type"))
 		})
 
@@ -1043,7 +1046,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].hostDisk.capacity"))
 		})
 
@@ -1057,7 +1060,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].configMap.name"))
 		})
 
@@ -1071,7 +1074,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].secret.secretName"))
 		})
 
@@ -1085,7 +1088,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake[0].serviceAccount.serviceAccountName"))
 		})
 
@@ -1106,11 +1109,11 @@ var _ = Describe("Validating VM Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Field).To(Equal("fake"))
 		})
 
-		table.DescribeTable("should successfully authorize clone", func(arNamespace, vmNamespace, sourceNamespace,
+		DescribeTable("should successfully authorize clone", func(arNamespace, vmNamespace, sourceNamespace,
 			serviceAccount, expectedSourceNamespace, expectedTargetNamespace, expectedServiceAccount string) {
 
 			vm := &v1.VirtualMachine{
@@ -1159,14 +1162,14 @@ var _ = Describe("Validating VM Admitter", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(causes).To(BeEmpty())
 		},
-			table.Entry("when source namespace suppied", "ns1", "", "ns3", "", "ns3", "ns1", "default"),
-			table.Entry("when vm namespace suppied and source not", "ns1", "ns2", "", "", "ns2", "ns2", "default"),
-			table.Entry("when ar namespace suppied and vm/source not", "ns1", "", "", "", "ns1", "ns1", "default"),
-			table.Entry("when everything suppied with default service account", "ns1", "ns2", "ns3", "", "ns3", "ns2", "default"),
-			table.Entry("when everything suppied with 'sa' service account", "ns1", "ns2", "ns3", "sa", "ns3", "ns2", "sa"),
+			Entry("when source namespace suppied", "ns1", "", "ns3", "", "ns3", "ns1", "default"),
+			Entry("when vm namespace suppied and source not", "ns1", "ns2", "", "", "ns2", "ns2", "default"),
+			Entry("when ar namespace suppied and vm/source not", "ns1", "", "", "", "ns1", "ns1", "default"),
+			Entry("when everything suppied with default service account", "ns1", "ns2", "ns3", "", "ns3", "ns2", "default"),
+			Entry("when everything suppied with 'sa' service account", "ns1", "ns2", "ns3", "sa", "ns3", "ns2", "sa"),
 		)
 
-		table.DescribeTable("should successfully authorize clone from sourceRef", func(arNamespace,
+		DescribeTable("should successfully authorize clone from sourceRef", func(arNamespace,
 			vmNamespace,
 			sourceRefNamespace,
 			sourceNamespace,
@@ -1248,18 +1251,18 @@ var _ = Describe("Validating VM Admitter", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(causes).To(BeEmpty())
 		},
-			table.Entry("when source namespace suppied", "ns1", "", "ns2", "ns3", "", "ns3", "ns1", "default"),
-			table.Entry("when vm namespace suppied and source not", "ns1", "ns2", "", "", "", "ns2", "ns2", "default"),
-			table.Entry("when everything suppied with default service account", "ns1", "ns2", "", "ns3", "", "ns3", "ns2", "default"),
-			table.Entry("when everything suppied with 'sa' service account", "ns1", "ns2", "", "ns3", "sa", "ns3", "ns2", "sa"),
-			table.Entry("when source namespace and sourceRef namespace suppied", "ns1", "", "foo", "ns3", "", "ns3", "ns1", "default"),
-			table.Entry("when vm namespace and sourceRef namespace suppied and source not", "ns1", "ns2", "foo", "", "", "foo", "ns2", "default"),
-			table.Entry("when ar namespace and sourceRef namespace suppied and vm/source not", "ns1", "", "foo", "", "", "foo", "ns1", "default"),
-			table.Entry("when everything and sourceRef suppied with default service account", "ns1", "ns2", "foo", "ns3", "", "ns3", "ns2", "default"),
-			table.Entry("when everything and sourceRef suppied with 'sa' service account", "ns1", "ns2", "foo", "ns3", "sa", "ns3", "ns2", "sa"),
+			Entry("when source namespace suppied", "ns1", "", "ns2", "ns3", "", "ns3", "ns1", "default"),
+			Entry("when vm namespace suppied and source not", "ns1", "ns2", "", "", "", "ns2", "ns2", "default"),
+			Entry("when everything suppied with default service account", "ns1", "ns2", "", "ns3", "", "ns3", "ns2", "default"),
+			Entry("when everything suppied with 'sa' service account", "ns1", "ns2", "", "ns3", "sa", "ns3", "ns2", "sa"),
+			Entry("when source namespace and sourceRef namespace suppied", "ns1", "", "foo", "ns3", "", "ns3", "ns1", "default"),
+			Entry("when vm namespace and sourceRef namespace suppied and source not", "ns1", "ns2", "foo", "", "", "foo", "ns2", "default"),
+			Entry("when ar namespace and sourceRef namespace suppied and vm/source not", "ns1", "", "foo", "", "", "foo", "ns1", "default"),
+			Entry("when everything and sourceRef suppied with default service account", "ns1", "ns2", "foo", "ns3", "", "ns3", "ns2", "default"),
+			Entry("when everything and sourceRef suppied with 'sa' service account", "ns1", "ns2", "foo", "ns3", "sa", "ns3", "ns2", "sa"),
 		)
 
-		table.DescribeTable("should deny clone", func(sourceNamespace, sourceName, failMessage string, failErr error, expectedMessage string) {
+		DescribeTable("should deny clone", func(sourceNamespace, sourceName, failMessage string, failErr error, expectedMessage string) {
 			vm := &v1.VirtualMachine{
 				Spec: v1.VirtualMachineSpec{
 					Template: &v1.VirtualMachineInstanceTemplateSpec{},
@@ -1293,14 +1296,14 @@ var _ = Describe("Validating VM Admitter", func() {
 				Expect(causes[0].Message).To(Equal(expectedMessage))
 			}
 		},
-			table.Entry("when source name not supplied", "", "sourceName", "Clone source /sourceName invalid", nil, "Clone source /sourceName invalid"),
-			table.Entry("when source namespace not supplied", "sourceNamespace", "", "Clone source sourceNamespace/ invalid", nil, "Clone source sourceNamespace/ invalid"),
-			table.Entry("when user not authorized", "sourceNamespace", "sourceName", "no permission", nil, "Authorization failed, message is: no permission"),
-			table.Entry("error occurs", "sourceNamespace", "sourceName", "", fmt.Errorf("bad error"), ""),
+			Entry("when source name not supplied", "", "sourceName", "Clone source /sourceName invalid", nil, "Clone source /sourceName invalid"),
+			Entry("when source namespace not supplied", "sourceNamespace", "", "Clone source sourceNamespace/ invalid", nil, "Clone source sourceNamespace/ invalid"),
+			Entry("when user not authorized", "sourceNamespace", "sourceName", "no permission", nil, "Authorization failed, message is: no permission"),
+			Entry("error occurs", "sourceNamespace", "sourceName", "", fmt.Errorf("bad error"), ""),
 		)
 	})
 
-	table.DescribeTable("when snapshot is in progress, should", func(mutateFn func(*v1.VirtualMachine) bool) {
+	DescribeTable("when snapshot is in progress, should", func(mutateFn func(*v1.VirtualMachine) bool) {
 		vmi := api.NewMinimalVMI("testvmi")
 		vm := &v1.VirtualMachine{
 			Spec: v1.VirtualMachineSpec{
@@ -1335,25 +1338,25 @@ var _ = Describe("Validating VM Admitter", func() {
 		Expect(resp.Allowed).To(Equal(allow))
 
 		if !allow {
-			Expect(len(resp.Result.Details.Causes)).To(Equal(1))
+			Expect(resp.Result.Details.Causes).To(HaveLen(1))
 			Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec"))
 		}
 	},
-		table.Entry("reject update to spec", func(vm *v1.VirtualMachine) bool {
+		Entry("reject update to spec", func(vm *v1.VirtualMachine) bool {
 			vm.Spec.Running = &[]bool{true}[0]
 			return false
 		}),
-		table.Entry("accept update to metadata", func(vm *v1.VirtualMachine) bool {
+		Entry("accept update to metadata", func(vm *v1.VirtualMachine) bool {
 			vm.Annotations = map[string]string{"foo": "bar"}
 			return true
 		}),
-		table.Entry("accept update to status", func(vm *v1.VirtualMachine) bool {
+		Entry("accept update to status", func(vm *v1.VirtualMachine) bool {
 			vm.Status.Ready = true
 			return true
 		}),
 	)
 
-	table.DescribeTable("when restore is in progress, should", func(mutateFn func(*v1.VirtualMachine) bool, updateRunStrategy bool) {
+	DescribeTable("when restore is in progress, should", func(mutateFn func(*v1.VirtualMachine) bool, updateRunStrategy bool) {
 		vmi := api.NewMinimalVMI("testvmi")
 		vm := &v1.VirtualMachine{
 			Spec: v1.VirtualMachineSpec{
@@ -1392,51 +1395,49 @@ var _ = Describe("Validating VM Admitter", func() {
 		Expect(resp.Allowed).To(Equal(allow))
 
 		if !allow {
-			Expect(len(resp.Result.Details.Causes)).To(Equal(1))
+			Expect(resp.Result.Details.Causes).To(HaveLen(1))
 			Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec"))
 		}
 	},
-		table.Entry("reject update to running true", func(vm *v1.VirtualMachine) bool {
+		Entry("reject update to running true", func(vm *v1.VirtualMachine) bool {
 			vm.Spec.Running = &[]bool{true}[0]
 			return false
 		}, false),
-		table.Entry("reject update of runStrategy", func(vm *v1.VirtualMachine) bool {
+		Entry("reject update of runStrategy", func(vm *v1.VirtualMachine) bool {
 			vm.Spec.RunStrategy = &runStrategyManual
 			return false
 		}, true),
-		table.Entry("accept update to spec except running true", func(vm *v1.VirtualMachine) bool {
+		Entry("accept update to spec except running true", func(vm *v1.VirtualMachine) bool {
 			vm.Spec.Template = &v1.VirtualMachineInstanceTemplateSpec{}
 			return true
 		}, false),
-		table.Entry("accept update to metadata", func(vm *v1.VirtualMachine) bool {
+		Entry("accept update to metadata", func(vm *v1.VirtualMachine) bool {
 			vm.Annotations = map[string]string{"foo": "bar"}
 			return true
 		}, false),
-		table.Entry("accept update to status", func(vm *v1.VirtualMachine) bool {
+		Entry("accept update to status", func(vm *v1.VirtualMachine) bool {
 			vm.Status.Ready = true
 			return true
 		}, false),
 	)
 
-	Context("Flavor", func() {
+	Context("Instancetype", func() {
 		var (
 			vm *v1.VirtualMachine
 		)
 
 		BeforeEach(func() {
-			flavorMethods.FindFlavorFunc = func(_ *v1.VirtualMachine) (*flavorv1alpha1.VirtualMachineFlavorProfile, error) {
-				return &flavorv1alpha1.VirtualMachineFlavorProfile{
-					CPU: &v1.CPU{
-						Sockets: 2,
-						Cores:   1,
-						Threads: 1,
-					},
-				}, nil
-			}
-
 			vmi := api.NewMinimalVMI("testvmi")
 			vm = &v1.VirtualMachine{
 				Spec: v1.VirtualMachineSpec{
+					Instancetype: &v1.InstancetypeMatcher{
+						Name: "test",
+						Kind: instancetypeapi.SingularResourceName,
+					},
+					Preference: &v1.PreferenceMatcher{
+						Name: "test",
+						Kind: instancetypeapi.SingularPreferenceResourceName,
+					},
 					Running: &notRunning,
 					Template: &v1.VirtualMachineInstanceTemplateSpec{
 						Spec: vmi.Spec,
@@ -1445,26 +1446,47 @@ var _ = Describe("Validating VM Admitter", func() {
 			}
 		})
 
-		It("should reject if flavor is not found", func() {
-			flavorMethods.FindFlavorFunc = func(_ *v1.VirtualMachine) (*flavorv1alpha1.VirtualMachineFlavorProfile, error) {
-				return nil, fmt.Errorf("flavor not found")
+		It("should reject if instancetype is not found", func() {
+			instancetypeMethods.FindInstancetypeSpecFunc = func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachineInstancetypeSpec, error) {
+				return nil, fmt.Errorf("instancetype not found")
 			}
 
 			response := admitVm(vmsAdmitter, vm)
 			Expect(response.Allowed).To(BeFalse())
 			Expect(response.Result.Details.Causes).To(HaveLen(1))
 			Expect(response.Result.Details.Causes[0].Type).To(Equal(metav1.CauseTypeFieldValueNotFound))
-			Expect(response.Result.Details.Causes[0].Field).To(Equal("spec.flavor"))
+			Expect(response.Result.Details.Causes[0].Field).To(Equal("spec.instancetype"))
 		})
 
-		It("should reject if flavor fails to apply to VMI", func() {
+		It("should reject if preference is not found", func() {
+			instancetypeMethods.FindPreferenceSpecFunc = func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachinePreferenceSpec, error) {
+				return nil, fmt.Errorf("preference not found")
+			}
+
+			response := admitVm(vmsAdmitter, vm)
+			Expect(response.Allowed).To(BeFalse())
+			Expect(response.Result.Details.Causes).To(HaveLen(1))
+			Expect(response.Result.Details.Causes[0].Type).To(Equal(metav1.CauseTypeFieldValueNotFound))
+			Expect(response.Result.Details.Causes[0].Field).To(Equal("spec.preference"))
+		})
+
+		It("should reject if instancetype fails to apply to VMI", func() {
 			var (
 				basePath = k8sfield.NewPath("spec", "template", "spec")
 				path1    = basePath.Child("example", "path")
 				path2    = basePath.Child("domain", "example", "path")
 			)
-			flavorMethods.ApplyToVmiFunc = func(_ *k8sfield.Path, _ *flavorv1alpha1.VirtualMachineFlavorProfile, _ *v1.VirtualMachineInstanceSpec) flavor.Conflicts {
-				return flavor.Conflicts{path1, path2}
+			instancetypeMethods.FindInstancetypeSpecFunc = func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachineInstancetypeSpec, error) {
+				return &instancetypev1alpha2.VirtualMachineInstancetypeSpec{}, nil
+			}
+			instancetypeMethods.FindInstancetypeSpecFunc = func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachineInstancetypeSpec, error) {
+				return &instancetypev1alpha2.VirtualMachineInstancetypeSpec{}, nil
+			}
+			instancetypeMethods.FindPreferenceSpecFunc = func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachinePreferenceSpec, error) {
+				return &instancetypev1alpha2.VirtualMachinePreferenceSpec{}, nil
+			}
+			instancetypeMethods.ApplyToVmiFunc = func(_ *k8sfield.Path, _ *instancetypev1alpha2.VirtualMachineInstancetypeSpec, _ *instancetypev1alpha2.VirtualMachinePreferenceSpec, _ *v1.VirtualMachineInstanceSpec) instancetype.Conflicts {
+				return instancetype.Conflicts{path1, path2}
 			}
 
 			response := admitVm(vmsAdmitter, vm)
@@ -1476,13 +1498,16 @@ var _ = Describe("Validating VM Admitter", func() {
 			Expect(response.Result.Details.Causes[1].Field).To(Equal(path2.String()))
 		})
 
-		It("should apply flavor to VMI before validating VMI", func() {
-			// Test that VMI without flavor application is valid
+		It("should apply instancetype to VMI before validating VMI", func() {
+			// Test that VMI without instancetype application is valid
 			response := admitVm(vmsAdmitter, vm)
 			Expect(response.Allowed).To(BeTrue())
 
-			// Flavor application sets invalid memory value
-			flavorMethods.ApplyToVmiFunc = func(_ *k8sfield.Path, _ *flavorv1alpha1.VirtualMachineFlavorProfile, vmiSpec *v1.VirtualMachineInstanceSpec) flavor.Conflicts {
+			// Instancetype application sets invalid memory value
+			instancetypeMethods.FindInstancetypeSpecFunc = func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachineInstancetypeSpec, error) {
+				return &instancetypev1alpha2.VirtualMachineInstancetypeSpec{}, nil
+			}
+			instancetypeMethods.ApplyToVmiFunc = func(_ *k8sfield.Path, _ *instancetypev1alpha2.VirtualMachineInstancetypeSpec, _ *instancetypev1alpha2.VirtualMachinePreferenceSpec, vmiSpec *v1.VirtualMachineInstanceSpec) instancetype.Conflicts {
 				vmiSpec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("-1Mi")
 				return nil
 			}
@@ -1493,6 +1518,30 @@ var _ = Describe("Validating VM Admitter", func() {
 			Expect(response.Result.Details.Causes).To(HaveLen(1))
 			Expect(response.Result.Details.Causes[0].Field).
 				To(Equal("spec.template.spec.domain.resources.requests.memory"))
+		})
+
+		It("should not apply instancetype to the VMISpec of the original VM", func() {
+
+			instancetypeMethods.FindInstancetypeSpecFunc = func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachineInstancetypeSpec, error) {
+				return &instancetypev1alpha2.VirtualMachineInstancetypeSpec{}, nil
+			}
+
+			// Mock out ApplyToVmiFunc so that it applies some changes to the CPU of the provided VMISpec
+			instancetypeMethods.ApplyToVmiFunc = func(_ *k8sfield.Path, _ *instancetypev1alpha2.VirtualMachineInstancetypeSpec, _ *instancetypev1alpha2.VirtualMachinePreferenceSpec, vmiSpec *v1.VirtualMachineInstanceSpec) instancetype.Conflicts {
+				vmiSpec.Domain.CPU = &v1.CPU{Cores: 1, Threads: 1, Sockets: 1}
+				return nil
+			}
+
+			// Nil out CPU within the DomainSpec of the VMISpec being admitted to assert this remains untouched
+			vm.Spec.Template.Spec.Domain.CPU = nil
+
+			// The VM should be admitted successfully
+			response := admitVm(vmsAdmitter, vm)
+			Expect(response.Allowed).To(BeTrue())
+
+			// Ensure CPU has remained nil within the now admitted VMISpec
+			Expect(vm.Spec.Template.Spec.Domain.CPU).To(BeNil())
+
 		})
 	})
 })

@@ -21,17 +21,17 @@ package migrationproxy
 
 import (
 	"crypto/tls"
-	"io/ioutil"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/certificates"
 	ephemeraldiskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	"kubevirt.io/kubevirt/pkg/testutils"
@@ -43,7 +43,7 @@ var _ = Describe("MigrationProxy", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = ioutil.TempDir("", "migrationproxytest")
+		tmpDir, err = os.MkdirTemp("", "migrationproxytest")
 		Expect(err).ToNot(HaveOccurred())
 		os.MkdirAll(tmpDir, 0755)
 		store, err := certificates.GenerateSelfSignedCert(tmpDir, "test", "test")
@@ -66,7 +66,7 @@ var _ = Describe("MigrationProxy", func() {
 	Describe("migration proxy", func() {
 		Context("verify proxy connections work", func() {
 			It("by verifying source proxy works", func() {
-				sourceSock := tmpDir + "/source-sock"
+				sourceSock := filepath.Join(tmpDir, "source-sock")
 
 				listener, err := tls.Listen("tcp", "127.0.0.1:12345", tlsConfig)
 				Expect(err).ShouldNot(HaveOccurred())
@@ -107,8 +107,8 @@ var _ = Describe("MigrationProxy", func() {
 			})
 
 			It("by creating both ends and sending a message", func() {
-				sourceSock := tmpDir + "/source-sock"
-				libvirtdSock := tmpDir + "/libvirtd-sock"
+				sourceSock := filepath.Join(tmpDir, "source-sock")
+				libvirtdSock := filepath.Join(tmpDir, "libvirtd-sock")
 				libvirtdListener, err := net.Listen("unix", libvirtdSock)
 
 				Expect(err).ShouldNot(HaveOccurred())
@@ -150,12 +150,12 @@ var _ = Describe("MigrationProxy", func() {
 				Expect(num).To(Equal(sentLen))
 			})
 
-			table.DescribeTable("by creating both ends with a manager and sending a message", func(migrationConfig *v1.MigrationConfiguration) {
+			DescribeTable("by creating both ends with a manager and sending a message", func(migrationConfig *v1.MigrationConfiguration) {
 				directMigrationPort := "49152"
-				libvirtdSock := tmpDir + "/libvirtd-sock"
+				libvirtdSock := filepath.Join(tmpDir, "libvirtd-sock")
 				libvirtdListener, err := net.Listen("unix", libvirtdSock)
 				Expect(err).ShouldNot(HaveOccurred())
-				directSock := tmpDir + "/mykey-" + directMigrationPort
+				directSock := filepath.Join(tmpDir, "mykey-"+directMigrationPort)
 				directListener, err := net.Listen("unix", directSock)
 
 				Expect(err).ShouldNot(HaveOccurred())
@@ -209,21 +209,21 @@ var _ = Describe("MigrationProxy", func() {
 					}
 				}
 			},
-				table.Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(false)}),
-				table.Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(true)}),
+				Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(false)}),
+				Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(true)}),
 			)
 
-			table.DescribeTable("by ensuring no new listeners can be created after shutdown", func(migrationConfig *v1.MigrationConfiguration) {
+			DescribeTable("by ensuring no new listeners can be created after shutdown", func(migrationConfig *v1.MigrationConfiguration) {
 
 				key1 := "key1"
 				key2 := "key2"
 
 				directMigrationPort := "49152"
-				libvirtdSock := tmpDir + "/libvirtd-sock"
+				libvirtdSock := filepath.Join(tmpDir, "libvirtd-sock")
 				libvirtdListener, err := net.Listen("unix", libvirtdSock)
 				defer libvirtdListener.Close()
 				Expect(err).ShouldNot(HaveOccurred())
-				directSock := tmpDir + "/" + key1 + "-" + directMigrationPort
+				directSock := filepath.Join(tmpDir, key1+"-"+directMigrationPort)
 				directListener, err := net.Listen("unix", directSock)
 				defer directListener.Close()
 
@@ -255,8 +255,8 @@ var _ = Describe("MigrationProxy", func() {
 				Expect(err.Error()).To(Equal("unable to process new migration connections during virt-handler shutdown"))
 
 			},
-				table.Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(false)}),
-				table.Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(true)}),
+				Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(false)}),
+				Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(true)}),
 			)
 		})
 	})

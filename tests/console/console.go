@@ -20,13 +20,14 @@
 package console
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"regexp"
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 
 	expect "github.com/google/goexpect"
 	"google.golang.org/grpc/codes"
@@ -40,6 +41,8 @@ const (
 	PromptExpression = `(\$ |\# )`
 	CRLF             = "\r\n"
 	UTFPosEscape     = "\u001b\\[[0-9]+;[0-9]+H"
+
+	consoleConnectionTimeout = 30 * time.Second
 )
 
 var (
@@ -58,7 +61,7 @@ func ExpectBatch(vmi *v1.VirtualMachineInstance, expected []expect.Batcher, time
 		return err
 	}
 
-	expecter, _, err := NewExpecter(virtClient, vmi, 30*time.Second)
+	expecter, _, err := NewExpecter(virtClient, vmi, consoleConnectionTimeout)
 	if err != nil {
 		return err
 	}
@@ -71,24 +74,25 @@ func ExpectBatch(vmi *v1.VirtualMachineInstance, expected []expect.Batcher, time
 	return err
 }
 
-// SafeExpectBatch runs the batch from `expected` connecting to a VMI's console and
-// wait `timeout` for the batch to return, it also check that the sended commands arrives to console checking.
+// SafeExpectBatch runs the batch from `expected`, connecting to a VMI's console and
+// waiting `wait` seconds for the batch to return.
+// It validates that the commands arrive to the console.
 // NOTE: This functions heritage limitations from `ExpectBatchWithValidatedSend` refer to it to check them.
 func SafeExpectBatch(vmi *v1.VirtualMachineInstance, expected []expect.Batcher, wait int) error {
 	_, err := SafeExpectBatchWithResponse(vmi, expected, wait)
 	return err
 }
 
-// SafeExpectBatchWithResponse runs the batch from `expected` connecting to a VMI's console and
-// wait `timeout` for the batch to return with a response.
-// It includes a safety check which validates that the commands arrive to the console.
+// SafeExpectBatchWithResponse runs the batch from `expected`, connecting to a VMI's console and
+// waiting `wait` seconds for the batch to return with a response.
+// It validates that the commands arrive to the console.
 // NOTE: This functions inherits limitations from `ExpectBatchWithValidatedSend`, refer to it for more information.
 func SafeExpectBatchWithResponse(vmi *v1.VirtualMachineInstance, expected []expect.Batcher, wait int) ([]expect.BatchRes, error) {
 	virtClient, err := kubecli.GetKubevirtClient()
 	if err != nil {
 		panic(err)
 	}
-	expecter, _, err := NewExpecter(virtClient, vmi, 30*time.Second)
+	expecter, _, err := NewExpecter(virtClient, vmi, consoleConnectionTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +105,8 @@ func SafeExpectBatchWithResponse(vmi *v1.VirtualMachineInstance, expected []expe
 	return resp, err
 }
 
-// RunCommand runs the command line from `command connecting to an already logged in console at vmi
-// and wait `timeout` for command to return.
+// RunCommand runs the command line from `command` connecting to an already logged in console at vmi
+// and waiting `timeout` for command to return.
 // NOTE: The safer version `ExpectBatchWithValidatedSend` is not used here since it does not support cases.
 func RunCommand(vmi *v1.VirtualMachineInstance, command string, timeout time.Duration) error {
 	err := ExpectBatch(vmi, []expect.Batcher{
@@ -123,28 +127,63 @@ func RunCommand(vmi *v1.VirtualMachineInstance, command string, timeout time.Dur
 		}},
 	}, timeout)
 	if err != nil {
-		return fmt.Errorf("Failed to run [%s] at VMI %s, error: %v", command, vmi.Name, err)
+		return fmt.Errorf("failed to run [%s] at VMI %s, error: %v", command, vmi.Name, err)
 	}
 	return nil
 }
 
+// RunCommandAndStoreOutput runs the command line from `command` connecting to an already logged in console in vmi.
+// The output of `command` is returned as a string
+func RunCommandAndStoreOutput(vmi *v1.VirtualMachineInstance, command string, timeout time.Duration) (string, error) {
+	virtClient, err := kubecli.GetKubevirtClient()
+	if err != nil {
+		return "", err
+	}
+
+	opts := &kubecli.SerialConsoleOptions{ConnectionTimeout: timeout}
+	stream, err := virtClient.VirtualMachineInstance(vmi.Namespace).SerialConsole(vmi.Name, opts)
+	if err != nil {
+		return "", err
+	}
+	conn := stream.AsConn()
+	defer conn.Close()
+
+	_, err = fmt.Fprintf(conn, "%s\n", command)
+	if err != nil {
+		return "", err
+	}
+
+	scanner := bufio.NewScanner(conn)
+	if !skipInput(scanner) {
+		return "", fmt.Errorf("failed to run [%s] at VMI %s (skip input)", command, vmi.Name)
+	}
+	if !scanner.Scan() {
+		return "", fmt.Errorf("failed to run [%s] at VMI %s", command, vmi.Name)
+	}
+	return scanner.Text(), nil
+}
+
+func skipInput(scanner *bufio.Scanner) bool {
+	return scanner.Scan()
+}
+
 // SecureBootExpecter should be called on a VMI that has EFI enabled
 // It will parse the kernel output (dmesg) and succeed if it finds that Secure boot is enabled
+// The VMI was just created and may not be running yet. This is because we want to catch early boot logs.
 func SecureBootExpecter(vmi *v1.VirtualMachineInstance) error {
 	virtClient, err := kubecli.GetKubevirtClient()
 	if err != nil {
 		return err
 	}
-	expecter, _, err := NewExpecter(virtClient, vmi, 10*time.Second)
+	expecter, _, err := NewExpecter(virtClient, vmi, consoleConnectionTimeout)
 	if err != nil {
 		return err
 	}
 	defer expecter.Close()
 
-	b := append([]expect.Batcher{
-		&expect.BExp{R: "secureboot: Secure boot enabled"},
-	})
-	res, err := expecter.ExpectBatch(b, 180*time.Second)
+	b := []expect.Batcher{&expect.BExp{R: "secureboot: Secure boot enabled"}}
+	const expectBatchTimeout = 180 * time.Second
+	res, err := expecter.ExpectBatch(b, expectBatchTimeout)
 	if err != nil {
 		log.DefaultLogger().Object(vmi).Infof("Kernel: %+v", res)
 		return err
@@ -155,25 +194,27 @@ func SecureBootExpecter(vmi *v1.VirtualMachineInstance) error {
 
 // NetBootExpecter should be called on a VMI that has BIOS serial logging enabled
 // It will parse the SeaBIOS output and succeed if it finds the string "iPXE"
+// The VMI was just created and may not be running yet. This is because we want to catch early boot logs.
 func NetBootExpecter(vmi *v1.VirtualMachineInstance) error {
 	virtClient, err := kubecli.GetKubevirtClient()
 	if err != nil {
 		return err
 	}
-	expecter, _, err := NewExpecter(virtClient, vmi, 10*time.Second)
+	expecter, _, err := NewExpecter(virtClient, vmi, consoleConnectionTimeout)
 	if err != nil {
 		return err
 	}
 	defer expecter.Close()
 
 	esc := UTFPosEscape
-	b := append([]expect.Batcher{
-		// SeaBIOS uses escape (\u001b) combinations for letter placement on screen
-		// The regex below effectively grep for "iPXE" while ignoring those
-		//&expect.BExp{R: "\u001b\\[7;27Hi\u001b\\[7;28HP\u001b\\[7;29HX\u001b\\[7;30HE"},
-		&expect.BExp{R: esc + "i" + esc + "P" + esc + "X" + esc + "E"},
-	})
-	res, err := expecter.ExpectBatch(b, 30*time.Second)
+	b := []expect.Batcher{
+		// SeaBIOS can use escape (\u001b) combinations for letter placement on screen
+		// The regex below looks for the string "iPXE" and can detect it
+		// even when these escape sequences are present
+		&expect.BExp{R: "i(PXE|" + esc + "P" + esc + "X" + esc + "E)"},
+	}
+	const expectBatchTimeout = 30 * time.Second
+	res, err := expecter.ExpectBatch(b, expectBatchTimeout)
 	if err != nil {
 		log.DefaultLogger().Object(vmi).Infof("BIOS: %+v", res)
 		return err
@@ -183,17 +224,22 @@ func NetBootExpecter(vmi *v1.VirtualMachineInstance) error {
 }
 
 // NewExpecter will connect to an already logged in VMI console and return the generated expecter it will wait `timeout` for the connection.
-func NewExpecter(virtCli kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, timeout time.Duration, opts ...expect.Option) (expect.Expecter, <-chan error, error) {
+func NewExpecter(
+	virtCli kubecli.KubevirtClient,
+	vmi *v1.VirtualMachineInstance,
+	timeout time.Duration,
+	opts ...expect.Option) (expect.Expecter, <-chan error, error) {
 	vmiReader, vmiWriter := io.Pipe()
 	expecterReader, expecterWriter := io.Pipe()
 	resCh := make(chan error)
 
 	startTime := time.Now()
-	con, err := virtCli.VirtualMachineInstance(vmi.Namespace).SerialConsole(vmi.Name, &kubecli.SerialConsoleOptions{ConnectionTimeout: timeout})
+	serialConsoleOptions := &kubecli.SerialConsoleOptions{ConnectionTimeout: timeout}
+	con, err := virtCli.VirtualMachineInstance(vmi.Namespace).SerialConsole(vmi.Name, serialConsoleOptions)
 	if err != nil {
 		return nil, nil, err
 	}
-	timeout = timeout - time.Now().Sub(startTime)
+	timeout -= time.Since(startTime)
 
 	go func() {
 		resCh <- con.Stream(kubecli.StreamOptions{
@@ -202,9 +248,7 @@ func NewExpecter(virtCli kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance,
 		})
 	}()
 
-	opts = append(opts, expect.SendTimeout(timeout))
-	opts = append(opts, expect.Verbose(true))
-	opts = append(opts, expect.VerboseWriter(GinkgoWriter))
+	opts = append(opts, expect.SendTimeout(timeout), expect.Verbose(true), expect.VerboseWriter(ginkgo.GinkgoWriter))
 	return expect.SpawnGeneric(&expect.GenOptions{
 		In:  vmiWriter,
 		Out: expecterReader,
@@ -224,23 +268,24 @@ func NewExpecter(virtCli kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance,
 // It is done to make sure the match was found in the result of the expect.BSnd
 // command and not in a leftover that wasn't removed from the buffer.
 // NOTE: the method contains the following limitations:
-//       - Use of `BatchSwitchCase`
-//       - Multiline commands
-//       - No more than one sequential send or receive
+//   - Use of `BatchSwitchCase`
+//   - Multiline commands
+//   - No more than one sequential send or receive
 func ExpectBatchWithValidatedSend(expecter expect.Expecter, batch []expect.Batcher, timeout time.Duration) ([]expect.BatchRes, error) {
 	sendFlag := false
 	expectFlag := false
 	previousSend := ""
 
-	if len(batch) < 2 {
+	const minimumRequiredBatches = 2
+	if len(batch) < minimumRequiredBatches {
 		return nil, fmt.Errorf("ExpectBatchWithValidatedSend requires at least 2 batchers, supplied %v", batch)
 	}
 
 	for i, batcher := range batch {
 		switch batcher.Cmd() {
 		case expect.BatchExpect:
-			if expectFlag == true {
-				return nil, fmt.Errorf("Two sequential expect.BExp are not allowed")
+			if expectFlag {
+				return nil, fmt.Errorf("two sequential expect.BExp are not allowed")
 			}
 			expectFlag = true
 			sendFlag = false
@@ -248,14 +293,14 @@ func ExpectBatchWithValidatedSend(expecter expect.Expecter, batch []expect.Batch
 				return nil, fmt.Errorf("ExpectBatchWithValidatedSend support only expect of type BExp")
 			}
 			bExp, _ := batch[i].(*expect.BExp)
-			previousSend := regexp.QuoteMeta(previousSend)
+			previousSend = regexp.QuoteMeta(previousSend)
 
 			// Remove the \n since it is translated by the console to \r\n.
 			previousSend = strings.TrimSuffix(previousSend, "\n")
 			bExp.R = fmt.Sprintf("%s%s%s", previousSend, "((?s).*)", bExp.R)
 		case expect.BatchSend:
-			if sendFlag == true {
-				return nil, fmt.Errorf("Two sequential expect.BSend are not allowed")
+			if sendFlag {
+				return nil, fmt.Errorf("two sequential expect.BSend are not allowed")
 			}
 			sendFlag = true
 			expectFlag = false
@@ -263,7 +308,7 @@ func ExpectBatchWithValidatedSend(expecter expect.Expecter, batch []expect.Batch
 		case expect.BatchSwitchCase:
 			return nil, fmt.Errorf("ExpectBatchWithValidatedSend doesn't support BatchSwitchCase")
 		default:
-			return nil, fmt.Errorf("Unknown command: ExpectBatchWithValidatedSend supports only BatchExpect and BatchSend")
+			return nil, fmt.Errorf("unknown command: ExpectBatchWithValidatedSend supports only BatchExpect and BatchSend")
 		}
 	}
 

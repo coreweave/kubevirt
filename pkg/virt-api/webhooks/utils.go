@@ -26,18 +26,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
+	poolv1 "kubevirt.io/api/pool/v1alpha1"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 
 	v1 "kubevirt.io/api/core/v1"
 	clientutil "kubevirt.io/client-go/util"
-	"kubevirt.io/kubevirt/pkg/util/openapi"
-	"kubevirt.io/kubevirt/pkg/virt-api/rest"
 )
 
 var Arch = runtime.GOARCH
-
-var Validator = openapi.CreateOpenAPIValidator(rest.ComposeAPIDefinitions())
 
 var VirtualMachineInstanceGroupVersionResource = metav1.GroupVersionResource{
 	Group:    v1.VirtualMachineInstanceGroupVersionKind.Group,
@@ -63,26 +61,23 @@ var VirtualMachineInstanceReplicaSetGroupVersionResource = metav1.GroupVersionRe
 	Resource: "virtualmachineinstancereplicasets",
 }
 
+var VirtualMachinePoolGroupVersionResource = metav1.GroupVersionResource{
+	Group:    poolv1.SchemeGroupVersion.Group,
+	Version:  poolv1.SchemeGroupVersion.Version,
+	Resource: "virtualmachinepools",
+}
+
 var MigrationGroupVersionResource = metav1.GroupVersionResource{
 	Group:    v1.VirtualMachineInstanceMigrationGroupVersionKind.Group,
 	Version:  v1.VirtualMachineInstanceMigrationGroupVersionKind.Version,
 	Resource: "virtualmachineinstancemigrations",
 }
 
-var KubeVirtGroupVersionResource = metav1.GroupVersionResource{
-	Group:    v1.KubeVirtGroupVersionKind.Group,
-	Version:  v1.KubeVirtGroupVersionKind.Version,
-	Resource: "kubevirts",
-}
-
 type Informers struct {
 	VMIPresetInformer       cache.SharedIndexInformer
 	NamespaceLimitsInformer cache.SharedIndexInformer
-	VMIInformer             cache.SharedIndexInformer
 	VMRestoreInformer       cache.SharedIndexInformer
 	DataSourceInformer      cache.SharedIndexInformer
-	FlavorInformer          cache.SharedIndexInformer
-	ClusterFlavorInformer   cache.SharedIndexInformer
 }
 
 func IsKubeVirtServiceAccount(serviceAccount string) bool {

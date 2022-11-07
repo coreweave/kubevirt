@@ -3,6 +3,8 @@ package converter
 import (
 	"fmt"
 
+	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -34,7 +36,7 @@ func PlacePCIDevicesOnRootComplex(spec *api.DomainSpec) (err error) {
 		}
 	}
 	for i, disk := range spec.Devices.Disks {
-		if disk.Target.Bus != "virtio" {
+		if disk.Target.Bus != v1.DiskBusVirtio {
 			continue
 		}
 		spec.Devices.Disks[i].Address, err = assigner.PlacePCIDeviceAtNextSlot(disk.Address)
@@ -43,7 +45,7 @@ func PlacePCIDevicesOnRootComplex(spec *api.DomainSpec) (err error) {
 		}
 	}
 	for i, input := range spec.Devices.Inputs {
-		if input.Bus != "virtio" {
+		if input.Bus != v1.VirtIO {
 			continue
 		}
 		spec.Devices.Inputs[i].Address, err = assigner.PlacePCIDeviceAtNextSlot(input.Address)

@@ -18,7 +18,9 @@ import (
 
 	v12 "kubevirt.io/api/core/v1"
 
+	virtv1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
@@ -76,7 +78,7 @@ virtualmachineinstance (vmi), virtualmachine (vm), virtualmachineinstancereplica
 	cmd.Flags().StringVar(&strTargetPort, "target-port", "", "Name or number for the port on the VM that the service should direct traffic to. Optional.")
 	cmd.Flags().StringVar(&strServiceType, "type", "ClusterIP", "Type for this service: ClusterIP, NodePort, or LoadBalancer.")
 	cmd.Flags().StringVar(&portName, "port-name", "", "Name of the port. Optional.")
-	cmd.Flags().StringVar(&strIPFamily, "ip-family", "IPv4", "IP family over which the service will be exposed. Valid values are 'IPv4', 'IPv6', 'IPv4,IPv6' or 'IPv6,IPv4'")
+	cmd.Flags().StringVar(&strIPFamily, "ip-family", "", "IP family over which the service will be exposed. Valid values are 'IPv4', 'IPv6', 'IPv4,IPv6' or 'IPv6,IPv4'")
 	cmd.Flags().StringVar(&strIPFamilyPolicy, "ip-family-policy", "", "IP family policy defines whether the service can use IPv4, IPv6, or both. Valid values are 'SingleStack', 'PreferDualStack' or 'RequireDualStack'")
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 
@@ -139,7 +141,7 @@ func (o *Command) RunE(args []string) error {
 		return err
 	}
 
-	ipFamilyPolicy, err := convertIPFamilyPolicy(strIPFamilyPolicy)
+	ipFamilyPolicy, err := convertIPFamilyPolicy(strIPFamilyPolicy, ipFamilies)
 	if err != nil {
 		return err
 	}
@@ -172,6 +174,7 @@ func (o *Command) RunE(args []string) error {
 		ports = podNetworkPorts(&vmi.Spec)
 		// remove unwanted labels
 		delete(serviceSelector, "kubevirt.io/nodeName")
+		delete(serviceSelector, virtv1.VirtualMachinePoolRevisionName)
 	case "vm", "vms", "virtualmachine", "virtualmachines":
 		// get the VM
 		vm, err := virtClient.VirtualMachine(namespace).Get(vmName, &options)
@@ -182,6 +185,7 @@ func (o *Command) RunE(args []string) error {
 			ports = podNetworkPorts(&vm.Spec.Template.Spec)
 		}
 		serviceSelector = vm.Spec.Template.ObjectMeta.Labels
+		delete(serviceSelector, virtv1.VirtualMachinePoolRevisionName)
 	case "vmirs", "vmirss", "virtualmachineinstancereplicaset", "virtualmachineinstancereplicasets":
 		// get the VM replica set
 		vmirs, err := virtClient.ReplicaSet(namespace).Get(vmName, options)
@@ -200,7 +204,7 @@ func (o *Command) RunE(args []string) error {
 	}
 
 	if len(serviceSelector) == 0 {
-		return fmt.Errorf("missing label information for %s: %s", vmType, vmName)
+		return fmt.Errorf("cannot expose %s without any label: %s", vmType, vmName)
 	}
 
 	if port == 0 && len(ports) == 0 {
@@ -278,6 +282,8 @@ func (o *Command) RunE(args []string) error {
 
 func convertIPFamily(strIPFamily string) ([]v1.IPFamily, error) {
 	switch strings.ToLower(strIPFamily) {
+	case "":
+		return []v1.IPFamily{}, nil
 	case "ipv4":
 		return []v1.IPFamily{v1.IPv4Protocol}, nil
 	case "ipv6":
@@ -291,9 +297,12 @@ func convertIPFamily(strIPFamily string) ([]v1.IPFamily, error) {
 	}
 }
 
-func convertIPFamilyPolicy(strIPFamilyPolicy string) (v1.IPFamilyPolicyType, error) {
+func convertIPFamilyPolicy(strIPFamilyPolicy string, ipFamilies []v1.IPFamily) (v1.IPFamilyPolicyType, error) {
 	switch strings.ToLower(strIPFamilyPolicy) {
 	case "":
+		if len(ipFamilies) > 1 {
+			return v1.IPFamilyPolicyPreferDualStack, nil
+		}
 		return "", nil
 	case "singlestack":
 		return v1.IPFamilyPolicySingleStack, nil

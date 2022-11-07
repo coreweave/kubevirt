@@ -33,25 +33,37 @@ previous_release_registry=${PREVIOUS_RELEASE_REGISTRY:-$_default_previous_releas
 
 functest_docker_prefix=${manifest_docker_prefix-${docker_prefix}}
 
+kubevirt_test_config="${KUBEVIRT_DIR}/tests/default-config.json"
+
+if [[ ${KUBEVIRT_STORAGE} == rook-ceph* ]]; then
+    kubevirt_test_config="${KUBEVIRT_DIR}/tests/default-ceph-config.json"
+fi
+
+echo "Using $kubevirt_test_config as test configuration"
+
 if [[ ${KUBEVIRT_PROVIDER} == os-* ]] || [[ ${KUBEVIRT_PROVIDER} =~ (okd|ocp)-* ]]; then
     oc=${kubectl}
 fi
+
+virtctl_path=$(pwd)/_out/cmd/virtctl/virtctl
 
 rm -rf $ARTIFACTS
 mkdir -p $ARTIFACTS
 
 function functest() {
-    KUBEVIRT_FUNC_TEST_SUITE_ARGS="-apply-default-e2e-configuration \
+    KUBEVIRT_FUNC_TEST_SUITE_ARGS="--ginkgo.trace
+	    -apply-default-e2e-configuration \
 	    -conn-check-ipv4-address=${conn_check_ipv4_address} \
 	    -conn-check-ipv6-address=${conn_check_ipv6_address} \
 	    -conn-check-dns=${conn_check_dns} \
+	    -migration-network-nic=${migration_network_nic} \
 	    ${KUBEVIRT_FUNC_TEST_SUITE_ARGS}"
-    if [[ ${KUBEVIRT_PROVIDER} =~ .*(k8s-1\.16)|(k8s-1\.17)|k8s-sriov.* ]]; then
+    if [[ ${KUBEVIRT_PROVIDER} =~ .*(k8s-1\.16)|(k8s-1\.17)|(k8s-sriov)|(ipv6).* ]]; then
         echo "Will skip test asserting the cluster is in dual-stack mode."
         KUBEVIRT_FUNC_TEST_SUITE_ARGS="-skip-dual-stack-test ${KUBEVIRT_FUNC_TEST_SUITE_ARGS}"
     fi
 
-    _out/tests/ginkgo -r --slowSpecThreshold 60 $@ _out/tests/tests.test -- -kubeconfig=${kubeconfig} -container-tag=${docker_tag} -container-tag-alt=${docker_tag_alt} -container-prefix=${functest_docker_prefix} -image-prefix-alt=${image_prefix_alt} -oc-path=${oc} -kubectl-path=${kubectl} -gocli-path=${gocli} -installed-namespace=${namespace} -previous-release-tag=${PREVIOUS_RELEASE_TAG} -previous-release-registry=${previous_release_registry} -deploy-testing-infra=${deploy_testing_infra} -config=${KUBEVIRT_DIR}/tests/default-config.json --artifacts=${ARTIFACTS} --operator-manifest-path=${OPERATOR_MANIFEST_PATH} ${KUBEVIRT_FUNC_TEST_SUITE_ARGS}
+    _out/tests/ginkgo -timeout=3h -r -slow-spec-threshold=60s $@ _out/tests/tests.test -- -kubeconfig=${kubeconfig} -container-tag=${docker_tag} -container-tag-alt=${docker_tag_alt} -container-prefix=${functest_docker_prefix} -image-prefix-alt=${image_prefix_alt} -oc-path=${oc} -kubectl-path=${kubectl} -gocli-path=${gocli} -installed-namespace=${namespace} -previous-release-tag=${PREVIOUS_RELEASE_TAG} -previous-release-registry=${previous_release_registry} -deploy-testing-infra=${deploy_testing_infra} -config=${kubevirt_test_config} --artifacts=${ARTIFACTS} --operator-manifest-path=${OPERATOR_MANIFEST_PATH} --testing-manifest-path=${TESTING_MANIFEST_PATH} ${KUBEVIRT_FUNC_TEST_SUITE_ARGS} -virtctl-path=${virtctl_path}
 }
 
 if [ "$KUBEVIRT_E2E_PARALLEL" == "true" ]; then

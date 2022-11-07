@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KubeVirt Authors.
+Copyright 2022 The KubeVirt Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import (
 	"k8s.io/client-go/discovery"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/testing"
-
 	clientset "kubevirt.io/client-go/generated/prometheus-operator/clientset/versioned"
 	monitoringv1 "kubevirt.io/client-go/generated/prometheus-operator/clientset/versioned/typed/monitoring/v1"
 	fakemonitoringv1 "kubevirt.io/client-go/generated/prometheus-operator/clientset/versioned/typed/monitoring/v1/fake"

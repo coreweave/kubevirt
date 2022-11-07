@@ -5,17 +5,30 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
+	"runtime"
 	"strings"
+
+	"k8s.io/utils/pointer"
+
+	v1 "kubevirt.io/api/core/v1"
+
+	"kubevirt.io/kubevirt/pkg/hooks"
+	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 
 	"github.com/go-kit/kit/log"
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"libvirt.org/go/libvirt"
 
+	api2 "kubevirt.io/client-go/api"
 	kubevirtlog "kubevirt.io/client-go/log"
+
+	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
 )
 
 const (
@@ -141,23 +154,21 @@ var _ = Describe("LibvirtHelper", func() {
 
 		for scanner.Scan() {
 			entry := map[string]string{}
-			err := json.Unmarshal(scanner.Bytes(), &entry)
-			Expect(err).To(Not(HaveOccurred()))
+			Expect(json.Unmarshal(scanner.Bytes(), &entry)).To(Succeed())
 			//delete(entry, "timestamp")
 			loggedLines = append(loggedLines, entry)
 		}
-		Expect(scanner.Err()).To(Not(HaveOccurred()))
+		Expect(scanner.Err()).ToNot(HaveOccurred())
 
 		expectedLines := []map[string]string{}
 		scanner = bufio.NewScanner(strings.NewReader(formattedLogs))
 		for scanner.Scan() {
 			entry := map[string]string{}
-			err := json.Unmarshal(scanner.Bytes(), &entry)
-			Expect(err).To(Not(HaveOccurred()))
+			Expect(json.Unmarshal(scanner.Bytes(), &entry)).To(Succeed())
 			//delete(entry, "timestamp")
 			expectedLines = append(expectedLines, entry)
 		}
-		Expect(scanner.Err()).To(Not(HaveOccurred()))
+		Expect(scanner.Err()).ToNot(HaveOccurred())
 
 		Expect(loggedLines).To(Equal(expectedLines))
 	})
@@ -180,23 +191,21 @@ var _ = Describe("LibvirtHelper", func() {
 
 		for scanner.Scan() {
 			entry := map[string]string{}
-			err := json.Unmarshal(scanner.Bytes(), &entry)
-			Expect(err).To(Not(HaveOccurred()))
+			Expect(json.Unmarshal(scanner.Bytes(), &entry)).To(Succeed())
 			delete(entry, "timestamp")
 			loggedLines = append(loggedLines, entry)
 		}
-		Expect(scanner.Err()).To(Not(HaveOccurred()))
+		Expect(scanner.Err()).ToNot(HaveOccurred())
 
 		expectedLines := []map[string]string{}
 		scanner = bufio.NewScanner(strings.NewReader(qemuFormattedLogs))
 		for scanner.Scan() {
 			entry := map[string]string{}
-			err := json.Unmarshal(scanner.Bytes(), &entry)
-			Expect(err).To(Not(HaveOccurred()))
+			Expect(json.Unmarshal(scanner.Bytes(), &entry)).To(Succeed())
 			delete(entry, "timestamp")
 			expectedLines = append(expectedLines, entry)
 		}
-		Expect(scanner.Err()).To(Not(HaveOccurred()))
+		Expect(scanner.Err()).ToNot(HaveOccurred())
 
 		Expect(loggedLines).To(Equal(expectedLines))
 	})
@@ -220,5 +229,118 @@ var _ = Describe("LibvirtHelper", func() {
 		domainSpec, err = GetDomainSpecWithRuntimeInfo(domain)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(domainSpec.Metadata.KubeVirt).NotTo(BeNil())
+	})
+
+	It("should update the wantedSpec to reflect changes made by hooks", func() {
+		vmiNamespace := "test-namespace"
+		vmiName := "test-vmi"
+		ctrl := gomock.NewController(GinkgoT())
+		mockConn := cli.NewMockConnection(ctrl)
+		mockDomain := cli.NewMockVirDomain(ctrl)
+
+		vmi := api2.NewMinimalVMIWithNS(vmiNamespace, vmiName)
+		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+		domain := &api.Domain{}
+		c := &converter.ConverterContext{
+			Architecture:     runtime.GOARCH,
+			VirtualMachine:   vmi,
+			AllowEmulation:   true,
+			SMBios:           &cmdv1.SMBios{},
+			HotplugVolumes:   make(map[string]v1.VolumeStatus),
+			PermanentVolumes: make(map[string]v1.VolumeStatus),
+		}
+		Expect(converter.Convert_v1_VirtualMachineInstance_To_api_Domain(vmi, domain, c)).To(Succeed())
+		api.NewDefaulter(runtime.GOARCH).SetObjectDefaults_Domain(domain)
+
+		wantedSpec := &domain.Spec
+		wantedSpec.Devices.Disks = []api.Disk{
+			{
+				Device: "disk",
+				Type:   "file",
+				Source: api.DiskSource{
+					File: "/var/run/kubevirt-private/vmi-disks/permvolume1/disk.img",
+				},
+				Target: api.DiskTarget{
+					Bus:    v1.DiskBusVirtio,
+					Device: "vda",
+				},
+				Driver: &api.DiskDriver{
+					Cache:       "none",
+					Name:        "qemu",
+					Type:        "raw",
+					ErrorPolicy: "stop",
+				},
+				Alias: api.NewUserDefinedAlias("permvolume1"),
+			},
+		}
+
+		mutatedSpec := wantedSpec.DeepCopy()
+		mutatedSpec.Devices.Disks[0].Source.File = "/var/run/kubevirt-private/vmi-disks/permvolume1/new-disk.img"
+		mutatedSpecXml, err := xml.Marshal(mutatedSpec)
+		Expect(err).NotTo(HaveOccurred())
+
+		// mock hook manager
+		mockHookManager := hooks.NewMockManager(ctrl)
+		getHookManager = func() hooks.Manager {
+			return mockHookManager
+		}
+		defer func() {
+			getHookManager = hooks.GetManager
+		}()
+		mockHookManager.EXPECT().OnDefineDomain(wantedSpec, vmi).Return(string(mutatedSpecXml), nil)
+		mockConn.EXPECT().DomainDefineXML(string(mutatedSpecXml)).Return(mockDomain, nil)
+
+		_, err = SetDomainSpecStrWithHooks(mockConn, vmi, wantedSpec)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(wantedSpec.Devices.Disks).To(Equal(mutatedSpec.Devices.Disks))
+	})
+
+	Context("getLibvirtLogFilters()", func() {
+
+		DescribeTable("should return customLogFilters if defined and not empty with", func(libvirtLogVerbosityEnvVar *string, libvirtDebugLogsEnvVarDefined bool) {
+			customLogFilters := pointer.String("3:remote 4:event 3:util.json 3:util.object 3:util.dbus 3:util.netlink 3:node_device 3:rpc 3:access")
+
+			logFilters, enableDebugLogs := getLibvirtLogFilters(customLogFilters, libvirtLogVerbosityEnvVar, libvirtDebugLogsEnvVarDefined)
+			Expect(enableDebugLogs).To(BeTrue())
+			Expect(logFilters).To(Equal(*customLogFilters))
+		},
+			Entry("libvirtLogVerbosityEnvVar not defined, libvirtDebugLogsEnvVarDefined false", nil, false),
+			Entry("libvirtLogVerbosityEnvVar defined, libvirtDebugLogsEnvVarDefined false", pointer.String("2"), false),
+			Entry("libvirtLogVerbosityEnvVar not defined, libvirtDebugLogsEnvVarDefined true", nil, true),
+			Entry("libvirtLogVerbosityEnvVar defined, libvirtDebugLogsEnvVarDefined true", pointer.String("1"), true),
+		)
+
+		Context("with customLogFilters not defined", func() {
+
+			const verbosityThreshold = services.EXT_LOG_VERBOSITY_THRESHOLD
+
+			DescribeTable("logs should be enabled if debugLogs env var is defined when", func(libvirtLogVerbosityEnvVar *string) {
+				_, enableDebugLogs := getLibvirtLogFilters(nil, libvirtLogVerbosityEnvVar, true)
+				Expect(enableDebugLogs).To(BeTrue())
+			},
+				Entry("libvirtLogVerbosityEnvVar defined to 8", pointer.String("8")),
+				Entry("libvirtLogVerbosityEnvVar defined to 3", pointer.String("3")),
+				Entry("libvirtLogVerbosityEnvVar is not defined", nil),
+			)
+
+			DescribeTable("with debugLogs not defined logs should", func(libvirtLogVerbosity *int, expectedEnableDebugLogs bool) {
+
+				var libvirtLogVerbosityEnvVar *string
+				if libvirtLogVerbosity != nil {
+					libvirtLogVerbosityEnvVar = pointer.String(fmt.Sprintf("%d", *libvirtLogVerbosity))
+				}
+
+				_, enableDebugLogs := getLibvirtLogFilters(nil, libvirtLogVerbosityEnvVar, false)
+				Expect(enableDebugLogs).To(Equal(expectedEnableDebugLogs))
+			},
+				Entry("be disabled when libvirt log verbosity is below threshold", pointer.Int(verbosityThreshold-1), false),
+				Entry("be disabled when libvirt log verbosity is equal to threshold", pointer.Int(verbosityThreshold), true),
+				Entry("be enabled when libvirt log verbosity is above threshold", pointer.Int(verbosityThreshold+1), true),
+				Entry("be disabled when libvirt log verbosity is not defined", nil, false),
+			)
+
+		})
+
 	})
 })

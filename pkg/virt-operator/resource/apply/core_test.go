@@ -34,13 +34,13 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/certificates/triple"
 	"kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,7 +54,7 @@ var _ = Describe("Apply", func() {
 
 	Context("Services", func() {
 
-		It("should patch if ClusterIp == \"\" during update", func() {
+		It("should not patch if ClusterIp is empty during update", func() {
 			cachedService := &corev1.Service{}
 			cachedService.Spec.Type = corev1.ServiceTypeClusterIP
 			cachedService.Spec.ClusterIP = "10.10.10.10"
@@ -63,13 +63,10 @@ var _ = Describe("Apply", func() {
 			service.Spec.Type = corev1.ServiceTypeClusterIP
 			service.Spec.ClusterIP = ""
 
-			ops, err := generateServicePatch(cachedService, service)
-			Expect(err).To(BeNil())
-			Expect(ops).ToNot(Equal(""))
+			Expect(generateServicePatch(cachedService, service)).To(BeEmpty())
 		})
 
-		It("should replace if ClusterIp != \"\" during update and ip changes", func() {
-
+		It("should replace if ClusterIp is not empty during update and ip changes", func() {
 			cachedService := &corev1.Service{}
 			cachedService.Spec.Type = corev1.ServiceTypeClusterIP
 			cachedService.Spec.ClusterIP = "10.10.10.10"
@@ -147,14 +144,16 @@ var _ = Describe("Apply", func() {
 			kv = &v1.KubeVirt{}
 		})
 
-		AfterEach(func() {
-			ctrl.Finish()
-		})
-
 		It("should not patch ConfigMap on sync", func() {
-			requiredCM := components.NewKubeVirtCAConfigMap(operatorNamespace)
+			requiredCMs := components.NewCAConfigMaps(operatorNamespace)
+			var requiredCM *corev1.ConfigMap
+			for _, cm := range requiredCMs {
+				if cm.Name == components.KubeVirtCASecretName {
+					requiredCM = cm
+				}
+			}
 			version, imageRegistry, id := getTargetVersionRegistryID(kv)
-			injectOperatorMetadata(kv, &requiredCM.ObjectMeta, version, imageRegistry, id, true)
+			injectOperatorMetadata(kv, &requiredCMs[0].ObjectMeta, version, imageRegistry, id, true)
 
 			existingCM := requiredCM.DeepCopy()
 			crt := createCrt()
@@ -181,7 +180,13 @@ var _ = Describe("Apply", func() {
 
 		It("should patch ConfigMap on sync when not parsable", func() {
 			notRSAParsableString := "something not parsable"
-			requiredCM := components.NewKubeVirtCAConfigMap(operatorNamespace)
+			requiredCMs := components.NewCAConfigMaps(operatorNamespace)
+			var requiredCM *corev1.ConfigMap
+			for _, cm := range requiredCMs {
+				if cm.Name == components.KubeVirtCASecretName {
+					requiredCM = cm
+				}
+			}
 			version, imageRegistry, id := getTargetVersionRegistryID(kv)
 			injectOperatorMetadata(kv, &requiredCM.ObjectMeta, version, imageRegistry, id, true)
 
@@ -205,10 +210,10 @@ var _ = Describe("Apply", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				obj, err := json.Marshal(existingCM)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				obj, err = patch.Apply(obj)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				pr := &corev1.ConfigMap{}
 				Expect(json.Unmarshal(obj, existingCM)).To(Succeed())
@@ -221,12 +226,18 @@ var _ = Describe("Apply", func() {
 			crt := createCrt()
 
 			_, err := r.createOrUpdateKubeVirtCAConfigMap(queue, crt, duration, requiredCM)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(patched).To(BeTrue())
 		})
 
 		It("should patch ConfigMap on sync when CA expired", func() {
-			requiredCM := components.NewKubeVirtCAConfigMap(operatorNamespace)
+			requiredCMs := components.NewCAConfigMaps(operatorNamespace)
+			var requiredCM *corev1.ConfigMap
+			for _, cm := range requiredCMs {
+				if cm.Name == components.KubeVirtCASecretName {
+					requiredCM = cm
+				}
+			}
 			version, imageRegistry, id := getTargetVersionRegistryID(kv)
 			injectOperatorMetadata(kv, &requiredCM.ObjectMeta, version, imageRegistry, id, true)
 
@@ -307,10 +318,6 @@ var _ = Describe("Apply", func() {
 			kv = &v1.KubeVirt{}
 		})
 
-		AfterEach(func() {
-			ctrl.Finish()
-		})
-
 		It("should not patch ServiceAccount on sync when they are equal", func() {
 
 			pr := newServiceAccount()
@@ -327,7 +334,7 @@ var _ = Describe("Apply", func() {
 				expectations: expectations,
 			}
 
-			Expect(r.createOrUpdateServiceAccount(pr)).To(BeNil())
+			Expect(r.createOrUpdateServiceAccount(pr)).To(Succeed())
 		})
 
 		It("should patch ServiceAccount on sync when they are not equal", func() {
@@ -359,10 +366,10 @@ var _ = Describe("Apply", func() {
 				patched = true
 
 				obj, err := json.Marshal(pr)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				obj, err = patch.Apply(obj)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				pr := &corev1.ServiceAccount{}
 				Expect(json.Unmarshal(obj, pr)).To(Succeed())
@@ -371,7 +378,7 @@ var _ = Describe("Apply", func() {
 				return true, pr, nil
 			})
 
-			Expect(r.createOrUpdateServiceAccount(requiredPR)).To(BeNil())
+			Expect(r.createOrUpdateServiceAccount(requiredPR)).To(Succeed())
 			Expect(patched).To(BeTrue())
 		})
 	})
@@ -380,7 +387,7 @@ var _ = Describe("Apply", func() {
 
 		config := getConfig("fake-registry", "v9.9.9")
 
-		table.DescribeTable("with either patch",
+		DescribeTable("with either patch",
 			func(cachedService *corev1.Service,
 				targetService *corev1.Service,
 				expectLabelsAnnotationsPatch bool,
@@ -388,7 +395,7 @@ var _ = Describe("Apply", func() {
 
 				Expect(hasImmutableFieldChanged(targetService, cachedService)).To(BeFalse())
 				ops, err := generateServicePatch(cachedService, targetService)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				hasSubstring := func(ops []string, substring string) bool {
 					for _, op := range ops {
@@ -409,10 +416,10 @@ var _ = Describe("Apply", func() {
 				}
 
 				if !expectSpecPatch && !expectLabelsAnnotationsPatch {
-					Expect(len(ops)).To(Equal(0))
+					Expect(ops).To(BeEmpty())
 				}
 			},
-			table.Entry("should do nothing if cached service has ClusterIP set and target does not (clusterIP is dynamically assigned when empty)",
+			Entry("should do nothing if cached service has ClusterIP set and target does not (clusterIP is dynamically assigned when empty)",
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -447,7 +454,7 @@ var _ = Describe("Apply", func() {
 					},
 				},
 				false, false),
-			table.Entry("should update labels, annotations on update",
+			Entry("should update labels, annotations on update",
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -507,7 +514,7 @@ var _ = Describe("Apply", func() {
 					},
 				},
 				true, false),
-			table.Entry("no-op with identical specs",
+			Entry("no-op with identical specs",
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -585,7 +592,7 @@ var _ = Describe("Apply", func() {
 					},
 				},
 				false, false),
-			table.Entry("should patch spec when selectors differ",
+			Entry("should patch spec when selectors differ",
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -663,14 +670,14 @@ var _ = Describe("Apply", func() {
 				true, true),
 		)
 
-		table.DescribeTable("complete replacement",
+		DescribeTable("complete replacement",
 			func(cachedService *corev1.Service,
 				targetService *corev1.Service) {
 
 				shouldDeleteAndReplace := hasImmutableFieldChanged(targetService, cachedService)
 				Expect(shouldDeleteAndReplace).To(BeTrue())
 			},
-			table.Entry("should delete and recreate service if of mixed 'type'.",
+			Entry("should delete and recreate service if of mixed 'type'.",
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -691,7 +698,7 @@ var _ = Describe("Apply", func() {
 						Type: corev1.ServiceTypeNodePort,
 					},
 				}),
-			table.Entry("should delete and recreate service if not of type ClusterIP.",
+			Entry("should delete and recreate service if not of type ClusterIP.",
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -712,7 +719,7 @@ var _ = Describe("Apply", func() {
 						Type: corev1.ServiceTypeNodePort,
 					},
 				}),
-			table.Entry("should delete and recreate service if ClusterIP changes (clusterIP is not mutable)",
+			Entry("should delete and recreate service if ClusterIP changes (clusterIP is not mutable)",
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{

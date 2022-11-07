@@ -26,6 +26,13 @@ readonly ARTIFACTS_PATH="${ARTIFACTS-$WORKSPACE/exported-artifacts}"
 readonly TEMPLATES_SERVER="https://templates.ovirt.org/kubevirt/"
 readonly BAZEL_CACHE="${BAZEL_CACHE:-http://bazel-cache.kubevirt-prow.svc.cluster.local:8080/kubevirt.io/kubevirt}"
 
+
+if [ ${CI} == "true" ]; then
+  _delay="$(( ( RANDOM % 180 )))"
+  echo "INFO: Sleeping for ${_delay}s to randomize job startup slighty"
+  sleep ${_delay}
+fi
+
 if [ -z $TARGET ]; then
   echo "FATAL: TARGET must be non empty"
   exit 1
@@ -49,16 +56,39 @@ elif [[ $TARGET =~ sig-network ]]; then
 elif [[ $TARGET =~ sig-storage ]]; then
   export KUBEVIRT_PROVIDER=${TARGET/-sig-storage/}
   export KUBEVIRT_STORAGE="rook-ceph-default"
+  export KUBEVIRT_DEPLOY_NFS_CSI=true
 elif [[ $TARGET =~ sig-compute-realtime ]]; then
   export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-realtime/}
   export KUBEVIRT_HUGEPAGES_2M=512
   export KUBEVIRT_REALTIME_SCHEDULER=true
+elif [[ $TARGET =~ sig-compute-migrations ]]; then
+  export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-migrations/}
+  export KUBEVIRT_WITH_CNAO=true
+  export KUBEVIRT_NUM_SECONDARY_NICS=1
+  export KUBEVIRT_DEPLOY_NFS_CSI=true
 elif [[ $TARGET =~ sig-compute ]]; then
   export KUBEVIRT_PROVIDER=${TARGET/-sig-compute/}
 elif [[ $TARGET =~ sig-operator ]]; then
   export KUBEVIRT_PROVIDER=${TARGET/-sig-operator/}
+elif [[ $TARGET =~ sig-monitoring ]]; then
+    export KUBEVIRT_PROVIDER=${TARGET/-sig-monitoring/}
+    export KUBEVIRT_DEPLOY_PROMETHEUS=true
 else
   export KUBEVIRT_PROVIDER=${TARGET}
+fi
+
+if [[ $TARGET =~ psa ]]; then
+  export KUBEVIRT_DEPLOY_CDI=false
+  if [[ -z $FEATURE_GATES ]]; then
+    export FEATURE_GATES="PSA"
+  else
+    export FEATURE_GATES="${FEATURE_GATES},PSA"
+  fi
+fi
+
+# Single-node single-replica test lanes need nfs csi to run sig-storage tests
+if [[ $KUBEVIRT_NUM_NODES = "1" && $KUBEVIRT_INFRA_REPLICAS = "1" ]]; then
+  export KUBEVIRT_DEPLOY_NFS_CSI=true
 fi
 
 if [ ! -d "cluster-up/cluster/$KUBEVIRT_PROVIDER" ]; then
@@ -185,9 +215,9 @@ determine_cri_bin() {
     elif [ "${KUBEVIRTCI_RUNTIME}" = "docker" ]; then
         echo docker
     else
-        if curl --unix-socket /${HOME}/podman.sock http://d/v3.0.0/libpod/info >/dev/null 2>&1; then
+        if curl --unix-socket "${XDG_RUNTIME_DIR}/podman/podman.sock" http://d/v3.0.0/libpod/info >/dev/null 2>&1; then
             echo podman
-        elif docker ps >/dev/null; then
+        elif docker ps >/dev/null 2>&1; then
             echo docker
         else
             >&2 echo "no working container runtime found. Neither docker nor podman seems to work."
@@ -311,7 +341,7 @@ if [[ $TARGET =~ .*kind.* ]]; then
   export KUBEVIRT_E2E_PARALLEL=false
 fi
 
-ginko_params="--noColor --seed=42"
+ginko_params="--no-color --seed=42"
 
 # Prepare PV for Windows testing
 if [[ $TARGET =~ windows.* ]]; then
@@ -342,7 +372,8 @@ spec:
 EOF
 fi
 
-# Set KUBEVIRT_E2E_FOCUS and KUBEVIRT_E2E_SKIP only if both of them are not already set
+# Set KUBEVIRT_E2E_FOCUS and KUBEVIRT_E2E_SKIP only if both of them are not
+# already set.
 if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} ]]; then
   if [[ $TARGET =~ windows_sysprep.* ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[Sysprep\\]"
@@ -354,14 +385,20 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} ]]; then
   elif [[ $TARGET =~ sig-network ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-network\\]"
   elif [[ $TARGET =~ sig-storage ]]; then
-    export KUBEVIRT_E2E_FOCUS="\\[sig-storage\\]|\\[rook-ceph\\]"
+    export KUBEVIRT_E2E_FOCUS="\\[sig-storage\\]|\\[storage-req\\]"
+    export KUBEVIRT_E2E_SKIP="Migration"
   elif [[ $TARGET =~ vgpu.* ]]; then
     export KUBEVIRT_E2E_FOCUS=MediatedDevices
   elif [[ $TARGET =~ sig-compute-realtime ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-compute-realtime\\]"
+  elif [[ $TARGET =~ sig-compute-migrations ]]; then
+    export KUBEVIRT_E2E_FOCUS="Migration"
+    export KUBEVIRT_E2E_SKIP="GPU|MediatedDevices"
   elif [[ $TARGET =~ sig-compute ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-compute\\]"
-    export KUBEVIRT_E2E_SKIP="GPU|MediatedDevices"
+    export KUBEVIRT_E2E_SKIP="GPU|MediatedDevices|Migration"
+  elif [[ $TARGET =~ sig-monitoring ]]; then
+      export KUBEVIRT_E2E_FOCUS="\\[sig-monitoring\\]"
   elif [[ $TARGET =~ sig-operator ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-operator\\]"
   elif [[ $TARGET =~ sriov.* ]]; then
@@ -372,12 +409,6 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} ]]; then
     export KUBEVIRT_E2E_SKIP="SRIOV|GPU|MediatedDevices"
   else
     export KUBEVIRT_E2E_SKIP="Multus|SRIOV|GPU|Macvtap|MediatedDevices"
-  fi
-
-  if ! [[ $TARGET =~ sig-storage ]]; then
-    if [[ "$KUBEVIRT_STORAGE" == "rook-ceph-default" ]]; then
-        export KUBEVIRT_E2E_FOCUS=rook-ceph
-    fi
   fi
 fi
 
@@ -395,6 +426,16 @@ else
   fi
 fi
 
+# Single-node single-replica test lanes obviously can't run live migrations,
+# but also currently lack the requirements for SRIOV, GPU, Macvtap and MDEVs.
+if [[ $KUBEVIRT_NUM_NODES = "1" && $KUBEVIRT_INFRA_REPLICAS = "1" ]]; then
+  if [ -n "$KUBEVIRT_E2E_SKIP" ]; then
+    export KUBEVIRT_E2E_SKIP="${KUBEVIRT_E2E_SKIP}|SRIOV|GPU|Macvtap|MediatedDevices|Migration"
+  else
+    export KUBEVIRT_E2E_SKIP="SRIOV|GPU|Macvtap|MediatedDevices|Migration"
+  fi
+fi
+
 # If KUBEVIRT_QUARANTINE is not set, do not run quarantined tests. When it is
 # set the whole suite (quarantined and stable) will be run.
 if [ -z "$KUBEVIRT_QUARANTINE" ]; then
@@ -402,10 +443,6 @@ if [ -z "$KUBEVIRT_QUARANTINE" ]; then
         export KUBEVIRT_E2E_SKIP="${KUBEVIRT_E2E_SKIP}|QUARANTINE"
     else
         export KUBEVIRT_E2E_SKIP="QUARANTINE"
-    fi
-    # quarantine test_id:3145 only for nonroot lanes
-    if [[ $KUBEVIRT_NONROOT =~ true ]]; then
-        export KUBEVIRT_E2E_SKIP="${KUBEVIRT_E2E_SKIP}|test_id:3145"
     fi
 fi
 

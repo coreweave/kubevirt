@@ -24,7 +24,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
+	"kubevirt.io/api/instancetype"
+
 	virtv1 "kubevirt.io/api/core/v1"
+	"kubevirt.io/api/migrations"
+)
+
+const (
+	VersionName   = "rbac.authorization.k8s.io"
+	VersionNamev1 = "rbac.authorization.k8s.io/v1"
+	GroupName     = "kubevirt.io"
 )
 
 const ApiServiceAccountName = "kubevirt-apiserver"
@@ -59,7 +68,7 @@ func newApiServerServiceAccount(namespace string) *corev1.ServiceAccount {
 func newApiServerClusterRole() *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
+			APIVersion: VersionNamev1,
 			Kind:       "ClusterRole",
 		},
 		ObjectMeta: metav1.ObjectMeta{
@@ -82,7 +91,7 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 			},
 			{
 				APIGroups: []string{
-					"kubevirt.io",
+					GroupName,
 				},
 				Resources: []string{
 					"virtualmachines",
@@ -94,7 +103,18 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 			},
 			{
 				APIGroups: []string{
-					"kubevirt.io",
+					"",
+				},
+				Resources: []string{
+					"persistentvolumeclaims",
+				},
+				Verbs: []string{
+					"get",
+				},
+			},
+			{
+				APIGroups: []string{
+					GroupName,
 				},
 				Resources: []string{
 					"virtualmachines/status",
@@ -105,7 +125,7 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 			},
 			{
 				APIGroups: []string{
-					"kubevirt.io",
+					GroupName,
 				},
 				Resources: []string{
 					"virtualmachineinstancemigrations",
@@ -116,7 +136,7 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 			},
 			{
 				APIGroups: []string{
-					"kubevirt.io",
+					GroupName,
 				},
 				Resources: []string{
 					"virtualmachineinstancepresets",
@@ -162,7 +182,7 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 			},
 			{
 				APIGroups: []string{
-					"kubevirt.io",
+					GroupName,
 				},
 				Resources: []string{
 					"kubevirts",
@@ -198,14 +218,40 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 			},
 			{
 				APIGroups: []string{
-					"flavor.kubevirt.io",
+					"instancetype.kubevirt.io",
 				},
 				Resources: []string{
-					"virtualmachineflavors",
-					"virtualmachineclusterflavors",
+					instancetype.PluralResourceName,
+					instancetype.ClusterPluralResourceName,
+					instancetype.PluralPreferenceResourceName,
+					instancetype.ClusterPluralPreferenceResourceName,
 				},
 				Verbs: []string{
-					"list", "watch",
+					"get", "list", "watch",
+				},
+			},
+			{
+				APIGroups: []string{
+					migrations.GroupName,
+				},
+				Resources: []string{
+					migrations.ResourceMigrationPolicies,
+				},
+				Verbs: []string{
+					"get", "list", "watch",
+				},
+			},
+			{
+				APIGroups: []string{
+					"apps",
+				},
+				Resources: []string{
+					"controllerrevisions",
+				},
+				Verbs: []string{
+					"create",
+					"list",
+					"get",
 				},
 			},
 		},
@@ -215,7 +261,7 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 func newApiServerClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
+			APIVersion: VersionNamev1,
 			Kind:       "ClusterRoleBinding",
 		},
 		ObjectMeta: metav1.ObjectMeta{
@@ -225,7 +271,7 @@ func newApiServerClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding
 			},
 		},
 		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
+			APIGroup: VersionName,
 			Kind:     "ClusterRole",
 			Name:     ApiServiceAccountName,
 		},
@@ -242,7 +288,7 @@ func newApiServerClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding
 func newApiServerAuthDelegatorClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
+			APIVersion: VersionNamev1,
 			Kind:       "ClusterRoleBinding",
 		},
 		ObjectMeta: metav1.ObjectMeta{
@@ -252,7 +298,7 @@ func newApiServerAuthDelegatorClusterRoleBinding(namespace string) *rbacv1.Clust
 			},
 		},
 		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
+			APIGroup: VersionName,
 			Kind:     "ClusterRole",
 			Name:     "system:auth-delegator",
 		},
@@ -269,7 +315,7 @@ func newApiServerAuthDelegatorClusterRoleBinding(namespace string) *rbacv1.Clust
 func newApiServerRole(namespace string) *rbacv1.Role {
 	return &rbacv1.Role{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
+			APIVersion: VersionNamev1,
 			Kind:       "Role",
 		},
 		ObjectMeta: metav1.ObjectMeta{
@@ -298,7 +344,7 @@ func newApiServerRole(namespace string) *rbacv1.Role {
 func newApiServerRoleBinding(namespace string) *rbacv1.RoleBinding {
 	return &rbacv1.RoleBinding{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
+			APIVersion: VersionNamev1,
 			Kind:       "RoleBinding",
 		},
 		ObjectMeta: metav1.ObjectMeta{
@@ -309,7 +355,7 @@ func newApiServerRoleBinding(namespace string) *rbacv1.RoleBinding {
 			},
 		},
 		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
+			APIGroup: VersionName,
 			Kind:     "Role",
 			Name:     ApiServiceAccountName,
 		},

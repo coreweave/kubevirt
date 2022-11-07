@@ -32,6 +32,8 @@ import (
 	"syscall"
 	"time"
 
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
+
 	"github.com/emicklei/go-restful"
 	"github.com/golang/glog"
 	flag "github.com/spf13/pflag"
@@ -44,6 +46,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/certificate"
 	"k8s.io/client-go/util/flowcontrol"
+
+	"kubevirt.io/kubevirt/pkg/safepath"
 
 	"kubevirt.io/kubevirt/pkg/util/ratelimiter"
 
@@ -59,6 +63,7 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	clientutil "kubevirt.io/client-go/util"
+
 	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/controller"
@@ -70,17 +75,13 @@ import (
 	_ "kubevirt.io/kubevirt/pkg/monitoring/workqueue/prometheus" // import for prometheus metrics
 	"kubevirt.io/kubevirt/pkg/service"
 	"kubevirt.io/kubevirt/pkg/util"
-	"kubevirt.io/kubevirt/pkg/util/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	virthandler "kubevirt.io/kubevirt/pkg/virt-handler"
 	virtcache "kubevirt.io/kubevirt/pkg/virt-handler/cache"
-	"kubevirt.io/kubevirt/pkg/virt-handler/cgroup"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
-	devicemanager "kubevirt.io/kubevirt/pkg/virt-handler/device-manager"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
 	nodelabeller "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller"
-	nodelabellerutil "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 	"kubevirt.io/kubevirt/pkg/virt-handler/rest"
 	"kubevirt.io/kubevirt/pkg/virt-handler/selinux"
 	virt_api "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -121,6 +122,9 @@ const (
 	defaultClientKeyFilePath  = "/etc/virt-handler/clientcertificates/tls.key"
 	defaultTlsCertFilePath    = "/etc/virt-handler/servercertificates/tls.crt"
 	defaultTlsKeyFilePath     = "/etc/virt-handler/servercertificates/tls.key"
+
+	// Default network-status downward API file path
+	defaultNetworkStatusFilePath = "/etc/podinfo/network-status"
 )
 
 type virtHandlerApp struct {
@@ -284,10 +288,6 @@ func (app *virtHandlerApp) Run() {
 		glog.Fatalf("Error preparing the certificate manager: %v", err)
 	}
 
-	if err := app.setupTLS(factory); err != nil {
-		glog.Fatalf("Error constructing migration tls config: %v", err)
-	}
-
 	// Legacy support, Remove this informer once we no longer support
 	// VMIs with graceful shutdown trigger
 	gracefulShutdownInformer := cache.NewSharedIndexInformer(
@@ -296,11 +296,15 @@ func (app *virtHandlerApp) Run() {
 		0,
 		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 
-	podIsolationDetector := isolation.NewSocketBasedIsolationDetector(app.VirtShareDir, cgroup.NewParser())
+	podIsolationDetector := isolation.NewSocketBasedIsolationDetector(app.VirtShareDir)
 	app.clusterConfig = virtconfig.NewClusterConfig(factory.CRD(), factory.KubeVirt(), app.namespace)
 	// set log verbosity
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeRateLimiter)
+
+	if err := app.setupTLS(factory); err != nil {
+		glog.Fatalf("Error constructing migration tls config: %v", err)
+	}
 
 	migrationProxy := migrationproxy.NewMigrationProxyManager(app.serverTLSConfig, app.clientTLSConfig, app.clusterConfig)
 
@@ -308,28 +312,34 @@ func (app *virtHandlerApp) Run() {
 	defer close(stop)
 	// Currently nodeLabeller only support x86_64
 	var capabilities *api.Capabilities
+	var hostCpuModel string
 	if virtconfig.IsAMD64(runtime.GOARCH) {
-		deviceController := &devicemanager.DeviceController{}
-		if deviceController.NodeHasDevice(nodelabellerutil.KVMPath) {
-			nodeLabellerController, err := nodelabeller.NewNodeLabeller(app.clusterConfig, app.virtCli, app.HostOverride, app.namespace)
-			if err != nil {
-				panic(err)
-			}
-			capabilities = nodeLabellerController.HostCapabilities()
-
-			go nodeLabellerController.Run(10, stop)
-		} else {
-			logger.V(1).Level(log.INFO).Log("node-labeller is disabled, cannot work without KVM device.")
+		nodeLabellerController, err := nodelabeller.NewNodeLabeller(app.clusterConfig, app.virtCli, app.HostOverride, app.namespace)
+		if err != nil {
+			panic(err)
 		}
+		capabilities = nodeLabellerController.HostCapabilities()
+
+		hostCpuModel = nodeLabellerController.GetHostCpuModel().Name
+
+		go nodeLabellerController.Run(10, stop)
+	}
+
+	migrationIpAddress := app.PodIpAddress
+	migrationIpAddress, err = virthandler.FindMigrationIP(defaultNetworkStatusFilePath, migrationIpAddress)
+	if err != nil {
+		log.Log.Reason(err)
+		return
 	}
 
 	vmController := virthandler.NewController(
 		recorder,
 		app.virtCli,
 		app.HostOverride,
-		app.PodIpAddress,
+		migrationIpAddress,
 		app.VirtShareDir,
 		app.VirtPrivateDir,
+		app.KubeletPodsDir,
 		vmiSourceInformer,
 		vmiTargetInformer,
 		domainSharedInformer,
@@ -340,6 +350,7 @@ func (app *virtHandlerApp) Run() {
 		podIsolationDetector,
 		migrationProxy,
 		capabilities,
+		hostCpuModel,
 	)
 
 	promErrCh := make(chan error)
@@ -381,7 +392,17 @@ func (app *virtHandlerApp) Run() {
 
 		// relabel tun device
 		unprivilegedContainerSELinuxLabel := "system_u:object_r:container_file_t:s0"
-		err = selinux.RelabelFiles(unprivilegedContainerSELinuxLabel, se.IsPermissive(), "/dev/net/tun", "/dev/null")
+
+		devTun, err := safepath.JoinAndResolveWithRelativeRoot("/", "/dev/net/tun")
+		if err != nil {
+			panic(err)
+		}
+		devNull, err := safepath.JoinAndResolveWithRelativeRoot("/", "/dev/null")
+		if err != nil {
+			panic(err)
+		}
+
+		err = selinux.RelabelFiles(unprivilegedContainerSELinuxLabel, se.IsPermissive(), devTun, devNull)
 		if err != nil {
 			panic(fmt.Errorf("error relabeling required files: %v", err))
 		}
@@ -577,11 +598,11 @@ func (app *virtHandlerApp) setupTLS(factory controller.KubeInformerFactory) erro
 		apiHealthVersion.Clear()
 		cache.DefaultWatchErrorHandler(r, err)
 	})
-	caManager := webhooks.NewCAManager(kubevirtCAConfigInformer.GetStore(), app.namespace, app.caConfigMapName)
+	caManager := kvtls.NewCAManager(kubevirtCAConfigInformer.GetStore(), app.namespace, app.caConfigMapName)
 
-	app.promTLSConfig = webhooks.SetupPromTLS(app.servercertmanager)
-	app.serverTLSConfig = webhooks.SetupTLSForVirtHandlerServer(caManager, app.servercertmanager, app.externallyManaged)
-	app.clientTLSConfig = webhooks.SetupTLSForVirtHandlerClients(caManager, app.clientcertmanager, app.externallyManaged)
+	app.promTLSConfig = kvtls.SetupPromTLS(app.servercertmanager, app.clusterConfig)
+	app.serverTLSConfig = kvtls.SetupTLSForVirtHandlerServer(caManager, app.servercertmanager, app.externallyManaged, app.clusterConfig)
+	app.clientTLSConfig = kvtls.SetupTLSForVirtHandlerClients(caManager, app.clientcertmanager, app.externallyManaged)
 
 	return nil
 }

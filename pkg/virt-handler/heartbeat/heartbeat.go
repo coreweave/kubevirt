@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"time"
 
@@ -16,10 +15,13 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	virtutil "kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	device_manager "kubevirt.io/kubevirt/pkg/virt-handler/device-manager"
 )
+
+const failedSetCPUManagerLabelFmt = "failed to set a cpu manager label on host %s"
 
 type HeartBeat struct {
 	clientset                 k8scli.CoreV1Interface
@@ -48,6 +50,9 @@ func (h *HeartBeat) Run(heartBeatInterval time.Duration, stopCh chan struct{}) (
 	done = make(chan struct{})
 	go func() {
 		h.heartBeat(heartBeatInterval, stopCh)
+		//ensure that the node is getting marked as unschedulable when removed
+		labelNodeDone := h.labelNodeUnschedulable()
+		<-labelNodeDone
 		close(done)
 	}()
 	return done
@@ -68,6 +73,34 @@ func (h *HeartBeat) heartBeat(heartBeatInterval time.Duration, stopCh chan struc
 	// 1 minute with a 1.2 jitter + the time it takes for the heartbeat function to run (sliding == true).
 	// So the amount of time between heartbeats randomly varies between 1min and 2min12sec + the heartbeat function execution time.
 	wait.JitterUntil(h.do, heartBeatInterval, 1.2, true, stopCh)
+}
+
+func (h *HeartBeat) labelNodeUnschedulable() (done chan struct{}) {
+	done = make(chan struct{})
+	go func() {
+		now, err := json.Marshal(metav1.Now())
+		if err != nil {
+			log.DefaultLogger().Reason(err).Errorf("Can't determine date")
+			return
+		}
+		var data []byte
+		cpuManagerEnabled := false
+		if h.clusterConfig.CPUManagerEnabled() {
+			cpuManagerEnabled = h.isCPUManagerEnabled(h.cpuManagerPaths)
+		}
+		data = []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "%s", "%s": "%t"}, "annotations": {"%s": %s}}}`,
+			v1.NodeSchedulable, "false",
+			v1.CPUManager, cpuManagerEnabled,
+			v1.VirtHandlerHeartbeat, string(now),
+		))
+		_, err = h.clientset.Nodes().Patch(context.Background(), h.host, types.StrategicMergePatchType, data, metav1.PatchOptions{})
+		if err != nil {
+			log.DefaultLogger().Reason(err).Errorf("Can't patch node %s", h.host)
+			return
+		}
+		close(done)
+	}()
+	return done
 }
 
 // waitForDevicePlugins gives the device plugins additional time to successfully connect to the kubelet.
@@ -112,6 +145,12 @@ func (h *HeartBeat) do() {
 		log.DefaultLogger().Reason(err).Errorf("Can't patch node %s", h.host)
 		return
 	}
+
+	// A configuration of mediated devices types on this node depends on the existing node labels
+	// and a MediatedDevicesConfiguration in KubeVirt CR.
+	// When labels change we should initialize a refresh to create/remove mdev types and start/stop
+	// relevant device plugins. This operation should be async.
+	h.deviceManagerController.RefreshMediatedDevicesTypes()
 	log.DefaultLogger().V(4).Infof("Heartbeat sent")
 }
 
@@ -119,19 +158,19 @@ func (h *HeartBeat) isCPUManagerEnabled(cpuManagerPaths []string) bool {
 	var cpuManagerOptions map[string]interface{}
 	cpuManagerPath, err := detectCPUManagerFile(cpuManagerPaths)
 	if err != nil {
-		log.DefaultLogger().Reason(err).Errorf("failed to set a cpu manager label on host %s", h.host)
+		log.DefaultLogger().Reason(err).Errorf(failedSetCPUManagerLabelFmt, h.host)
 		return false
 	}
 	// #nosec No risk for path injection. cpuManagerPath is composed of static values from pkg/util
-	content, err := ioutil.ReadFile(cpuManagerPath)
+	content, err := os.ReadFile(cpuManagerPath)
 	if err != nil {
-		log.DefaultLogger().Reason(err).Errorf("failed to set a cpu manager label on host %s", h.host)
+		log.DefaultLogger().Reason(err).Errorf(failedSetCPUManagerLabelFmt, h.host)
 		return false
 	}
 
 	err = json.Unmarshal(content, &cpuManagerOptions)
 	if err != nil {
-		log.DefaultLogger().Reason(err).Errorf("failed to set a cpu manager label on host %s", h.host)
+		log.DefaultLogger().Reason(err).Errorf(failedSetCPUManagerLabelFmt, h.host)
 		return false
 	}
 

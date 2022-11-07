@@ -6,6 +6,8 @@ package isolation
 import (
 	gomock "github.com/golang/mock/gomock"
 	mountinfo "github.com/moby/sys/mountinfo"
+
+	safepath "kubevirt.io/kubevirt/pkg/safepath"
 )
 
 // Mock of IsolationResult interface
@@ -27,16 +29,6 @@ func NewMockIsolationResult(ctrl *gomock.Controller) *MockIsolationResult {
 
 func (_m *MockIsolationResult) EXPECT() *_MockIsolationResultRecorder {
 	return _m.recorder
-}
-
-func (_m *MockIsolationResult) Slice() string {
-	ret := _m.ctrl.Call(_m, "Slice")
-	ret0, _ := ret[0].(string)
-	return ret0
-}
-
-func (_mr *_MockIsolationResultRecorder) Slice() *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "Slice")
 }
 
 func (_m *MockIsolationResult) Pid() int {
@@ -69,10 +61,11 @@ func (_mr *_MockIsolationResultRecorder) PIDNamespace() *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "PIDNamespace")
 }
 
-func (_m *MockIsolationResult) MountRoot() string {
+func (_m *MockIsolationResult) MountRoot() (*safepath.Path, error) {
 	ret := _m.ctrl.Call(_m, "MountRoot")
-	ret0, _ := ret[0].(string)
-	return ret0
+	ret0, _ := ret[0].(*safepath.Path)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 func (_mr *_MockIsolationResultRecorder) MountRoot() *gomock.Call {
@@ -87,26 +80,6 @@ func (_m *MockIsolationResult) MountNamespace() string {
 
 func (_mr *_MockIsolationResultRecorder) MountNamespace() *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "MountNamespace")
-}
-
-func (_m *MockIsolationResult) NetNamespace() string {
-	ret := _m.ctrl.Call(_m, "NetNamespace")
-	ret0, _ := ret[0].(string)
-	return ret0
-}
-
-func (_mr *_MockIsolationResultRecorder) NetNamespace() *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "NetNamespace")
-}
-
-func (_m *MockIsolationResult) DoNetNS(_param0 func() error) error {
-	ret := _m.ctrl.Call(_m, "DoNetNS", _param0)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-func (_mr *_MockIsolationResultRecorder) DoNetNS(arg0 interface{}) *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "DoNetNS", arg0)
 }
 
 func (_m *MockIsolationResult) Mounts(_param0 mountinfo.FilterFunc) ([]*mountinfo.Info, error) {

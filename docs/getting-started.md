@@ -3,6 +3,9 @@
 A quick start guide to get KubeVirt up and running inside our container-based
 development cluster.
 
+**Note**: Docker is used as default container runtime. If you want to use
+podman see [PODMAN.md](https://github.com/kubevirt/kubevirtci/blob/main/PODMAN.md).
+
 ## I just want it built and run it on my cluster
 
 First, point the `Makefile` to the Docker registry of your choice:
@@ -42,6 +45,12 @@ login`. Your `$HOME/.docker/config.json` should look like:
   "credSstore" : ""
 }
 ```
+
+## Requirements
+
+### SELinux support
+
+SELinux-enabled nodes need to have [Container-selinux](https://github.com/containers/container-selinux) version 2.170.0 or newer installed.
 
 ## Building
 
@@ -122,7 +131,7 @@ have a completely fresh cluster to play with.
 #### Sync specific components
 
 **Note:** The following is meant for allowing faster iteration on small changes to components that support it.
-Not every component is that simply exchangable without a full re-deploy. Always test with the final SHA based method in the end.
+Not every component is that simply exchangeable without a full re-deploy. Always test with the final SHA based method in the end.
 
 In situations where you just want to work on a single component and rollout updates
 without re-deploying the whole environment, you can tell kubevirt to deploy using tags.

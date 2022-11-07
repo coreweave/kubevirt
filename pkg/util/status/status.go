@@ -1,9 +1,12 @@
 package status
 
 import (
-	"reflect"
+	"context"
 	"sync"
 
+	clonev1alpha1 "kubevirt.io/api/clone/v1alpha1"
+
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,6 +17,8 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 )
+
+const unknownObj = "Unknown object"
 
 // updater transparently switches for status updates between /status and the main entrypoint for resource,
 // allowing CRDs to enable or disable the status subresource support anytime.
@@ -47,7 +52,7 @@ func (u *updater) updateWithoutSubresource(obj runtime.Object) (err error) {
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(oldStatus, newStatus) {
+	if !equality.Semantic.DeepEqual(oldStatus, newStatus) {
 		u.setSubresource(true)
 		return u.updateStatusUnstructured(obj)
 	}
@@ -59,24 +64,18 @@ func (u *updater) updateWithoutSubresource(obj runtime.Object) (err error) {
 // call succeeds, it will switch the updater to permanently use the main entrypoint.
 func (u *updater) updateWithSubresource(obj runtime.Object) (updateStatusErr error) {
 	updateStatusErr = u.updateStatusUnstructured(obj)
-	if updateStatusErr != nil && !errors.IsNotFound(updateStatusErr) {
+	if !errors.IsNotFound(updateStatusErr) {
 		return updateStatusErr
 	}
-	if errors.IsNotFound(updateStatusErr) {
-		oldStatus, newStatus, err := u.updateUnstructured(obj)
-		if errors.IsNotFound(err) {
-			// object does not exist
-			return err
-		}
-		if err == nil && reflect.DeepEqual(oldStatus, newStatus) {
-			u.setSubresource(false)
-		} else if err == nil {
-			return updateStatusErr
-		}
+	oldStatus, newStatus, err := u.updateUnstructured(obj)
+	if err != nil {
 		return err
-	} else {
+	}
+	if !equality.Semantic.DeepEqual(oldStatus, newStatus) {
 		return updateStatusErr
 	}
+	u.setSubresource(false)
+	return nil
 }
 
 // patchWithoutSubresource will try to update the  status via PATCH sent to the main REST endpoint.
@@ -99,24 +98,18 @@ func (u *updater) patchWithoutSubresource(obj runtime.Object, patchType types.Pa
 // call succeeds, it will switch the updater to permanently use the main entrypoint.
 func (u *updater) patchWithSubresource(obj runtime.Object, patchType types.PatchType, data []byte, patchOptions *metav1.PatchOptions) (patchStatusErr error) {
 	patchStatusErr = u.patchStatusUnstructured(obj, patchType, data, patchOptions)
-	if patchStatusErr != nil && !errors.IsNotFound(patchStatusErr) {
+	if !errors.IsNotFound(patchStatusErr) {
 		return patchStatusErr
 	}
-	if errors.IsNotFound(patchStatusErr) {
-		oldResourceVersion, newResourceVersions, err := u.patchUnstructured(obj, patchType, data, patchOptions)
-		if errors.IsNotFound(err) {
-			// object does not exist
-			return err
-		}
-		if err == nil && oldResourceVersion != newResourceVersions {
-			u.setSubresource(false)
-		} else if err == nil {
-			return patchStatusErr
-		}
+	oldResourceVersion, newResourceVersions, err := u.patchUnstructured(obj, patchType, data, patchOptions)
+	if err != nil {
 		return err
-	} else {
+	}
+	if oldResourceVersion == newResourceVersions {
 		return patchStatusErr
 	}
+	u.setSubresource(false)
+	return nil
 }
 
 func (u *updater) patchUnstructured(obj runtime.Object, patchType types.PatchType, data []byte, patchOptions *metav1.PatchOptions) (oldResourceVersion, newResourceVerions string, err error) {
@@ -140,7 +133,7 @@ func (u *updater) patchUnstructured(obj runtime.Object, patchType types.PatchTyp
 		}
 		return oldObj.ResourceVersion, newObj.ResourceVersion, nil
 	default:
-		panic("Unknown object")
+		panic(unknownObj)
 	}
 }
 
@@ -157,7 +150,7 @@ func (u *updater) patchStatusUnstructured(obj runtime.Object, patchType types.Pa
 		_, err = u.cli.KubeVirt(a.GetNamespace()).PatchStatus(a.GetName(), patchType, data, patchOptions)
 		return err
 	default:
-		panic("Unknown object")
+		panic(unknownObj)
 	}
 }
 
@@ -196,7 +189,7 @@ func (u *updater) updateUnstructured(obj runtime.Object) (oldStatus interface{},
 		}
 		return oldObj.Status, newObj.Status, nil
 	default:
-		panic("Unknown object")
+		panic(unknownObj)
 	}
 }
 
@@ -209,22 +202,23 @@ func (u *updater) updateStatusUnstructured(obj runtime.Object) (err error) {
 	case *v1.VirtualMachine:
 		oldObj := obj.(*v1.VirtualMachine)
 		_, err = u.cli.VirtualMachine(a.GetNamespace()).UpdateStatus(oldObj)
-		return err
 	case *v1.VirtualMachineInstanceReplicaSet:
 		oldObj := obj.(*v1.VirtualMachineInstanceReplicaSet)
 		_, err = u.cli.ReplicaSet(a.GetNamespace()).UpdateStatus(oldObj)
-		return err
 	case *v1.VirtualMachineInstanceMigration:
 		oldObj := obj.(*v1.VirtualMachineInstanceMigration)
 		_, err = u.cli.VirtualMachineInstanceMigration(a.GetNamespace()).UpdateStatus(oldObj)
-		return err
 	case *v1.KubeVirt:
 		oldObj := obj.(*v1.KubeVirt)
 		_, err = u.cli.KubeVirt(a.GetNamespace()).UpdateStatus(oldObj)
-		return err
+	case *clonev1alpha1.VirtualMachineClone:
+		oldObj := obj.(*clonev1alpha1.VirtualMachineClone)
+		_, err = u.cli.VirtualMachineClone(oldObj.Namespace).UpdateStatus(context.Background(), oldObj, metav1.UpdateOptions{})
 	default:
-		panic("Unknown object")
+		panic(unknownObj)
 	}
+
+	return err
 }
 
 func (u *updater) setSubresource(exists bool) {
@@ -311,6 +305,24 @@ func (v *MigrationStatusUpdater) UpdateStatus(migration *v1.VirtualMachineInstan
 
 func NewMigrationStatusUpdater(cli kubecli.KubevirtClient) *MigrationStatusUpdater {
 	return &MigrationStatusUpdater{
+		updater: updater{
+			lock:        sync.Mutex{},
+			subresource: true,
+			cli:         cli,
+		},
+	}
+}
+
+type CloneStatusUpdater struct {
+	updater
+}
+
+func (v *CloneStatusUpdater) UpdateStatus(vmClone *clonev1alpha1.VirtualMachineClone) error {
+	return v.update(vmClone)
+}
+
+func NewCloneStatusUpdater(cli kubecli.KubevirtClient) *CloneStatusUpdater {
+	return &CloneStatusUpdater{
 		updater: updater{
 			lock:        sync.Mutex{},
 			subresource: true,

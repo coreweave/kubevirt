@@ -3,7 +3,7 @@ package webhooks
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -13,6 +13,8 @@ import (
 
 	v12 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
+	"kubevirt.io/kubevirt/pkg/virt-api/definitions"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 )
 
@@ -20,7 +22,7 @@ import (
 func GetAdmissionReview(r *http.Request) (*admissionv1.AdmissionReview, error) {
 	var body []byte
 	if r.Body != nil {
-		if data, err := ioutil.ReadAll(r.Body); err == nil {
+		if data, err := io.ReadAll(r.Body); err == nil {
 			body = data
 		}
 	}
@@ -90,7 +92,7 @@ func ValidateSchema(gvk schema.GroupVersionKind, data []byte) *admissionv1.Admis
 	if err != nil {
 		return ToAdmissionResponseError(err)
 	}
-	errs := webhooks.Validator.Validate(gvk, in)
+	errs := definitions.Validator.Validate(gvk, in)
 	if len(errs) > 0 {
 		return ValidationErrorsToAdmissionResponse(errs)
 	}
@@ -121,7 +123,7 @@ func ValidateStatus(data []byte) *admissionv1.AdmissionResponse {
 	if gvk.Kind == "" {
 		return ValidationErrorsToAdmissionResponse([]error{fmt.Errorf("could not determine object kind")})
 	}
-	errs := webhooks.Validator.ValidateStatus(gvk, in)
+	errs := definitions.Validator.ValidateStatus(gvk, in)
 	if len(errs) > 0 {
 		return ValidationErrorsToAdmissionResponse(errs)
 	}

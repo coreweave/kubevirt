@@ -40,7 +40,7 @@ goimports(
         "./.git/*",
         "./_ci-configs/*",
     ],
-    local = ["kubevirt.io"],
+    local = ["kubevirt.io/kubevirt"],
     prefix = "kubevirt.io/kubevirt",
     write = True,
 )
@@ -54,34 +54,38 @@ nogo(
     # that are always correct).
     # You can see the what `go vet` does by running `go doc cmd/vet`.
     deps = [
-        "//vendor/github.com/gordonklaus/ineffassign/pkg/ineffassign:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/asmdecl:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/assign:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/atomic:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/bools:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/buildtag:go_tool_library",
+        "//vendor/github.com/nunnatsa/ginkgolinter:go_default_library",
+        "//tools/analyzers/banncheck:go_default_library",
+        "//vendor/github.com/gordonklaus/ineffassign/pkg/ineffassign:go_default_library",
+        "//vendor/github.com/kisielk/errcheck/errcheck:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/asmdecl:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/assign:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/atomic:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/bools:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/buildtag:go_default_library",
         # Fails on a vendored dependency, disabling for now.
-        # "@org_golang_x_tools//go/analysis/passes/cgocall:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/composite:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/copylock:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/httpresponse:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/loopclosure:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/lostcancel:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/nilfunc:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/printf:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/shift:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/stdmethods:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/structtag:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/tests:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/unreachable:go_tool_library",
+        # "@org_golang_x_tools//go/analysis/passes/cgocall:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/composite:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/copylock:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/httpresponse:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/loopclosure:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/lostcancel:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/nilfunc:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/printf:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/shift:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/stdmethods:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/structtag:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/tests:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/unreachable:go_default_library",
         # FIXME: Nogo fails analysis although configured to be disabled on nogo_config.json.
-        # "@org_golang_x_tools//go/analysis/passes/unsafeptr:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/unusedresult:go_tool_library",
+        # "@org_golang_x_tools//go/analysis/passes/unsafeptr:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/unusedresult:go_default_library",
     ],
 )
 
 # gazelle:prefix kubevirt.io/kubevirt
 # gazelle:build_tags selinux
+# gazelle:resolve go golang.org/x/tools/go/analysis @org_golang_x_tools//go/analysis:go_default_library
 gazelle(
     name = "gazelle",
     build_tags = ["selinux"],
@@ -185,18 +189,19 @@ container_bundle(
     images = {
         # cmd images
         "$(container_prefix)/$(image_prefix)example-hook-sidecar:$(container_tag)": "//cmd/example-hook-sidecar:example-hook-sidecar-image",
+        "$(container_prefix)/$(image_prefix)example-disk-mutation-hook-sidecar:$(container_tag)": "//cmd/example-disk-mutation-hook-sidecar:example-disk-mutation-hook-sidecar-image",
         "$(container_prefix)/$(image_prefix)example-cloudinit-hook-sidecar:$(container_tag)": "//cmd/example-cloudinit-hook-sidecar:example-cloudinit-hook-sidecar-image",
         "$(container_prefix)/$(image_prefix)subresource-access-test:$(container_tag)": "//cmd/subresource-access-test:subresource-access-test-image",
         # container-disk images
         "$(container_prefix)/$(image_prefix)alpine-container-disk-demo:$(container_tag)": "//containerimages:alpine-container-disk-image",
         "$(container_prefix)/$(image_prefix)cirros-container-disk-demo:$(container_tag)": "//containerimages:cirros-container-disk-image",
         "$(container_prefix)/$(image_prefix)cirros-custom-container-disk-demo:$(container_tag)": "//containerimages:cirros-custom-container-disk-image",
-        "$(container_prefix)/$(image_prefix)microlivecd-container-disk-demo:$(container_tag)": "//containerimages:microlivecd-container-disk-image",
         "$(container_prefix)/$(image_prefix)virtio-container-disk:$(container_tag)": "//containerimages:virtio-container-disk-image",
         # Kernel boot container
         "$(container_prefix)/$(image_prefix)alpine-ext-kernel-boot-demo:$(container_tag)": "//containerimages:alpine-ext-kernel-boot-demo-container",
         # Customized container-disk images
         "$(container_prefix)/$(image_prefix)fedora-with-test-tooling-container-disk:$(container_tag)": "//containerimages:fedora-with-test-tooling",
+        "$(container_prefix)/$(image_prefix)alpine-with-test-tooling-container-disk:$(container_tag)": "//containerimages:alpine-with-test-tooling",
         "$(container_prefix)/$(image_prefix)fedora-realtime-container-disk:$(container_tag)": "//containerimages:fedora-realtime",
         # testing images
         "$(container_prefix)/$(image_prefix)disks-images-provider:$(container_tag)": "//images/disks-images-provider:disks-images-provider-image",
@@ -291,6 +296,24 @@ container_push(
     tag = "$(container_tag)",
 )
 
+container_push(
+    name = "push-virt-exportserver",
+    format = "Docker",
+    image = "//cmd/virt-exportserver:virt-exportserver-image",
+    registry = "$(container_prefix)",
+    repository = "$(image_prefix)virt-exportserver",
+    tag = "$(container_tag)",
+)
+
+container_push(
+    name = "push-virt-exportproxy",
+    format = "Docker",
+    image = "//cmd/virt-exportproxy:virt-exportproxy-image",
+    registry = "$(container_prefix)",
+    repository = "$(image_prefix)virt-exportproxy",
+    tag = "$(container_tag)",
+)
+
 genrule(
     name = "build-virtctl",
     srcs = [
@@ -334,7 +357,7 @@ genrule(
 genrule(
     name = "build-ginkgo",
     srcs = [
-        "//vendor/github.com/onsi/ginkgo/ginkgo",
+        "//vendor/github.com/onsi/ginkgo/v2/ginkgo",
     ],
     outs = ["ginkgo-copier"],
     cmd = "echo '#!/bin/sh\n\ncp -f $(SRCS) $$1' > \"$@\"",

@@ -32,21 +32,21 @@ function patch_remove_finalizers() {
 function delete_kubevirt_cr() {
     # Delete KubeVirt CR, timeout after 10 seconds
     set +e
-    _kubectl -n ${namespace} delete kv kubevirt --timeout=10s --ignore-not-found
-    _kubectl -n cdi delete service cdi-uploadproxy-nodeport
+    _kubectl -n ${namespace} delete kv kubevirt --timeout=10s --ignore-not-found || true
+    _kubectl -n cdi delete service cdi-uploadproxy-nodeport || true
     patch_remove_finalizers -n ${namespace} kv kubevirt
     set -e
 }
 
 function remove_finalizers() {
-    kubectl get vmsnapshots --all-namespaces -o=custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace,FINALIZERS:.metadata.finalizers --no-headers | grep vmsnapshot-protection | while read p; do
+    _kubectl get vmsnapshots --all-namespaces -o=custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace,FINALIZERS:.metadata.finalizers --no-headers | grep vmsnapshot-protection | while read p; do
         local arr=($p)
         local name="${arr[0]}"
         local ns="${arr[1]}"
         patch_remove_finalizers -n $ns vmsnapshots $name
     done
 
-    kubectl get vmsnapshotcontents --all-namespaces -o=custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace,FINALIZERS:.metadata.finalizers --no-headers | grep vmsnapshotcontent-protection | while read p; do
+    _kubectl get vmsnapshotcontents --all-namespaces -o=custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace,FINALIZERS:.metadata.finalizers --no-headers | grep vmsnapshotcontent-protection | while read p; do
         local arr=($p)
         local name="${arr[0]}"
         local ns="${arr[1]}"
@@ -85,6 +85,12 @@ function delete_resources() {
 
     # Not namespaced resources
     for label in ${labels[@]}; do
+        # Remove the finalizers added by virt-operator from CRDs
+        _kubectl get customresourcedefinitions --no-headers -o=custom-columns=NAME:.metadata.name,FINALIZERS:.metadata.finalizers -l ${label} | grep -e "kubevirt.io/virtOperatorFinalizer" | while read p; do
+            local arr=($p)
+            local name="${arr[0]}"
+            patch_remove_finalizers customresourcedefinitions ${name}
+        done
         _kubectl delete apiservices,clusterroles,clusterrolebinding,customresourcedefinitions,pv,validatingwebhookconfiguration -l ${label}
     done
 }

@@ -22,10 +22,60 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
-
 	v1 "kubevirt.io/api/core/v1"
+	poolv1 "kubevirt.io/api/pool/v1alpha1"
 )
+
+type VirtualMachinePoolConditionManager struct {
+}
+
+func NewVirtualMachinePoolConditionManager() *VirtualMachinePoolConditionManager {
+	return &VirtualMachinePoolConditionManager{}
+}
+
+func (d *VirtualMachinePoolConditionManager) GetCondition(pool *poolv1.VirtualMachinePool, cond poolv1.VirtualMachinePoolConditionType) *poolv1.VirtualMachinePoolCondition {
+	if pool == nil {
+		return nil
+	}
+	for _, c := range pool.Status.Conditions {
+		if c.Type == cond {
+			return &c
+		}
+	}
+	return nil
+}
+
+func (d *VirtualMachinePoolConditionManager) HasCondition(pool *poolv1.VirtualMachinePool, cond poolv1.VirtualMachinePoolConditionType) bool {
+	return d.GetCondition(pool, cond) != nil
+}
+
+func (d *VirtualMachinePoolConditionManager) RemoveCondition(pool *poolv1.VirtualMachinePool, cond poolv1.VirtualMachinePoolConditionType) {
+	var conds []poolv1.VirtualMachinePoolCondition
+	for _, c := range pool.Status.Conditions {
+		if c.Type == cond {
+			continue
+		}
+		conds = append(conds, c)
+	}
+	pool.Status.Conditions = conds
+}
+
+// UpdateCondition updates the given VirtualMachinePoolCondition, unless it is already set with the same status and reason.
+func (d *VirtualMachinePoolConditionManager) UpdateCondition(pool *poolv1.VirtualMachinePool, cond *poolv1.VirtualMachinePoolCondition) {
+	for i, c := range pool.Status.Conditions {
+		if c.Type != cond.Type {
+			continue
+		}
+
+		if c.Status != cond.Status || c.Reason != cond.Reason {
+			pool.Status.Conditions[i] = *cond
+		}
+
+		return
+	}
+
+	pool.Status.Conditions = append(pool.Status.Conditions, *cond)
+}
 
 type VirtualMachineConditionManager struct {
 }
@@ -236,39 +286,6 @@ func (d *VirtualMachineInstanceMigrationConditionManager) RemoveCondition(migrat
 		conds = append(conds, c)
 	}
 	migration.Status.Conditions = conds
-}
-
-type DataVolumeConditionManager struct {
-}
-
-func NewDataVolumeConditionManager() *DataVolumeConditionManager {
-	return &DataVolumeConditionManager{}
-}
-
-func (d *DataVolumeConditionManager) GetCondition(dv *cdiv1.DataVolume, cond cdiv1.DataVolumeConditionType) *cdiv1.DataVolumeCondition {
-	if dv == nil {
-		return nil
-	}
-	for _, c := range dv.Status.Conditions {
-		if c.Type == cond {
-			return &c
-		}
-	}
-	return nil
-}
-
-func (d *DataVolumeConditionManager) HasCondition(dv *cdiv1.DataVolume, cond cdiv1.DataVolumeConditionType) bool {
-	return d.GetCondition(dv, cond) != nil
-}
-
-func (d *DataVolumeConditionManager) HasConditionWithStatus(dv *cdiv1.DataVolume, cond cdiv1.DataVolumeConditionType, status k8sv1.ConditionStatus) bool {
-	c := d.GetCondition(dv, cond)
-	return c != nil && c.Status == status
-}
-
-func (d *DataVolumeConditionManager) HasConditionWithStatusAndReason(dv *cdiv1.DataVolume, cond cdiv1.DataVolumeConditionType, status k8sv1.ConditionStatus, reason string) bool {
-	c := d.GetCondition(dv, cond)
-	return c != nil && c.Status == status && c.Reason == reason
 }
 
 type PodConditionManager struct {

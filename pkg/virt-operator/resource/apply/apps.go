@@ -5,15 +5,42 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"k8s.io/utils/pointer"
+
+	"kubevirt.io/client-go/kubecli"
+
 	"github.com/openshift/library-go/pkg/operator/resource/resourcemerge"
 	appsv1 "k8s.io/api/apps/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
+	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
+	"kubevirt.io/kubevirt/pkg/virt-operator/util"
+)
+
+const (
+	failedUpdateDaemonSetReason = "FailedUpdate"
+)
+
+var (
+	daemonSetDefaultMaxUnavailable = intstr.FromInt(1)
+	daemonSetFastMaxUnavailable    = intstr.FromString("10%")
+)
+
+type CanaryUpgradeStatus string
+
+const (
+	CanaryUpgradeStatusStarted                 CanaryUpgradeStatus = "started"
+	CanaryUpgradeStatusUpgradingDaemonSet      CanaryUpgradeStatus = "upgrading daemonset"
+	CanaryUpgradeStatusWaitingDaemonSetRollout CanaryUpgradeStatus = "waiting for daemonset rollout"
+	CanaryUpgradeStatusSuccessful              CanaryUpgradeStatus = "successful"
+	CanaryUpgradeStatusFailed                  CanaryUpgradeStatus = "failed"
 )
 
 func (r *Reconciler) syncDeployment(origDeployment *appsv1.Deployment) (*appsv1.Deployment, error) {
@@ -32,6 +59,15 @@ func (r *Reconciler) syncDeployment(origDeployment *appsv1.Deployment) (*appsv1.
 		replicas := int32(*kv.Spec.Infra.Replicas)
 		if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != replicas {
 			deployment.Spec.Replicas = &replicas
+			r.recorder.Eventf(deployment, corev1.EventTypeWarning, "AdvancedFeatureUse", "applying custom number of infra replica. this is an advanced feature that prevents "+
+				"auto-scaling for core kubevirt components. Please use with caution!")
+		}
+	} else if deployment.Name == components.VirtAPIName {
+		replicas, err := getDesiredApiReplicas(r.clientset)
+		if err != nil {
+			log.Log.Object(deployment).Warningf(err.Error())
+		} else {
+			deployment.Spec.Replicas = pointer.Int32(replicas)
 		}
 	}
 
@@ -58,7 +94,7 @@ func (r *Reconciler) syncDeployment(origDeployment *appsv1.Deployment) (*appsv1.
 
 	// there was no change to metadata, the generation matched
 	if !*modified &&
-		*deployment.Spec.Replicas == *origDeployment.Spec.Replicas &&
+		*existingCopy.Spec.Replicas == *deployment.Spec.Replicas &&
 		existingCopy.GetGeneration() == expectedGeneration {
 		log.Log.V(4).Infof("deployment %v is up-to-date", deployment.GetName())
 		return deployment, nil
@@ -87,7 +123,152 @@ func (r *Reconciler) syncDeployment(origDeployment *appsv1.Deployment) (*appsv1.
 	return deployment, nil
 }
 
-func (r *Reconciler) syncDaemonSet(daemonSet *appsv1.DaemonSet) error {
+func setMaxUnavailable(daemonSet *appsv1.DaemonSet, maxUnavailable intstr.IntOrString) {
+	daemonSet.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateDaemonSet{
+		MaxUnavailable: &maxUnavailable,
+	}
+}
+
+func generateDaemonSetPatch(oldDs, newDs *appsv1.DaemonSet) ([]byte, error) {
+	newSpec, err := json.Marshal(newDs.Spec)
+	if err != nil {
+		return nil, err
+	}
+
+	ops, err := getPatchWithObjectMetaAndSpec([]string{
+		fmt.Sprintf(testGenerationJSONPatchTemplate, oldDs.ObjectMeta.Generation),
+	}, &newDs.ObjectMeta, newSpec)
+	if err != nil {
+		return nil, err
+	}
+	return generatePatchBytes(ops), nil
+}
+
+func (r *Reconciler) patchDaemonSet(oldDs, newDs *appsv1.DaemonSet) (*appsv1.DaemonSet, error) {
+	patch, err := generateDaemonSetPatch(oldDs, newDs)
+	if err != nil {
+		return nil, err
+	}
+
+	newDs, err = r.clientset.AppsV1().DaemonSets(r.kv.Namespace).Patch(
+		context.Background(),
+		newDs.Name,
+		types.JSONPatchType,
+		patch,
+		metav1.PatchOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("unable to update daemonset %+v: %v", oldDs, err)
+	}
+	return newDs, nil
+}
+
+func (r *Reconciler) getCanaryPods(daemonSet *appsv1.DaemonSet) []*corev1.Pod {
+	canaryPods := []*corev1.Pod{}
+
+	for _, obj := range r.stores.InfrastructurePodCache.List() {
+		pod := obj.(*corev1.Pod)
+		owner := metav1.GetControllerOf(pod)
+
+		if owner != nil && owner.Name == daemonSet.Name && util.PodIsUpToDate(pod, r.kv) {
+			canaryPods = append(canaryPods, pod)
+		}
+	}
+	return canaryPods
+}
+
+func (r *Reconciler) howManyUpdatedAndReadyPods(daemonSet *appsv1.DaemonSet) int32 {
+	var updatedReadyPods int32
+
+	for _, obj := range r.stores.InfrastructurePodCache.List() {
+		pod := obj.(*corev1.Pod)
+		owner := metav1.GetControllerOf(pod)
+
+		if owner != nil && owner.Name == daemonSet.Name && util.PodIsUpToDate(pod, r.kv) && util.PodIsReady(pod) {
+			updatedReadyPods++
+		}
+	}
+	return updatedReadyPods
+}
+
+func daemonHasDefaultRolloutStrategy(daemonSet *appsv1.DaemonSet) bool {
+	return getMaxUnavailable(daemonSet) == daemonSetDefaultMaxUnavailable.IntValue()
+}
+
+func (r *Reconciler) processCanaryUpgrade(cachedDaemonSet, newDS *appsv1.DaemonSet, forceUpdate bool) (bool, error, CanaryUpgradeStatus) {
+	var updatedAndReadyPods int32
+	var status CanaryUpgradeStatus
+	done := false
+
+	isDaemonSetUpdated := util.DaemonSetIsUpToDate(r.kv, cachedDaemonSet) && !forceUpdate
+	desiredReadyPods := cachedDaemonSet.Status.DesiredNumberScheduled
+	if isDaemonSetUpdated {
+		updatedAndReadyPods = r.howManyUpdatedAndReadyPods(cachedDaemonSet)
+	}
+
+	switch {
+	case updatedAndReadyPods == 0:
+		if !isDaemonSetUpdated {
+			// start canary upgrade
+			setMaxUnavailable(newDS, daemonSetDefaultMaxUnavailable)
+			_, err := r.patchDaemonSet(cachedDaemonSet, newDS)
+			if err != nil {
+				return false, fmt.Errorf("unable to start canary upgrade for daemonset %+v: %v", newDS, err), CanaryUpgradeStatusFailed
+			}
+		} else {
+			// check for a crashed canary pod
+			canaryPods := r.getCanaryPods(cachedDaemonSet)
+			for _, canary := range canaryPods {
+				if canary != nil && util.PodIsCrashLooping(canary) {
+					r.recorder.Eventf(cachedDaemonSet, corev1.EventTypeWarning, failedUpdateDaemonSetReason, "daemonSet %v rollout failed", cachedDaemonSet.Name)
+					return false, fmt.Errorf("daemonSet %s rollout failed", cachedDaemonSet.Name), CanaryUpgradeStatusFailed
+				}
+			}
+		}
+		done, status = false, CanaryUpgradeStatusStarted
+	case updatedAndReadyPods > 0 && updatedAndReadyPods < desiredReadyPods:
+		if daemonHasDefaultRolloutStrategy(cachedDaemonSet) {
+			// canary was ok, start real rollout
+			setMaxUnavailable(newDS, daemonSetFastMaxUnavailable)
+			// start rollout again
+			_, err := r.patchDaemonSet(cachedDaemonSet, newDS)
+			if err != nil {
+				return false, fmt.Errorf("unable to update daemonset %+v: %v", newDS, err), CanaryUpgradeStatusFailed
+			}
+			log.Log.V(2).Infof("daemonSet %v updated", newDS.GetName())
+			status = CanaryUpgradeStatusUpgradingDaemonSet
+		} else {
+			log.Log.V(4).Infof("waiting for all pods of daemonSet %v to be ready", newDS.GetName())
+			status = CanaryUpgradeStatusWaitingDaemonSetRollout
+		}
+		done = false
+	case updatedAndReadyPods > 0 && updatedAndReadyPods == desiredReadyPods:
+		// rollout has completed and all virt-handlers are ready
+		// revert maxUnavailable to default value
+		setMaxUnavailable(newDS, daemonSetDefaultMaxUnavailable)
+		newDS, err := r.patchDaemonSet(cachedDaemonSet, newDS)
+		if err != nil {
+			return false, err, CanaryUpgradeStatusFailed
+		}
+		SetGeneration(&r.kv.Status.Generations, newDS)
+		log.Log.V(2).Infof("daemonSet %v is ready", newDS.GetName())
+		done, status = true, CanaryUpgradeStatusSuccessful
+	}
+	return done, nil, status
+}
+
+func getMaxUnavailable(daemonSet *appsv1.DaemonSet) int {
+	update := daemonSet.Spec.UpdateStrategy.RollingUpdate
+
+	if update == nil {
+		return 0
+	}
+	if update.MaxUnavailable != nil {
+		return update.MaxUnavailable.IntValue()
+	}
+	return daemonSetDefaultMaxUnavailable.IntValue()
+}
+
+func (r *Reconciler) syncDaemonSet(daemonSet *appsv1.DaemonSet) (bool, error) {
 	kv := r.kv
 
 	daemonSet = daemonSet.DeepCopy()
@@ -111,12 +292,11 @@ func (r *Reconciler) syncDaemonSet(daemonSet *appsv1.DaemonSet) error {
 		daemonSet, err := apps.DaemonSets(kv.Namespace).Create(context.Background(), daemonSet, metav1.CreateOptions{})
 		if err != nil {
 			r.expectations.DaemonSet.LowerExpectations(r.kvKey, 1, 0)
-			return fmt.Errorf("unable to create daemonset %+v: %v", daemonSet, err)
+			return false, fmt.Errorf("unable to create daemonset %+v: %v", daemonSet, err)
 		}
 
 		SetGeneration(&kv.Status.Generations, daemonSet)
-
-		return nil
+		return true, nil
 	}
 
 	cachedDaemonSet = obj.(*appsv1.DaemonSet)
@@ -126,32 +306,21 @@ func (r *Reconciler) syncDaemonSet(daemonSet *appsv1.DaemonSet) error {
 
 	resourcemerge.EnsureObjectMeta(modified, &existingCopy.ObjectMeta, daemonSet.ObjectMeta)
 	// there was no change to metadata, the generation was right
-	if !*modified && existingCopy.ObjectMeta.Generation == expectedGeneration {
+	if !*modified && existingCopy.GetGeneration() == expectedGeneration {
 		log.Log.V(4).Infof("daemonset %v is up-to-date", daemonSet.GetName())
-		return nil
+		return true, nil
 	}
 
-	newSpec, err := json.Marshal(daemonSet.Spec)
-	if err != nil {
-		return err
-	}
-
-	ops, err := getPatchWithObjectMetaAndSpec([]string{
-		fmt.Sprintf(testGenerationJSONPatchTemplate, cachedDaemonSet.ObjectMeta.Generation),
-	}, &daemonSet.ObjectMeta, newSpec)
-	if err != nil {
-		return err
-	}
-
-	daemonSet, err = apps.DaemonSets(kv.Namespace).Patch(context.Background(), daemonSet.Name, types.JSONPatchType, generatePatchBytes(ops), metav1.PatchOptions{})
-	if err != nil {
-		return fmt.Errorf("unable to update daemonset %+v: %v", daemonSet, err)
-	}
-
-	SetGeneration(&kv.Status.Generations, daemonSet)
-	log.Log.V(2).Infof("daemonSet %v updated", daemonSet.GetName())
-
-	return nil
+	// canary pod upgrade
+	// first update virt-handler with maxUnavailable=1
+	// patch daemonSet with new version
+	// wait for a new virt-handler to be ready
+	// set maxUnavailable=10%
+	// start the rollout of the new virt-handler again
+	// wait for all nodes to complete the rollout
+	// set maxUnavailable back to 1
+	done, err, _ := r.processCanaryUpgrade(cachedDaemonSet, daemonSet, *modified)
+	return done, err
 }
 
 func setMaxDevices(kv *v1.KubeVirt, vh *appsv1.DaemonSet) {
@@ -160,7 +329,7 @@ func setMaxDevices(kv *v1.KubeVirt, vh *appsv1.DaemonSet) {
 	}
 
 	vh.Spec.Template.Spec.Containers[0].Command = append(vh.Spec.Template.Spec.Containers[0].Command,
-		"--maxDevices",
+		"--max-devices",
 		fmt.Sprintf("%d", *kv.Spec.Configuration.VirtualMachineInstancesPerNode))
 }
 
@@ -171,9 +340,9 @@ func (r *Reconciler) syncPodDisruptionBudgetForDeployment(deployment *appsv1.Dep
 	imageTag, imageRegistry, id := getTargetVersionRegistryID(kv)
 	injectOperatorMetadata(kv, &podDisruptionBudget.ObjectMeta, imageTag, imageRegistry, id, true)
 
-	pdbClient := r.clientset.PolicyV1beta1().PodDisruptionBudgets(deployment.Namespace)
+	pdbClient := r.clientset.PolicyV1().PodDisruptionBudgets(deployment.Namespace)
 
-	var cachedPodDisruptionBudget *policyv1beta1.PodDisruptionBudget
+	var cachedPodDisruptionBudget *policyv1.PodDisruptionBudget
 	obj, exists, _ := r.stores.PodDisruptionBudgetCache.Get(podDisruptionBudget)
 
 	if podDisruptionBudget.Spec.MinAvailable.IntValue() == 0 {
@@ -197,7 +366,7 @@ func (r *Reconciler) syncPodDisruptionBudgetForDeployment(deployment *appsv1.Dep
 		return nil
 	}
 
-	cachedPodDisruptionBudget = obj.(*policyv1beta1.PodDisruptionBudget)
+	cachedPodDisruptionBudget = obj.(*policyv1.PodDisruptionBudget)
 	modified := resourcemerge.BoolPtr(false)
 	existingCopy := cachedPodDisruptionBudget.DeepCopy()
 	expectedGeneration := GetExpectedGeneration(podDisruptionBudget, kv.Status.Generations)
@@ -231,4 +400,30 @@ func (r *Reconciler) syncPodDisruptionBudgetForDeployment(deployment *appsv1.Dep
 	log.Log.V(2).Infof("poddisruptionbudget %v patched", podDisruptionBudget.GetName())
 
 	return nil
+}
+
+func getDesiredApiReplicas(clientset kubecli.KubevirtClient) (replicas int32, err error) {
+	nodeList, err := clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("failed to get number of nodes to determine virt-api replicas: %v", err)
+	}
+
+	nodesCount := len(nodeList.Items)
+	// This is a simple heuristic to achieve basic scalability so we could be running on large clusters.
+	// From recent experiments we know that for a 100 nodes cluster, 9 virt-api replicas are enough.
+	// This heuristic is not accurate. It could, and should, be replaced by something more sophisticated and refined
+	// in the future.
+
+	if nodesCount == 1 {
+		return 1, nil
+	}
+
+	const minReplicas = 2
+
+	replicas = int32(nodesCount) / 10
+	if replicas < minReplicas {
+		replicas = minReplicas
+	}
+
+	return replicas, nil
 }

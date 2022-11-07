@@ -3,7 +3,7 @@ package guestfs_test
 import (
 	"fmt"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -16,8 +16,10 @@ import (
 	"k8s.io/client-go/testing"
 
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/virtctl/guestfs"
-	"kubevirt.io/kubevirt/tests"
+
+	virtctlcmd "kubevirt.io/kubevirt/tests/clientcmd"
 )
 
 const (
@@ -32,6 +34,17 @@ func fakeAttacherCreator(client *guestfs.K8sClient, p *corev1.Pod, command strin
 
 func fakeSetImage(virtClient kubecli.KubevirtClient) error {
 	return nil
+}
+
+func fakeGetImageInfo(virtClient kubecli.KubevirtClient) (*kubecli.GuestfsInfo, error) {
+	info := &kubecli.GuestfsInfo{
+		Registry:    "someregistry.io/kubevirt",
+		Tag:         "sha256:07c601d33793ee987g5417d755665572dc9a9680cea01dfb9bdbcc3ecf866720",
+		Digest:      "89af657d3c226ac3083a0986e19efe70c9ccd7e7278137e9df24b9b430182aa7",
+		ImagePrefix: "some-prefix-",
+	}
+
+	return info, nil
 }
 
 var _ = Describe("Guestfs shell", func() {
@@ -102,31 +115,68 @@ var _ = Describe("Guestfs shell", func() {
 		kubeClient = fake.NewSimpleClientset()
 		return &guestfs.K8sClient{Client: kubeClient, VirtClient: kubevirtClient}, nil
 	}
-	BeforeEach(func() {
-		guestfs.SetImageSetFunc(fakeSetImage)
-		guestfs.SetAttacher(fakeAttacherCreator)
-	})
+
 	Context("attach to PVC", func() {
+		BeforeEach(func() {
+			guestfs.SetImageSetFunc(fakeSetImage)
+			guestfs.SetAttacher(fakeAttacherCreator)
+		})
+
+		AfterEach(func() {
+			guestfs.SetDefaultImageSet()
+			guestfs.SetDefaulAttacher()
+		})
 
 		It("Succesfully attach to PVC", func() {
 			guestfs.SetClient(fakeCreateClientPVC)
-			cmd := tests.NewRepeatableVirtctlCommand(commandName, pvcName)
-			Expect(cmd()).To(BeNil())
+			cmd := virtctlcmd.NewRepeatableVirtctlCommand(commandName, pvcName)
+			Expect(cmd()).To(Succeed())
 		})
+
 		It("PVC in use", func() {
 			guestfs.SetClient(fakeCreateClientPVCinUse)
-			cmd := tests.NewRepeatableVirtctlCommand(commandName, pvcName)
+			cmd := virtctlcmd.NewRepeatableVirtctlCommand(commandName, pvcName)
 			err := cmd()
-			Expect(err).NotTo(BeNil())
+			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).Should(Equal(fmt.Sprintf("PVC %s is used by another pod", pvcName)))
 		})
+
 		It("PVC doesn't exist", func() {
 			guestfs.SetClient(fakeCreateClient)
-			cmd := tests.NewRepeatableVirtctlCommand(commandName, pvcName)
+			cmd := virtctlcmd.NewRepeatableVirtctlCommand(commandName, pvcName)
 			err := cmd()
-			Expect(err).NotTo(BeNil())
+			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).Should(Equal(fmt.Sprintf("The PVC %s doesn't exist", pvcName)))
+		})
+
+		It("UID cannot be used with root", func() {
+			guestfs.SetClient(fakeCreateClientPVC)
+			cmd := virtctlcmd.NewRepeatableVirtctlCommand(commandName, pvcName, "--root=true", "--uid=1001")
+			err := cmd()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).Should(Equal(fmt.Sprintf("cannot set uid if root is true")))
+		})
+		It("GID can be use only together with the uid flag", func() {
+			guestfs.SetClient(fakeCreateClientPVC)
+			cmd := virtctlcmd.NewRepeatableVirtctlCommand(commandName, pvcName, "--gid=1001")
+			err := cmd()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).Should(Equal(fmt.Sprintf("gid requires the uid to be set")))
 		})
 	})
 
+	Context("URL authenticity", func() {
+		BeforeEach(func() {
+			guestfs.SetImageInfoGetFunc(fakeGetImageInfo)
+		})
+
+		AfterEach(func() {
+			guestfs.SetDefaultImageInfoGetFunc()
+		})
+
+		It("Image prefix from kubevirt config not discarded", func() {
+			guestfs.ImageSetFunc(kubevirtClient)
+			Expect(guestfs.ExportedImage).To(Equal("someregistry.io/kubevirt/some-prefix-libguestfs-tools@89af657d3c226ac3083a0986e19efe70c9ccd7e7278137e9df24b9b430182aa7"))
+		})
+	})
 })

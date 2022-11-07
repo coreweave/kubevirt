@@ -23,11 +23,11 @@ import (
 	"os"
 	"strings"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice/gpu"
 )
@@ -38,9 +38,6 @@ type envData struct {
 }
 
 const (
-	pciResourcePrefix  = "PCI_RESOURCE"
-	mdevResourcePrefix = "MDEV_PCI_RESOURCE"
-
 	gpuName0 = "gpu_name0"
 	gpuName1 = "gpu_name1"
 
@@ -63,26 +60,26 @@ var _ = Describe("GPU Address Pool", func() {
 		vmi = &v1.VirtualMachineInstance{}
 	})
 
-	table.DescribeTable("creates an empty pool when no GPUs are specified",
+	DescribeTable("creates an empty pool when no GPUs are specified",
 		func(newPool func([]v1.GPU) *hostdevice.AddressPool) {
 			pool := newPool(vmi.Spec.Domain.Devices.GPUs)
 			expectPoolPopFailure(pool, gpuResource0)
 		},
-		table.Entry("PCI", gpu.NewPCIAddressPool),
-		table.Entry("MDEV", gpu.NewMDEVAddressPool),
+		Entry("PCI", gpu.NewPCIAddressPool),
+		Entry("MDEV", gpu.NewMDEVAddressPool),
 	)
 
-	table.DescribeTable("creates an empty pool when no resources are specified",
+	DescribeTable("creates an empty pool when no resources are specified",
 		func(newPool func([]v1.GPU) *hostdevice.AddressPool) {
 			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{{DeviceName: gpuResource0, Name: gpuName0}}
 			pool := newPool(vmi.Spec.Domain.Devices.GPUs)
 			expectPoolPopFailure(pool, gpuResource0)
 		},
-		table.Entry("PCI", gpu.NewPCIAddressPool),
-		table.Entry("MDEV", gpu.NewMDEVAddressPool),
+		Entry("PCI", gpu.NewPCIAddressPool),
+		Entry("MDEV", gpu.NewMDEVAddressPool),
 	)
 
-	table.DescribeTable("succeeds to pop 2 addresses from same resource",
+	DescribeTable("succeeds to pop 2 addresses from same resource",
 		func(newPool func([]v1.GPU) *hostdevice.AddressPool, prefix, address0, address1 string) {
 			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{{DeviceName: gpuResource0, Name: gpuName0}}
 			env := []envData{newResourceEnv(prefix, envGPUResource0, address0, address1)}
@@ -92,11 +89,11 @@ var _ = Describe("GPU Address Pool", func() {
 				Expect(pool.Pop(gpuResource0)).To(Equal(address1))
 			})
 		},
-		table.Entry("PCI", gpu.NewPCIAddressPool, pciResourcePrefix, gpuPCIAddress0, gpuPCIAddress1),
-		table.Entry("MDEV", gpu.NewMDEVAddressPool, mdevResourcePrefix, gpuMDEVAddress0, gpuMDEVAddress1),
+		Entry("PCI", gpu.NewPCIAddressPool, v1.PCIResourcePrefix, gpuPCIAddress0, gpuPCIAddress1),
+		Entry("MDEV", gpu.NewMDEVAddressPool, v1.MDevResourcePrefix, gpuMDEVAddress0, gpuMDEVAddress1),
 	)
 
-	table.DescribeTable("succeeds to pop 2 addresses from two resources",
+	DescribeTable("succeeds to pop 2 addresses from two resources",
 		func(newPool func([]v1.GPU) *hostdevice.AddressPool, prefix, address0, address1 string) {
 			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
 				{DeviceName: gpuResource0, Name: gpuName0},
@@ -112,8 +109,8 @@ var _ = Describe("GPU Address Pool", func() {
 				Expect(pool.Pop(gpuResource1)).To(Equal(address1))
 			})
 		},
-		table.Entry("PCI", gpu.NewPCIAddressPool, pciResourcePrefix, gpuPCIAddress0, gpuPCIAddress1),
-		table.Entry("MDEV", gpu.NewMDEVAddressPool, mdevResourcePrefix, gpuMDEVAddress0, gpuMDEVAddress1),
+		Entry("PCI", gpu.NewPCIAddressPool, v1.PCIResourcePrefix, gpuPCIAddress0, gpuPCIAddress1),
+		Entry("MDEV", gpu.NewMDEVAddressPool, v1.MDevResourcePrefix, gpuMDEVAddress0, gpuMDEVAddress1),
 	)
 })
 

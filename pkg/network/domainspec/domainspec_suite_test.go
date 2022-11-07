@@ -6,6 +6,7 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	api2 "kubevirt.io/client-go/api"
 	"kubevirt.io/client-go/testutils"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -61,7 +62,7 @@ func NewDomainWithMacvtapInterface(macvtapName string) *api.Domain {
 	domain.Spec.Devices.Interfaces = []api.Interface{{
 		Alias: api.NewUserDefinedAlias(macvtapName),
 		Model: &api.Model{
-			Type: "virtio",
+			Type: v1.VirtIO,
 		},
 		Type: "ethernet",
 	}}

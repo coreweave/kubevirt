@@ -9,8 +9,8 @@ import (
 	iptables "github.com/coreos/go-iptables/iptables"
 	gomock "github.com/golang/mock/gomock"
 	netlink "github.com/vishvananda/netlink"
-
 	v1 "kubevirt.io/api/core/v1"
+
 	cache "kubevirt.io/kubevirt/pkg/network/cache"
 )
 
@@ -171,26 +171,14 @@ func (_mr *_MockNetworkHandlerRecorder) ParseAddr(arg0 interface{}) *gomock.Call
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "ParseAddr", arg0)
 }
 
-func (_m *MockNetworkHandler) SetRandomMac(iface string) (net.HardwareAddr, error) {
-	ret := _m.ctrl.Call(_m, "SetRandomMac", iface)
-	ret0, _ := ret[0].(net.HardwareAddr)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+func (_m *MockNetworkHandler) LinkSetHardwareAddr(link netlink.Link, hwaddr net.HardwareAddr) error {
+	ret := _m.ctrl.Call(_m, "LinkSetHardwareAddr", link, hwaddr)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
-func (_mr *_MockNetworkHandlerRecorder) SetRandomMac(arg0 interface{}) *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "SetRandomMac", arg0)
-}
-
-func (_m *MockNetworkHandler) GetMacDetails(iface string) (net.HardwareAddr, error) {
-	ret := _m.ctrl.Call(_m, "GetMacDetails", iface)
-	ret0, _ := ret[0].(net.HardwareAddr)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-func (_mr *_MockNetworkHandlerRecorder) GetMacDetails(arg0 interface{}) *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "GetMacDetails", arg0)
+func (_mr *_MockNetworkHandlerRecorder) LinkSetHardwareAddr(arg0, arg1 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "LinkSetHardwareAddr", arg0, arg1)
 }
 
 func (_m *MockNetworkHandler) LinkSetMaster(link netlink.Link, master *netlink.Bridge) error {
@@ -223,15 +211,26 @@ func (_mr *_MockNetworkHandlerRecorder) HasNatIptables(arg0 interface{}) *gomock
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "HasNatIptables", arg0)
 }
 
-func (_m *MockNetworkHandler) IsIpv6Enabled(interfaceName string) (bool, error) {
-	ret := _m.ctrl.Call(_m, "IsIpv6Enabled", interfaceName)
+func (_m *MockNetworkHandler) HasIPv4GlobalUnicastAddress(interfaceName string) (bool, error) {
+	ret := _m.ctrl.Call(_m, "HasIPv4GlobalUnicastAddress", interfaceName)
 	ret0, _ := ret[0].(bool)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-func (_mr *_MockNetworkHandlerRecorder) IsIpv6Enabled(arg0 interface{}) *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "IsIpv6Enabled", arg0)
+func (_mr *_MockNetworkHandlerRecorder) HasIPv4GlobalUnicastAddress(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "HasIPv4GlobalUnicastAddress", arg0)
+}
+
+func (_m *MockNetworkHandler) HasIPv6GlobalUnicastAddress(interfaceName string) (bool, error) {
+	ret := _m.ctrl.Call(_m, "HasIPv6GlobalUnicastAddress", interfaceName)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+func (_mr *_MockNetworkHandlerRecorder) HasIPv6GlobalUnicastAddress(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "HasIPv6GlobalUnicastAddress", arg0)
 }
 
 func (_m *MockNetworkHandler) IsIpv4Primary() (bool, error) {
@@ -255,6 +254,16 @@ func (_mr *_MockNetworkHandlerRecorder) ConfigureIpForwarding(arg0 interface{}) 
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "ConfigureIpForwarding", arg0)
 }
 
+func (_m *MockNetworkHandler) ConfigureRouteLocalNet(_param0 string) error {
+	ret := _m.ctrl.Call(_m, "ConfigureRouteLocalNet", _param0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockNetworkHandlerRecorder) ConfigureRouteLocalNet(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "ConfigureRouteLocalNet", arg0)
+}
+
 func (_m *MockNetworkHandler) ConfigureIpv4ArpIgnore() error {
 	ret := _m.ctrl.Call(_m, "ConfigureIpv4ArpIgnore")
 	ret0, _ := ret[0].(error)
@@ -263,6 +272,26 @@ func (_m *MockNetworkHandler) ConfigureIpv4ArpIgnore() error {
 
 func (_mr *_MockNetworkHandlerRecorder) ConfigureIpv4ArpIgnore() *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "ConfigureIpv4ArpIgnore")
+}
+
+func (_m *MockNetworkHandler) ConfigurePingGroupRange() error {
+	ret := _m.ctrl.Call(_m, "ConfigurePingGroupRange")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockNetworkHandlerRecorder) ConfigurePingGroupRange() *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "ConfigurePingGroupRange")
+}
+
+func (_m *MockNetworkHandler) ConfigureUnprivilegedPortStart(_param0 string) error {
+	ret := _m.ctrl.Call(_m, "ConfigureUnprivilegedPortStart", _param0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockNetworkHandlerRecorder) ConfigureUnprivilegedPortStart(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "ConfigureUnprivilegedPortStart", arg0)
 }
 
 func (_m *MockNetworkHandler) IptablesNewChain(proto iptables.Protocol, table string, chain string) error {

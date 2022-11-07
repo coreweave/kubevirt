@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 
 	"kubevirt.io/client-go/kubecli"
 
+	"k8s.io/utils/pointer"
+
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 	"kubevirt.io/kubevirt/pkg/virtctl/utils"
 )
@@ -35,22 +38,26 @@ const (
 	diskDir           = "/disk"
 	diskPath          = "/dev/vda"
 	podNamePrefix     = "libguestfs-tools"
-	appliancePath     = "/usr/local/lib/guestfs"
+	applianceDir      = "/usr/local/lib/guestfs"
+	guestfsVolume     = "guestfs"
+	appliancePath     = applianceDir + "/appliance"
 	tmpDirVolumeName  = "libguestfs-tmp-dir"
 	tmpDirPath        = "/tmp/guestfs"
 	pullPolicyDefault = corev1.PullIfNotPresent
 )
 
 var (
-	pvc         string
-	image       string
-	timeout     = 500 * time.Second
-	pullPolicy  string
-	kubevirtNs  string
-	kubevirtCRD string
-	kvm         bool
-	namespace   string
-	podName     string
+	pvc           string
+	image         string
+	ExportedImage string
+	timeout       = 500 * time.Second
+	pullPolicy    string
+	kvm           bool
+	podName       string
+	root          bool
+	fsGroup       string
+	uid           string
+	gid           string
 )
 
 type guestfsCommand struct {
@@ -73,7 +80,12 @@ func NewGuestfsShellCommand(clientConfig clientcmd.ClientConfig) *cobra.Command 
 	cmd.PersistentFlags().StringVar(&image, "image", "", "libguestfs-tools container image")
 	cmd.PersistentFlags().StringVar(&pullPolicy, "pull-policy", string(pullPolicyDefault), "pull policy for the libguestfs image")
 	cmd.PersistentFlags().BoolVar(&kvm, "kvm", true, "Use kvm for the libguestfs-tools container")
+	cmd.PersistentFlags().BoolVar(&root, "root", false, "Set uid 0 for the libguestfs-tool container")
+	cmd.PersistentFlags().StringVar(&uid, "uid", "", "Set uid for the libguestfs-tool container. It doesn't work with root")
+	cmd.PersistentFlags().StringVar(&gid, "gid", "", "Set gid for the libguestfs-tool container. This works only combined when the uid is manually set")
 	cmd.SetUsageTemplate(templates.UsageTemplate())
+	cmd.PersistentFlags().StringVar(&fsGroup, "fsGroup", "", "Set the fsgroup for the libguestfs-tool container")
+
 	return cmd
 }
 
@@ -116,22 +128,37 @@ func SetDefaulAttacher() {
 // ImageSet is a function to set the setImage
 type ImageSet func(virtClient kubecli.KubevirtClient) error
 
-var imageSetFunc ImageSet
+// ImageInfoGet is a function to get image info
+type ImageInfoGet func(virtClient kubecli.KubevirtClient) (*kubecli.GuestfsInfo, error)
 
-// SetClient allows overriding the default Kubernetes client. Useful for creating a mock function for the testing.
+var ImageSetFunc ImageSet
+var ImageInfoGetFunc ImageInfoGet
+
+// SetImageSetFunc sets the function to set the image
 func SetImageSetFunc(f ImageSet) {
-	imageSetFunc = f
+	ImageSetFunc = f
 }
 
 // SetDefaultImageSet sets the default function to set the image
 func SetDefaultImageSet() {
-	imageSetFunc = setImage
+	ImageSetFunc = setImage
+}
+
+// SetImageInfoGetFunc sets the function to get image info
+func SetImageInfoGetFunc(f ImageInfoGet) {
+	ImageInfoGetFunc = f
+}
+
+// SetDefaultImageInfoGetFunc sets the default function to get image info
+func SetDefaultImageInfoGetFunc() {
+	ImageInfoGetFunc = getImageInfo
 }
 
 func init() {
 	SetDefaulClient()
 	SetDefaulAttacher()
 	SetDefaultImageSet()
+	SetDefaultImageInfoGetFunc()
 }
 
 func (c *guestfsCommand) run(cmd *cobra.Command, args []string) error {
@@ -144,7 +171,7 @@ func (c *guestfsCommand) run(cmd *cobra.Command, args []string) error {
 	if pullPolicy != string(corev1.PullAlways) &&
 		pullPolicy != string(corev1.PullNever) &&
 		pullPolicy != string(corev1.PullIfNotPresent) {
-		return fmt.Errorf("Not valide pull policy: %s", pullPolicy)
+		return fmt.Errorf("Invalid pull policy: %s", pullPolicy)
 	}
 	var inUse bool
 	conf, err := c.clientConfig.ClientConfig()
@@ -156,11 +183,10 @@ func (c *guestfsCommand) run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if image == "" {
-		if err = imageSetFunc(client.VirtClient); err != nil {
+		if err = ImageSetFunc(client.VirtClient); err != nil {
 			return err
 		}
 	}
-
 	fmt.Printf("Use image: %s \n", image)
 	exist, _ := client.existsPVC(pvc, namespace)
 	if !exist {
@@ -191,26 +217,39 @@ type K8sClient struct {
 // setImage sets the image name based on the information retrieved by the KubeVirt server.
 func setImage(virtClient kubecli.KubevirtClient) error {
 	var imageName string
-	info, err := virtClient.GuestfsVersion().Get()
+	info, err := ImageInfoGetFunc(virtClient)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not get guestfs image info: %v", err)
 	}
+	// Set image name including prefix if available
+	imageName = fmt.Sprintf("%s%s", info.ImagePrefix, defaultImageName)
 	// Set the image version.
 	if info.Digest != "" {
-		imageName = fmt.Sprintf("%s@%s", defaultImageName, info.Digest)
+		imageName = fmt.Sprintf("%s@%s", imageName, info.Digest)
 	} else if info.Tag != "" {
-		imageName = fmt.Sprintf("%s:%s", defaultImageName, info.Tag)
+		imageName = fmt.Sprintf("%s:%s", imageName, info.Tag)
 	} else {
 		return fmt.Errorf("Either the digest or the tag for the image have been specified")
 	}
 
 	// Set the registry
+	image = imageName
 	if info.Registry != "" {
 		image = fmt.Sprintf("%s/%s", info.Registry, imageName)
-		return nil
 	}
-	image = imageName
+	ExportedImage = image
+
 	return nil
+}
+
+// getImageInfo gets the image info based on the information on KubeVirt CR
+func getImageInfo(virtClient kubecli.KubevirtClient) (*kubecli.GuestfsInfo, error) {
+	info, err := virtClient.GuestfsVersion().Get()
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
 }
 
 func createClient(config *rest.Config, virtClientConfig clientcmd.ClientConfig) (*K8sClient, error) {
@@ -335,12 +374,70 @@ func (client *K8sClient) getPodsForPVC(pvcName, ns string) ([]corev1.Pod, error)
 	return pods, nil
 }
 
-func createLibguestfsPod(pvc, image, cmd string, args []string, kvm, isBlock bool) *corev1.Pod {
+func setFSGroupLibguestfs() (*int64, error) {
+	if root && fsGroup != "" {
+		return nil, fmt.Errorf("cannot set fsGroup id with root")
+	}
+	if fsGroup != "" {
+		n, err := strconv.ParseInt(fsGroup, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		return &n, nil
+	}
+	if root {
+		var rootFsID int64 = 0
+		return &rootFsID, nil
+	}
+	return nil, nil
+}
+
+// setUIDLibugestfs returns the guestfs uid
+func setUIDLibugestfs() (*int64, error) {
+	switch {
+	case root:
+		var zero int64
+		if uid != "" {
+			return nil, fmt.Errorf("cannot set uid if root is true")
+		}
+		return &zero, nil
+	case uid != "":
+		n, err := strconv.ParseInt(uid, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		return &n, nil
+	default:
+		return nil, nil
+	}
+}
+
+func setGIDLibguestfs() (*int64, error) {
+	// The GID can only be specified together with the uid. See comment at: https://github.com/kubernetes/cri-api/blob/2b5244cefaeace624cb160d6b3d85dd3fd14baea/pkg/apis/runtime/v1/api.proto#L307-L309
+	if gid != "" && uid == "" {
+		return nil, fmt.Errorf("gid requires the uid to be set")
+	}
+
+	if root && gid != "" {
+		return nil, fmt.Errorf("cannot set gid id with root")
+	}
+	if gid != "" {
+		n, err := strconv.ParseInt(gid, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		return &n, nil
+	}
+	if root {
+		var rootGID int64 = 0
+		return &rootGID, nil
+	}
+	return nil, nil
+}
+
+func createLibguestfsPod(pvc, image, cmd string, args []string, kvm, isBlock bool) (*corev1.Pod, error) {
 	var resources corev1.ResourceRequirements
-	var user, group int64
 	podName = fmt.Sprintf("%s-%s", podNamePrefix, pvc)
-	user = 0
-	group = 0
 	if kvm {
 		resources = corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
@@ -348,11 +445,40 @@ func createLibguestfsPod(pvc, image, cmd string, args []string, kvm, isBlock boo
 			},
 		}
 	}
+	u, err := setUIDLibugestfs()
+	if err != nil {
+		return nil, err
+	}
+	g, err := setGIDLibguestfs()
+	if err != nil {
+		return nil, err
+	}
+	f, err := setFSGroupLibguestfs()
+	if err != nil {
+		return nil, err
+	}
+	allowPrivilegeEscalation := false
+	containerSecurityContext := &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+	securityContext := &corev1.PodSecurityContext{
+		RunAsNonRoot: pointer.Bool(!root),
+		RunAsUser:    u,
+		RunAsGroup:   g,
+		FSGroup:      f,
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
 	c := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: podName,
 		},
 		Spec: corev1.PodSpec{
+			SecurityContext: securityContext,
 			Volumes: []corev1.Volume{
 				{
 					Name: volume,
@@ -366,6 +492,12 @@ func createLibguestfsPod(pvc, image, cmd string, args []string, kvm, isBlock boo
 				// Use emptyDir to store temporary files generated by libguestfs
 				{
 					Name: tmpDirVolumeName,
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+				{
+					Name: guestfsVolume,
 					VolumeSource: corev1.VolumeSource{
 						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
@@ -388,28 +520,34 @@ func createLibguestfsPod(pvc, image, cmd string, args []string, kvm, isBlock boo
 						},
 						{
 							Name:  "LIBGUESTFS_PATH",
-							Value: "/usr/local/lib/guestfs/appliance",
+							Value: appliancePath,
 						},
 						{
 							Name:  "LIBGUESTFS_TMPDIR",
 							Value: tmpDirPath,
 						},
+						{
+							Name:  "HOME",
+							Value: appliancePath,
+						},
 					},
+					SecurityContext: containerSecurityContext,
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      tmpDirVolumeName,
 							ReadOnly:  false,
 							MountPath: tmpDirPath,
 						},
+						{
+							Name:      guestfsVolume,
+							ReadOnly:  false,
+							MountPath: appliancePath,
+						},
 					},
 					ImagePullPolicy: corev1.PullPolicy(pullPolicy),
-					SecurityContext: &corev1.SecurityContext{
-						RunAsUser:  &user,
-						RunAsGroup: &group,
-					},
-					Stdin:     true,
-					TTY:       true,
-					Resources: resources,
+					Stdin:           true,
+					TTY:             true,
+					Resources:       resources,
 				},
 			},
 			RestartPolicy: corev1.RestartPolicyNever,
@@ -421,7 +559,7 @@ func createLibguestfsPod(pvc, image, cmd string, args []string, kvm, isBlock boo
 			DevicePath: diskPath,
 		})
 		fmt.Printf("The PVC has been mounted at %s \n", diskPath)
-		return c
+		return c, nil
 	}
 	// PVC volume mode is filesystem
 	c.Spec.Containers[0].VolumeMounts = append(c.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
@@ -433,7 +571,7 @@ func createLibguestfsPod(pvc, image, cmd string, args []string, kvm, isBlock boo
 	c.Spec.Containers[0].WorkingDir = diskDir
 	fmt.Printf("The PVC has been mounted at %s \n", diskDir)
 
-	return c
+	return c, nil
 }
 
 // createAttacher attaches the stdin, stdout, and stderr to the container shell
@@ -473,7 +611,10 @@ func createAttacher(client *K8sClient, p *corev1.Pod, command string) error {
 }
 
 func (client *K8sClient) createInteractivePodWithPVC(pvc, image, ns, command string, args []string, isblock bool) error {
-	pod := createLibguestfsPod(pvc, image, command, args, kvm, isblock)
+	pod, err := createLibguestfsPod(pvc, image, command, args, kvm, isblock)
+	if err != nil {
+		return err
+	}
 	p, err := client.Client.CoreV1().Pods(ns).Create(context.TODO(), pod, metav1.CreateOptions{})
 	if err != nil {
 		return err

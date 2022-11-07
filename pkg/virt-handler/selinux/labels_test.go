@@ -2,11 +2,10 @@ package selinux
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -17,7 +16,7 @@ var _ = Describe("selinux", func() {
 
 	BeforeEach(func() {
 		var err error
-		tempDir, err = ioutil.TempDir("", "kubevirt")
+		tempDir, err = os.MkdirTemp("", "kubevirt")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(os.MkdirAll(filepath.Join(tempDir, "/usr/sbin"), 0777)).ToNot(HaveOccurred())
 		Expect(os.MkdirAll(filepath.Join(tempDir, "/usr/bin"), 0777)).ToNot(HaveOccurred())
@@ -37,7 +36,7 @@ var _ = Describe("selinux", func() {
 				return []byte("disabled"), nil
 			}
 			present, mode, err := selinux.IsPresent()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(present).To(BeFalse())
 			Expect(mode).To(Equal("disabled"))
 		})
@@ -47,7 +46,7 @@ var _ = Describe("selinux", func() {
 				return []byte("Permissive"), nil
 			}
 			present, _, err := selinux.IsPresent()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(present).To(BeTrue())
 		})
 		It("should detect that it is enabled if getenforce does not return Disabled", func() {
@@ -55,7 +54,7 @@ var _ = Describe("selinux", func() {
 				return []byte("enforcing"), nil
 			}
 			present, mode, err := selinux.IsPresent()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(present).To(BeTrue())
 			Expect(mode).To(Equal("enforcing"))
 		})

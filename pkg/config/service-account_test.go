@@ -20,11 +20,10 @@
 package config
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"kubevirt.io/client-go/api"
@@ -37,13 +36,13 @@ var _ = Describe("ServiceAccount", func() {
 	BeforeEach(func() {
 		var err error
 
-		ServiceAccountSourceDir, err = ioutil.TempDir("", "serviceaccount")
+		ServiceAccountSourceDir, err = os.MkdirTemp("", "serviceaccount")
 		Expect(err).NotTo(HaveOccurred())
 		os.MkdirAll(ServiceAccountSourceDir, 0755)
 		os.OpenFile(filepath.Join(ServiceAccountSourceDir, "token"), os.O_RDONLY|os.O_CREATE, 0666)
 		os.OpenFile(filepath.Join(ServiceAccountSourceDir, "namespace"), os.O_RDONLY|os.O_CREATE, 0666)
 
-		ServiceAccountDiskDir, err = ioutil.TempDir("", "serviceaccount-disk")
+		ServiceAccountDiskDir, err = os.MkdirTemp("", "serviceaccount-disk")
 		Expect(err).NotTo(HaveOccurred())
 	})
 

@@ -23,17 +23,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
+
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
+
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+
+	"kubevirt.io/client-go/log"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/pointer"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	validating_webhooks "kubevirt.io/kubevirt/pkg/util/webhooks/validating-webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/apply"
@@ -41,13 +48,15 @@ import (
 
 // KubeVirtUpdateAdmitter validates KubeVirt updates
 type KubeVirtUpdateAdmitter struct {
-	Client kubecli.KubevirtClient
+	Client        kubecli.KubevirtClient
+	ClusterConfig *virtconfig.ClusterConfig
 }
 
 // NewKubeVirtUpdateAdmitter creates a KubeVirtUpdateAdmitter
-func NewKubeVirtUpdateAdmitter(client kubecli.KubevirtClient) *KubeVirtUpdateAdmitter {
+func NewKubeVirtUpdateAdmitter(client kubecli.KubevirtClient, clusterConfig *virtconfig.ClusterConfig) *KubeVirtUpdateAdmitter {
 	return &KubeVirtUpdateAdmitter{
-		Client: client,
+		Client:        client,
+		ClusterConfig: clusterConfig,
 	}
 }
 
@@ -67,14 +76,21 @@ func (admitter *KubeVirtUpdateAdmitter) Admit(ar *admissionv1.AdmissionReview) *
 	results = append(results, validateCustomizeComponents(newKV.Spec.CustomizeComponents)...)
 	results = append(results, validateCertificates(newKV.Spec.CertificateRotationStrategy.SelfSigned)...)
 
-	if !reflect.DeepEqual(currKV.Spec.Infra, newKV.Spec.Infra) {
+	if !equality.Semantic.DeepEqual(currKV.Spec.Configuration.TLSConfiguration, newKV.Spec.Configuration.TLSConfiguration) {
+		if newKV.Spec.Configuration.TLSConfiguration != nil {
+			results = append(results,
+				validateTLSConfiguration(newKV.Spec.Configuration.TLSConfiguration)...)
+		}
+	}
+
+	if !equality.Semantic.DeepEqual(currKV.Spec.Infra, newKV.Spec.Infra) {
 		if newKV.Spec.Infra != nil && newKV.Spec.Infra.NodePlacement != nil {
 			results = append(results,
 				validateInfraPlacement(newKV.Namespace, newKV.Spec.Infra.NodePlacement, admitter.Client)...)
 		}
 	}
 
-	if !reflect.DeepEqual(currKV.Spec.Workloads, newKV.Spec.Workloads) {
+	if !equality.Semantic.DeepEqual(currKV.Spec.Workloads, newKV.Spec.Workloads) {
 		if newKV.Spec.Workloads != nil && newKV.Spec.Workloads.NodePlacement != nil {
 			results = append(results,
 				validateWorkloadPlacement(newKV.Namespace, newKV.Spec.Workloads.NodePlacement, admitter.Client)...)
@@ -85,7 +101,14 @@ func (admitter *KubeVirtUpdateAdmitter) Admit(ar *admissionv1.AdmissionReview) *
 		results = append(results, validateInfraReplicas(newKV.Spec.Infra.Replicas)...)
 	}
 
-	return validating_webhooks.NewAdmissionResponse(results)
+	response := validating_webhooks.NewAdmissionResponse(results)
+
+	if featureGatesChanged(&currKV.Spec, &newKV.Spec) {
+		featureGates := newKV.Spec.Configuration.DeveloperConfiguration.FeatureGates
+		response.Warnings = append(response.Warnings, warnDeprecatedFeatureGates(featureGates, admitter.ClusterConfig)...)
+	}
+
+	return response
 }
 
 func getAdmissionReviewKubeVirt(ar *admissionv1.AdmissionReview) (new *v1.KubeVirt, old *v1.KubeVirt, err error) {
@@ -182,6 +205,42 @@ func validateCertificates(certConfig *v1.KubeVirtSelfSignConfiguration) []metav1
 			Type:    metav1.CauseTypeFieldValueInvalid,
 			Message: fmt.Sprintf("Certificate duration cannot exceed CA (spec.certificateRotationStrategy.selfSigned.server.duration > spec.certificateRotationStrategy.selfSigned.ca.duration)"),
 		})
+	}
+
+	return statuses
+}
+
+func validateTLSConfiguration(tlsConfiguration *v1.TLSConfiguration) []metav1.StatusCause {
+	var statuses []metav1.StatusCause
+
+	if tlsConfiguration == nil {
+		return statuses
+	}
+
+	if tlsConfiguration.MinTLSVersion == v1.VersionTLS13 || tlsConfiguration.MinTLSVersion == "" {
+		if len(tlsConfiguration.Ciphers) > 0 {
+			statuses = append(statuses, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueNotSupported,
+				Message: "You cannot specify ciphers when spec.configuration.tlsConfiguration.minTLSVersion is empty or VersionTLS13",
+				Field:   "spec.configuration.tlsConfiguration.ciphers",
+			})
+		}
+		return statuses
+	}
+
+	if len(tlsConfiguration.Ciphers) > 0 {
+		var idByName = kvtls.CipherSuiteNameMap()
+		for index, cipher := range tlsConfiguration.Ciphers {
+			if _, exists := idByName[cipher]; !exists {
+				statuses = append(statuses, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueNotSupported,
+					Message: fmt.Sprintf("%s is not a valid cipher", cipher),
+					Field:   fmt.Sprintf("spec.configuration.tlsConfiguration.ciphers#%d", index),
+				})
+			}
+		}
+
+		return statuses
 	}
 
 	return statuses
@@ -308,4 +367,33 @@ func validateInfraReplicas(replicas *uint8) []metav1.StatusCause {
 	}
 
 	return statuses
+}
+
+func featureGatesChanged(currKVSpec, newKVSpec *v1.KubeVirtSpec) bool {
+	currDevConfig := currKVSpec.Configuration.DeveloperConfiguration
+	newDevConfig := newKVSpec.Configuration.DeveloperConfiguration
+
+	if (currDevConfig == nil && newDevConfig == nil) || (currDevConfig != nil && newDevConfig == nil) {
+		return false
+	}
+
+	if currDevConfig == nil && newDevConfig != nil {
+		return len(newDevConfig.FeatureGates) > 0
+	}
+
+	return !equality.Semantic.DeepEqual(currDevConfig.FeatureGates, newDevConfig.FeatureGates)
+}
+
+func warnDeprecatedFeatureGates(featureGates []string, config *virtconfig.ClusterConfig) (warnings []string) {
+	for _, featureGate := range featureGates {
+		if config.IsFeatureGateDeprecated(featureGate) {
+			const warningPattern = "feature gate %s is deprecated, therefore it can be safely removed and is redundant. " +
+				"For more info, please look at: https://github.com/kubevirt/kubevirt/blob/main/docs/deprecation.md"
+			warnings = append(warnings, fmt.Sprintf(warningPattern, featureGate))
+
+			log.Log.Warningf(warningPattern, featureGate)
+		}
+	}
+
+	return warnings
 }

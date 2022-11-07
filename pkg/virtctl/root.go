@@ -8,27 +8,33 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/client-go/tools/clientcmd"
+
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/virtctl/configuration"
 	"kubevirt.io/kubevirt/pkg/virtctl/console"
 	"kubevirt.io/kubevirt/pkg/virtctl/expose"
 	"kubevirt.io/kubevirt/pkg/virtctl/guestfs"
 	"kubevirt.io/kubevirt/pkg/virtctl/imageupload"
+	"kubevirt.io/kubevirt/pkg/virtctl/memorydump"
 	"kubevirt.io/kubevirt/pkg/virtctl/pause"
 	"kubevirt.io/kubevirt/pkg/virtctl/portforward"
+	"kubevirt.io/kubevirt/pkg/virtctl/scp"
 	"kubevirt.io/kubevirt/pkg/virtctl/softreboot"
 	"kubevirt.io/kubevirt/pkg/virtctl/ssh"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 	"kubevirt.io/kubevirt/pkg/virtctl/usbredir"
 	"kubevirt.io/kubevirt/pkg/virtctl/version"
 	"kubevirt.io/kubevirt/pkg/virtctl/vm"
+	"kubevirt.io/kubevirt/pkg/virtctl/vmexport"
 	"kubevirt.io/kubevirt/pkg/virtctl/vnc"
 )
 
 var programName string
 
-func NewVirtctlCommand() *cobra.Command {
+func NewVirtctlCommand() (*cobra.Command, clientcmd.ClientConfig) {
 
 	programName := GetProgramName(filepath.Base(os.Args[0]))
 
@@ -55,7 +61,7 @@ func NewVirtctlCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprint(cmd.OutOrStderr(), cmd.UsageString())
+			cmd.Printf(cmd.UsageString())
 		},
 	}
 
@@ -63,7 +69,7 @@ func NewVirtctlCommand() *cobra.Command {
 		Use:    "options",
 		Hidden: true,
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprint(cmd.OutOrStderr(), cmd.UsageString())
+			cmd.Printf(cmd.UsageString())
 		},
 	}
 	optionsCmd.SetUsageTemplate(templates.OptionsUsageTemplate())
@@ -71,22 +77,26 @@ func NewVirtctlCommand() *cobra.Command {
 	clientConfig := kubecli.DefaultClientConfig(rootCmd.PersistentFlags())
 	AddGlogFlags(rootCmd.PersistentFlags())
 	rootCmd.SetUsageTemplate(templates.MainUsageTemplate())
+	rootCmd.SetOut(os.Stdout)
 	rootCmd.AddCommand(
 		configuration.NewListPermittedDevices(clientConfig),
 		console.NewCommand(clientConfig),
 		usbredir.NewCommand(clientConfig),
 		vnc.NewCommand(clientConfig),
+		scp.NewCommand(clientConfig),
 		ssh.NewCommand(clientConfig),
 		portforward.NewCommand(clientConfig),
 		vm.NewStartCommand(clientConfig),
 		vm.NewStopCommand(clientConfig),
 		vm.NewRestartCommand(clientConfig),
 		vm.NewMigrateCommand(clientConfig),
+		vm.NewMigrateCancelCommand(clientConfig),
 		vm.NewGuestOsInfoCommand(clientConfig),
 		vm.NewUserListCommand(clientConfig),
 		vm.NewFSListCommand(clientConfig),
 		vm.NewAddVolumeCommand(clientConfig),
 		vm.NewRemoveVolumeCommand(clientConfig),
+		memorydump.NewMemoryDumpCommand(clientConfig),
 		pause.NewPauseCommand(clientConfig),
 		pause.NewUnpauseCommand(clientConfig),
 		softreboot.NewSoftRebootCommand(clientConfig),
@@ -94,9 +104,10 @@ func NewVirtctlCommand() *cobra.Command {
 		version.VersionCommand(clientConfig),
 		imageupload.NewImageUploadCommand(clientConfig),
 		guestfs.NewGuestfsShellCommand(clientConfig),
+		vmexport.NewVirtualMachineExportCommand(clientConfig),
 		optionsCmd,
 	)
-	return rootCmd
+	return rootCmd, clientConfig
 }
 
 // GetProgramName returns the command name to display in help texts.
@@ -114,8 +125,9 @@ func GetProgramName(binary string) string {
 
 func Execute() {
 	log.InitializeLogging(programName)
-	cmd := NewVirtctlCommand()
+	cmd, clientConfig := NewVirtctlCommand()
 	if err := cmd.Execute(); err != nil {
+		version.CheckClientServerVersion(&clientConfig)
 		fmt.Fprintln(cmd.Root().ErrOrStderr(), strings.TrimSpace(err.Error()))
 		os.Exit(1)
 	}

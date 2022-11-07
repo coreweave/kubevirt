@@ -20,6 +20,7 @@
 package flags
 
 import (
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -31,8 +32,8 @@ var (
 	Kubemaster         string
 	Verbosity          int
 	WorkloadConfigFile string
-	ContainerPrefix    string
-	ContainerTag       string
+	Run                bool
+	Delete             bool
 )
 
 func init() {
@@ -42,15 +43,15 @@ func init() {
 	flag.StringVar(&Kubemaster, "master", "", "kubernetes master url")
 	flag.IntVar(&Verbosity, "v", 2, "log level for V logs")
 	flag.StringVar(&WorkloadConfigFile, "workload", "tools/perfscale-load-generator/examples/workload/kubevirt-density/kubevirt-density.yaml", "path to the file containing the worload configuration")
-	flag.StringVar(&ContainerPrefix, "container-prefix", "registry:5000/kubevirt/", "Set the repository prefix for all images")
-	flag.StringVar(&ContainerTag, "container-tag", "devel", "Set the image tag or digest to use")
+	flag.BoolVar(&Run, "run", true, "Run a workload")
+	flag.BoolVar(&Delete, "delete", false, "Delete a workload")
 
 	if Kubeconfig == "" {
 		if os.Getenv("KUBECONFIG") != "" {
 			Kubeconfig = os.Getenv("KUBECONFIG")
 		} else {
 			_, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".kube", "config"))
-			if !os.IsNotExist(err) {
+			if !errors.Is(err, os.ErrNotExist) {
 				Kubeconfig = filepath.Join(os.Getenv("HOME"), ".kube", "config")
 			}
 		}

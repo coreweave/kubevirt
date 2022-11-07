@@ -24,9 +24,10 @@ import (
 	"encoding/xml"
 	"fmt"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	v1 "kubevirt.io/api/core/v1"
 )
 
 var exampleXMLwithNoneMemballoon string
@@ -270,7 +271,7 @@ var exampleXMLarm64 = `<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas
   <iothreads>2</iothreads>
 </domain>`
 
-var _ = Describe("Schema", func() {
+var _ = ginkgo.Describe("Schema", func() {
 	exampleXMLwithNoneMemballoon = fmt.Sprintf(exampleXML,
 		`<memballoon model="none"></memballoon>`)
 	exampleXML = fmt.Sprintf(exampleXML,
@@ -296,7 +297,7 @@ var _ = Describe("Schema", func() {
 	var exampleDomain *Domain
 	var exampleDomainWithMemballonDevice *Domain
 
-	BeforeEach(func() {
+	ginkgo.BeforeEach(func() {
 		exampleDomain = NewMinimalDomainWithNS("mynamespace", "testvmi")
 		exampleDomain.Spec.Devices.Disks = []Disk{
 			{Type: "network",
@@ -334,7 +335,7 @@ var _ = Describe("Schema", func() {
 		exampleDomain.Spec.Devices.Inputs = []Input{
 			{
 				Type:  "tablet",
-				Bus:   "virtio",
+				Bus:   v1.VirtIO,
 				Alias: NewUserDefinedAlias("tablet0"),
 			},
 		}
@@ -353,7 +354,7 @@ var _ = Describe("Schema", func() {
 			Alias:  NewUserDefinedAlias("mywatchdog"),
 		}
 		exampleDomain.Spec.Devices.Rng = &Rng{
-			Model:   "virtio",
+			Model:   v1.VirtIO,
 			Backend: &RngBackend{Source: "/dev/urandom", Model: "random"},
 		}
 		exampleDomain.Spec.Devices.Controllers = []Controller{
@@ -404,20 +405,19 @@ var _ = Describe("Schema", func() {
 		exampleDomain.Spec.Metadata.KubeVirt.GracePeriod = &GracePeriodMetadata{}
 		exampleDomain.Spec.Metadata.KubeVirt.GracePeriod.DeletionGracePeriodSeconds = 5
 		exampleDomain.Spec.IOThreads = &IOThreads{IOThreads: 2}
-		exampleDomain.Spec.Devices.Ballooning = &MemBalloon{Model: "virtio", Stats: &Stats{Period: 10}}
+		exampleDomain.Spec.Devices.Ballooning = &MemBalloon{Model: v1.VirtIO, Stats: &Stats{Period: 10}}
 		exampleDomainWithMemballonDevice = exampleDomain.DeepCopy()
 		exampleDomainWithMemballonDevice.Spec.Devices.Ballooning = &MemBalloon{Model: "none"}
 	})
 
-	Context("With schema", func() {
-		It("Generate expected libvirt xml", func() {
+	ginkgo.Context("With schema", func() {
+		ginkgo.It("Generate expected libvirt xml", func() {
 			domain := NewMinimalDomainSpec("mynamespace_testvmi")
 			buf, err := xml.Marshal(domain)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			newDomain := DomainSpec{}
-			err = xml.Unmarshal(buf, &newDomain)
-			Expect(err).To(BeNil())
+			Expect(xml.Unmarshal(buf, &newDomain)).To(Succeed())
 
 			domain.XMLName.Local = "domain"
 			Expect(newDomain).To(Equal(*domain))
@@ -426,10 +426,9 @@ var _ = Describe("Schema", func() {
 	unmarshalTest := func(arch, domainStr string, domain *Domain) {
 		NewDefaulter(arch).SetObjectDefaults_Domain(domain)
 		newDomain := DomainSpec{}
-		err := xml.Unmarshal([]byte(domainStr), &newDomain)
+		Expect(xml.Unmarshal([]byte(domainStr), &newDomain)).To(Succeed())
 		newDomain.XMLName.Local = ""
 		newDomain.XmlNS = "http://libvirt.org/schemas/domain/qemu/1.0"
-		Expect(err).To(BeNil())
 
 		Expect(newDomain).To(Equal(domain.Spec))
 	}
@@ -437,43 +436,43 @@ var _ = Describe("Schema", func() {
 	marshalTest := func(arch, domainStr string, domain *Domain) {
 		NewDefaulter(arch).SetObjectDefaults_Domain(domain)
 		buf, err := xml.MarshalIndent(domain.Spec, "", "  ")
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 		Expect(string(buf)).To(Equal(domainStr))
 	}
-	Context("With example schema", func() {
-		table.DescribeTable("Unmarshal into struct", func(arch string, domainStr string) {
+	ginkgo.Context("With example schema", func() {
+		ginkgo.DescribeTable("Unmarshal into struct", func(arch string, domainStr string) {
 			unmarshalTest(arch, domainStr, exampleDomain)
 		},
-			table.Entry("for ppc64le", "ppc64le", exampleXMLppc64le),
-			table.Entry("for arm64", "arm64", exampleXMLarm64),
-			table.Entry("for amd64", "amd64", exampleXML),
+			ginkgo.Entry("for ppc64le", "ppc64le", exampleXMLppc64le),
+			ginkgo.Entry("for arm64", "arm64", exampleXMLarm64),
+			ginkgo.Entry("for amd64", "amd64", exampleXML),
 		)
-		table.DescribeTable("Marshal into xml", func(arch string, domainStr string) {
+		ginkgo.DescribeTable("Marshal into xml", func(arch string, domainStr string) {
 			marshalTest(arch, domainStr, exampleDomain)
 		},
-			table.Entry("for ppc64le", "ppc64le", exampleXMLppc64le),
-			table.Entry("for arm64", "arm64", exampleXMLarm64),
-			table.Entry("for amd64", "amd64", exampleXML),
+			ginkgo.Entry("for ppc64le", "ppc64le", exampleXMLppc64le),
+			ginkgo.Entry("for arm64", "arm64", exampleXMLarm64),
+			ginkgo.Entry("for amd64", "amd64", exampleXML),
 		)
 
-		table.DescribeTable("Unmarshal into struct", func(arch string, domainStr string) {
+		ginkgo.DescribeTable("Unmarshal into struct", func(arch string, domainStr string) {
 			unmarshalTest(arch, domainStr, exampleDomainWithMemballonDevice)
 		},
-			table.Entry("for ppc64le and Memballoon device is specified", "ppc64le", exampleXMLppc64lewithNoneMemballoon),
-			table.Entry("for arm64 and Memballoon device is specified", "arm64", exampleXMLarm64withNoneMemballoon),
-			table.Entry("for amd64 and Memballoon device is specified", "amd64", exampleXMLwithNoneMemballoon),
+			ginkgo.Entry("for ppc64le and Memballoon device is specified", "ppc64le", exampleXMLppc64lewithNoneMemballoon),
+			ginkgo.Entry("for arm64 and Memballoon device is specified", "arm64", exampleXMLarm64withNoneMemballoon),
+			ginkgo.Entry("for amd64 and Memballoon device is specified", "amd64", exampleXMLwithNoneMemballoon),
 		)
-		table.DescribeTable("Marshal into xml", func(arch string, domainStr string) {
+		ginkgo.DescribeTable("Marshal into xml", func(arch string, domainStr string) {
 			marshalTest(arch, domainStr, exampleDomainWithMemballonDevice)
 		},
-			table.Entry("for ppc64le and Memballoon device is specified", "ppc64le", exampleXMLppc64lewithNoneMemballoon),
-			table.Entry("for arm64 and Memballoon device is specified", "arm64", exampleXMLarm64withNoneMemballoon),
-			table.Entry("for amd64 and Memballoon device is specified", "amd64", exampleXMLwithNoneMemballoon),
+			ginkgo.Entry("for ppc64le and Memballoon device is specified", "ppc64le", exampleXMLppc64lewithNoneMemballoon),
+			ginkgo.Entry("for arm64 and Memballoon device is specified", "arm64", exampleXMLarm64withNoneMemballoon),
+			ginkgo.Entry("for amd64 and Memballoon device is specified", "amd64", exampleXMLwithNoneMemballoon),
 		)
 	})
 
-	Context("With numa topology", func() {
-		It("should marshal and unmarshal the values", func() {
+	ginkgo.Context("With numa topology", func() {
+		ginkgo.It("should marshal and unmarshal the values", func() {
 			var testXML = `
 <domain>
 <cputune>
@@ -528,7 +527,7 @@ var _ = Describe("Schema", func() {
 
 	})
 
-	Context("With cpu pinning", func() {
+	ginkgo.Context("With cpu pinning", func() {
 		var testXML = `<cputune>
 <vcpupin vcpu="0" cpuset="1"/>
 <vcpupin vcpu="1" cpuset="5"/>
@@ -562,11 +561,32 @@ var _ = Describe("Schema", func() {
 			},
 		}
 
-		It("Unmarshal into struct", func() {
+		ginkgo.It("Unmarshal into struct", func() {
 			newCpuTune := CPUTune{}
-			err := xml.Unmarshal([]byte(testXML), &newCpuTune)
-			Expect(err).To(BeNil())
+			Expect(xml.Unmarshal([]byte(testXML), &newCpuTune)).To(Succeed())
 			Expect(newCpuTune).To(Equal(exampleCpuTune))
+		})
+	})
+
+	ginkgo.Context("With vsock", func() {
+		ginkgo.It("Generate expected libvirt xml", func() {
+			domain := NewMinimalDomainSpec("mynamespace_testvmi")
+			domain.Devices.VSOCK = &VSOCK{
+				Model: "virtio",
+				CID: CID{
+					Auto:    "no",
+					Address: 3,
+				},
+			}
+			buf, err := xml.Marshal(domain)
+			Expect(err).ToNot(HaveOccurred())
+
+			newDomain := DomainSpec{}
+			err = xml.Unmarshal(buf, &newDomain)
+			Expect(err).ToNot(HaveOccurred())
+
+			domain.XMLName.Local = "domain"
+			Expect(newDomain).To(Equal(*domain))
 		})
 	})
 })
@@ -581,8 +601,8 @@ func newLibvirtManagedAlias(aliasName string) *Alias {
 	return &Alias{name: aliasName}
 }
 
-var _ = Describe("XML marshal of domain device", func() {
-	It("should not add user alias prefix to the name of a non-user-defined alias", func() {
+var _ = ginkgo.Describe("XML marshal of domain device", func() {
+	ginkgo.It("should not add user alias prefix to the name of a non-user-defined alias", func() {
 		alias := newLibvirtManagedAlias(testAliasName)
 		xmlBytes, err := xml.Marshal(alias)
 		Expect(err).ToNot(HaveOccurred())
@@ -592,7 +612,7 @@ var _ = Describe("XML marshal of domain device", func() {
 		Expect(newAlias.GetName()).To(Equal(testAliasName))
 		Expect(newAlias.IsUserDefined()).To(BeFalse())
 	})
-	It("should add user alias prefix to the name of a user-defined alias", func() {
+	ginkgo.It("should add user alias prefix to the name of a user-defined alias", func() {
 		alias := NewUserDefinedAlias(testAliasName)
 		xmlBytes, err := xml.Marshal(alias)
 		Expect(err).ToNot(HaveOccurred())
@@ -604,8 +624,8 @@ var _ = Describe("XML marshal of domain device", func() {
 	})
 })
 
-var _ = Describe("JSON marshal of the alias of a domain device", func() {
-	It("should deal with package-private struct members for non-user-defined alias", func() {
+var _ = ginkgo.Describe("JSON marshal of the alias of a domain device", func() {
+	ginkgo.It("should deal with package-private struct members for non-user-defined alias", func() {
 		alias := newLibvirtManagedAlias(testAliasName)
 		jsonBytes, err := json.Marshal(alias)
 		Expect(err).ToNot(HaveOccurred())
@@ -615,7 +635,7 @@ var _ = Describe("JSON marshal of the alias of a domain device", func() {
 		Expect(newAlias.GetName()).To(Equal(testAliasName))
 		Expect(newAlias.IsUserDefined()).To(BeFalse())
 	})
-	It("should deal with package-private struct members for user-defined alias", func() {
+	ginkgo.It("should deal with package-private struct members for user-defined alias", func() {
 		alias := NewUserDefinedAlias(testAliasName)
 		jsonBytes, err := json.Marshal(alias)
 		Expect(err).ToNot(HaveOccurred())

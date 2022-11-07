@@ -3,8 +3,7 @@ package topology
 import (
 	"fmt"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	g "github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,9 +52,7 @@ var _ = Describe("Hinter", func() {
 			NodeWithTSC("node4", 12, false),
 		)
 		vmi := vmiWithTSCFrequencyOnNode("myvmi", 12, "oldnode")
-		g.Expect(hinter.TopologyHintsRequiredForVMI(
-			vmi),
-		).To(g.BeTrue())
+		g.Expect(GetTscFrequencyRequirement(vmi).Type).ToNot(g.Equal(NotRequired))
 		g.Expect(hinter.TopologyHintsForVMI(vmi)).To(g.Equal(
 			&virtv1.TopologyHints{
 				TSCFrequency: pointer.Int64Ptr(12),
@@ -74,20 +71,21 @@ var _ = Describe("Hinter", func() {
 		g.Expect(hinter.TSCFrequenciesInUse()).To(g.ConsistOf(int64(100), int64(90), int64(123), int64(80)))
 	})
 
-	table.DescribeTable("should not propose a TSC frequency on architectures like", func(arch string) {
+	DescribeTable("should not propose a TSC frequency on architectures like", func(arch string) {
 		hinter := hinterWithNodes(
 			NodeWithInvalidTSC("node0"),
 			NodeWithTSC("node1", 1234, true),
 		)
 		hinter.arch = arch
 		vmi := vmiWithoutTSCFrequency("myvmi")
-		g.Expect(hinter.TopologyHintsRequiredForVMI(
-			vmi),
-		).To(g.BeFalse())
-		g.Expect(hinter.TopologyHintsForVMI(vmi)).To(g.BeNil())
+		g.Expect(hinter.IsTscFrequencyRequiredForBoot(vmi)).To(g.BeFalse())
+
+		hints, _, err := hinter.TopologyHintsForVMI(vmi)
+		g.Expect(hints).To(g.BeNil())
+		g.Expect(err).To(g.Not(g.HaveOccurred()))
 	},
-		table.Entry("arm64", "arm64"),
-		table.Entry("ppc64le", "ppc64le"),
+		Entry("arm64", "arm64"),
+		Entry("ppc64le", "ppc64le"),
 	)
 })
 

@@ -26,13 +26,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"reflect"
 	"strings"
 	"sync"
 
 	"github.com/emicklei/go-restful"
 	v12 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -45,11 +46,33 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
+
+	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
+
 	"kubevirt.io/kubevirt/pkg/controller"
+	"kubevirt.io/kubevirt/pkg/instancetype"
+	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
+	kutil "kubevirt.io/kubevirt/pkg/util"
+	k6ttypes "kubevirt.io/kubevirt/pkg/util/types"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
-const defaultProfilerComponentPort = 8443
+const (
+	unmarshalRequestErrFmt       = "Can not unmarshal Request body to struct, error: %s"
+	vmNotRunning                 = "VM is not running"
+	patchingVMFmt                = "Patching VM: %s"
+	jsonpatchTestErr             = "jsonpatch test operation does not apply"
+	patchingVMStatusFmt          = "Patching VM status: %s"
+	vmiNotRunning                = "VMI is not running"
+	vmiGuestAgentErr             = "VMI does not have guest agent connected"
+	prepConnectionErrFmt         = "Cannot prepare connection %s"
+	getRequestErrFmt             = "Cannot GET request %s"
+	pvcVolumeModeErr             = "pvc should be filesystem pvc"
+	pvcAccessModeErr             = "pvc access mode can't be read only"
+	pvcSizeErrFmt                = "pvc size [%s] should be bigger then [%s]"
+	memoryDumpNameConflictErr    = "can't request memory dump for pvc [%s] while pvc [%s] is still associated as the memory dump pvc"
+	defaultProfilerComponentPort = 8443
+)
 
 type SubresourceAPIApp struct {
 	virtCli                 kubecli.KubevirtClient
@@ -59,9 +82,17 @@ type SubresourceAPIApp struct {
 	credentialsLock         *sync.Mutex
 	statusUpdater           *status.VMStatusUpdater
 	clusterConfig           *virtconfig.ClusterConfig
+	instancetypeMethods     instancetype.Methods
 }
 
 func NewSubresourceAPIApp(virtCli kubecli.KubevirtClient, consoleServerPort int, tlsConfiguration *tls.Config, clusterConfig *virtconfig.ClusterConfig) *SubresourceAPIApp {
+	// When this method is called from tools/openapispec.go when running 'make generate',
+	// the virtCli is nil, and accessing GeneratedKubeVirtClient() would cause nil dereference.
+	var instancetypeMethods instancetype.Methods
+	if virtCli != nil {
+		instancetypeMethods = instancetype.NewMethods(virtCli)
+	}
+
 	return &SubresourceAPIApp{
 		virtCli:                 virtCli,
 		consoleServerPort:       consoleServerPort,
@@ -70,6 +101,7 @@ func NewSubresourceAPIApp(virtCli kubecli.KubevirtClient, consoleServerPort int,
 		handlerTLSConfiguration: tlsConfiguration,
 		statusUpdater:           status.NewVMStatusUpdater(virtCli),
 		clusterConfig:           clusterConfig,
+		instancetypeMethods:     instancetypeMethods,
 	}
 }
 
@@ -124,6 +156,30 @@ func (app *SubresourceAPIApp) putRequestHandler(request *restful.Request, respon
 	}
 }
 
+func (app *SubresourceAPIApp) httpGetRequestHandler(request *restful.Request, response *restful.Response, validate validation, getURL URLResolver, v interface{}) {
+	_, url, conn, err := app.prepareConnection(request, validate, getURL)
+	if err != nil {
+		log.Log.Errorf(prepConnectionErrFmt, err.Error())
+		response.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	resp, conErr := conn.Get(url, app.handlerTLSConfiguration)
+	if conErr != nil {
+		log.Log.Errorf(getRequestErrFmt, conErr.Error())
+		response.WriteError(http.StatusInternalServerError, conErr)
+		return
+	}
+
+	if err := json.Unmarshal([]byte(resp), &v); err != nil {
+		log.Log.Reason(err).Error("error unmarshalling response")
+		response.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	response.WriteEntity(v)
+}
+
 // get either the interface with the provided name or the first available interface
 // if no interface is present, return error
 func getTargetInterfaceIP(vmi *v1.VirtualMachineInstance) (string, error) {
@@ -148,7 +204,7 @@ func getChangeRequestJson(vm *v1.VirtualMachine, changes ...v1.VirtualMachineSta
 	verb := "add"
 	// Special case: if there's no status field at all, add one.
 	newStatus := v1.VirtualMachineStatus{}
-	if reflect.DeepEqual(vm.Status, newStatus) {
+	if equality.Semantic.DeepEqual(vm.Status, newStatus) {
 		for _, change := range changes {
 			newStatus.StateChangeRequests = append(newStatus.StateChangeRequests, change)
 		}
@@ -218,10 +274,32 @@ func getUpdateTerminatingSecondsGracePeriod(gracePeriod int64) string {
 	return fmt.Sprintf("{\"spec\":{\"terminationGracePeriodSeconds\": %d }}", gracePeriod)
 }
 
+func (app *SubresourceAPIApp) patchVMStatusStopped(vmi *v1.VirtualMachineInstance, vm *v1.VirtualMachine, response *restful.Response, bodyStruct *v1.StopOptions) (error, error) {
+	bodyString, err := getChangeRequestJson(vm,
+		v1.VirtualMachineStateChangeRequest{Action: v1.StopRequest, UID: &vmi.UID})
+	if err != nil {
+		writeError(errors.NewInternalError(err), response)
+		return nil, err
+	}
+	log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, bodyString)
+	return app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun}), nil
+}
+
 func (app *SubresourceAPIApp) MigrateVMRequestHandler(request *restful.Request, response *restful.Response) {
 	name := request.PathParameter("name")
 	namespace := request.PathParameter("namespace")
 
+	bodyStruct := &v1.MigrateOptions{}
+	if request.Request.Body != nil {
+		err := yaml.NewYAMLOrJSONDecoder(request.Request.Body, 1024).Decode(&bodyStruct)
+		switch err {
+		case io.EOF, nil:
+			break
+		default:
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt, err)), response)
+			return
+		}
+	}
 	vm, err := app.fetchVirtualMachine(name, namespace)
 	if err != nil {
 		writeError(err, response)
@@ -235,7 +313,7 @@ func (app *SubresourceAPIApp) MigrateVMRequestHandler(request *restful.Request, 
 	}
 
 	if vmi.Status.Phase != v1.Running {
-		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("VM is not running")), response)
+		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf(vmNotRunning)), response)
 		return
 	}
 
@@ -254,7 +332,7 @@ func (app *SubresourceAPIApp) MigrateVMRequestHandler(request *restful.Request, 
 			Spec: v1.VirtualMachineInstanceMigrationSpec{
 				VMIName: name,
 			},
-		})
+		}, &k8smetav1.CreateOptions{DryRun: bodyStruct.DryRun})
 		if err != nil {
 			return errors.NewInternalError(err)
 		}
@@ -274,6 +352,7 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 	// RunStrategyManual         -> send restart request
 	// RunStrategyAlways         -> send restart request
 	// RunStrategyRerunOnFailure -> send restart request
+	// RunStrategyOnce           -> doesn't make sense
 	name := request.PathParameter("name")
 	namespace := request.PathParameter("namespace")
 
@@ -285,7 +364,7 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 		case io.EOF, nil:
 			break
 		default:
-			writeError(errors.NewBadRequest(fmt.Sprintf("Can not unmarshal Request body to struct, error: %s", err)), response)
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt, err)), response)
 			return
 		}
 	}
@@ -310,8 +389,8 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 		writeError(errors.NewInternalError(err), response)
 		return
 	}
-	if runStrategy == v1.RunStrategyHalted {
-		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("%v does not support manual restart requests", v1.RunStrategyHalted)), response)
+	if runStrategy == v1.RunStrategyHalted || runStrategy == v1.RunStrategyOnce {
+		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("RunStategy %v does not support manual restart requests", runStrategy)), response)
 		return
 	}
 
@@ -333,10 +412,10 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 		return
 	}
 
-	log.Log.Object(vm).V(4).Infof("Patching VM: %s", bodyString)
+	log.Log.Object(vm).V(4).Infof(patchingVMFmt, bodyString)
 	err = app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 	if err != nil {
-		if strings.Contains(err.Error(), "jsonpatch test operation does not apply") {
+		if strings.Contains(err.Error(), jsonpatchTestErr) {
 			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, err), response)
 		} else {
 			writeError(errors.NewInternalError(err), response)
@@ -357,7 +436,7 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 				response.WriteHeader(http.StatusAccepted)
 				return
 			}
-			// set termincationGracePeriod and delete the VMI pod to trigger a forced restart
+			// set terminationGracePeriod and delete the VMI pod to trigger a forced restart
 			err = app.virtCli.CoreV1().Pods(namespace).Delete(context.Background(), vmiPodname, k8smetav1.DeleteOptions{GracePeriodSeconds: bodyStruct.GracePeriodSeconds})
 			if err != nil {
 				if !errors.IsNotFound(err) {
@@ -433,7 +512,7 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 		case io.EOF, nil:
 			break
 		default:
-			writeError(errors.NewBadRequest(fmt.Sprintf("Can not unmarshal Request body to struct, error: %s", err)), response)
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt, err)), response)
 			return
 		}
 		startPaused = bodyStruct.Paused
@@ -453,6 +532,7 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 	// RunStrategyManual         -> send start request
 	// RunStrategyAlways         -> doesn't make sense
 	// RunStrategyRerunOnFailure -> doesn't make sense
+	// RunStrategyOnce           -> doesn't make sense
 	switch runStrategy {
 	case v1.RunStrategyHalted:
 		pausedStartStrategy := v1.StartStrategyPaused
@@ -467,11 +547,11 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 				writeError(errors.NewInternalError(err), response)
 				return
 			}
-			log.Log.Object(vm).V(4).Infof("Patching VM status: %s", patchString)
+			log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, patchString)
 			patchErr = app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(patchString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 		} else {
 			patchString := getRunningJson(vm, true)
-			log.Log.Object(vm).V(4).Infof("Patching VM: %s", patchString)
+			log.Log.Object(vm).V(4).Infof(patchingVMFmt, patchString)
 			_, patchErr = app.virtCli.VirtualMachine(namespace).Patch(vm.GetName(), types.MergePatchType, []byte(patchString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 		}
 
@@ -498,15 +578,15 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 			writeError(errors.NewInternalError(err), response)
 			return
 		}
-		log.Log.Object(vm).V(4).Infof("Patching VM status: %s", bodyString)
+		log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, bodyString)
 		patchErr = app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
-	case v1.RunStrategyAlways:
-		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("%v does not support manual start requests", v1.RunStrategyAlways)), response)
+	case v1.RunStrategyAlways, v1.RunStrategyOnce:
+		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("%v does not support manual start requests", runStrategy)), response)
 		return
 	}
 
 	if patchErr != nil {
-		if strings.Contains(patchErr.Error(), "jsonpatch test operation does not apply") {
+		if strings.Contains(patchErr.Error(), jsonpatchTestErr) {
 			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, patchErr), response)
 		} else {
 			writeError(errors.NewInternalError(patchErr), response)
@@ -518,10 +598,11 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 }
 
 func (app *SubresourceAPIApp) StopVMRequestHandler(request *restful.Request, response *restful.Response) {
-	// RunStrategyHalted         -> doesn't make sense
+	// RunStrategyHalted         -> force stop if graceperiod in request is shorter than before, otherwise doesn't make sense
 	// RunStrategyManual         -> send stop request
 	// RunStrategyAlways         -> spec.running = false
 	// RunStrategyRerunOnFailure -> spec.running = false
+	// RunStrategyOnce           -> spec.running = false
 
 	name := request.PathParameter("name")
 	namespace := request.PathParameter("namespace")
@@ -533,7 +614,7 @@ func (app *SubresourceAPIApp) StopVMRequestHandler(request *restful.Request, res
 		case io.EOF, nil:
 			break
 		default:
-			writeError(errors.NewBadRequest(fmt.Sprintf("Can not unmarshal Request body to struct, error: %s", err)), response)
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt, err)), response)
 			return
 		}
 	}
@@ -559,9 +640,15 @@ func (app *SubresourceAPIApp) StopVMRequestHandler(request *restful.Request, res
 		return
 	}
 
+	var oldGracePeriodSeconds int64
 	patchType := types.MergePatchType
 	var patchErr error
 	if hasVMI && !vmi.IsFinal() && bodyStruct.GracePeriod != nil {
+		// used for stopping a VM with RunStrategyHalted
+		if vmi.Spec.TerminationGracePeriodSeconds != nil {
+			oldGracePeriodSeconds = *vmi.Spec.TerminationGracePeriodSeconds
+		}
+
 		bodyString := getUpdateTerminatingSecondsGracePeriod(*bodyStruct.GracePeriod)
 		log.Log.Object(vmi).V(2).Infof("Patching VMI: %s", bodyString)
 		_, err = app.virtCli.VirtualMachineInstance(namespace).Patch(vmi.GetName(), patchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
@@ -574,35 +661,37 @@ func (app *SubresourceAPIApp) StopVMRequestHandler(request *restful.Request, res
 	switch runStrategy {
 	case v1.RunStrategyHalted:
 		if !hasVMI || vmi.IsFinal() {
-			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("VM is not running")), response)
+			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf(vmNotRunning)), response)
 			return
 		}
-		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("%v does not support manual stop requests", v1.RunStrategyHalted)), response)
-		return
+		if bodyStruct.GracePeriod == nil || (vmi.Spec.TerminationGracePeriodSeconds != nil && *bodyStruct.GracePeriod >= oldGracePeriodSeconds) {
+			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("%v only supports manual stop requests with a shorter graceperiod", v1.RunStrategyHalted)), response)
+			return
+		}
+		// same behavior as RunStrategyManual
+		patchErr, err = app.patchVMStatusStopped(vmi, vm, response, bodyStruct)
+		if err != nil {
+			return
+		}
 	case v1.RunStrategyManual:
 		if !hasVMI || vmi.IsFinal() {
-			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("VM is not running")), response)
+			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf(vmNotRunning)), response)
 			return
 		}
 		// pass the buck and ask virt-controller to stop the VM. this way the
 		// VM will retain RunStrategy = manual
-		patchType = types.JSONPatchType
-		bodyString, err := getChangeRequestJson(vm,
-			v1.VirtualMachineStateChangeRequest{Action: v1.StopRequest, UID: &vmi.UID})
+		patchErr, err = app.patchVMStatusStopped(vmi, vm, response, bodyStruct)
 		if err != nil {
-			writeError(errors.NewInternalError(err), response)
 			return
 		}
-		log.Log.Object(vm).V(4).Infof("Patching VM status: %s", bodyString)
-		patchErr = app.statusUpdater.PatchStatus(vm, patchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
-	case v1.RunStrategyRerunOnFailure, v1.RunStrategyAlways:
+	case v1.RunStrategyRerunOnFailure, v1.RunStrategyAlways, v1.RunStrategyOnce:
 		bodyString := getRunningJson(vm, false)
-		log.Log.Object(vm).V(4).Infof("Patching VM: %s", bodyString)
+		log.Log.Object(vm).V(4).Infof(patchingVMFmt, bodyString)
 		_, patchErr = app.virtCli.VirtualMachine(namespace).Patch(vm.GetName(), patchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 	}
 
 	if patchErr != nil {
-		if strings.Contains(patchErr.Error(), "jsonpatch test operation does not apply") {
+		if strings.Contains(patchErr.Error(), jsonpatchTestErr) {
 			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, patchErr), response)
 		} else {
 			writeError(errors.NewInternalError(patchErr), response)
@@ -617,7 +706,7 @@ func (app *SubresourceAPIApp) PauseVMIRequestHandler(request *restful.Request, r
 
 	validate := func(vmi *v1.VirtualMachineInstance) *errors.StatusError {
 		if vmi.Status.Phase != v1.Running {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VM is not running"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmNotRunning))
 		}
 		if vmi.Spec.LivenessProbe != nil {
 			return errors.NewForbidden(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("Pausing VMIs with LivenessProbe is currently not supported"))
@@ -640,7 +729,7 @@ func (app *SubresourceAPIApp) PauseVMIRequestHandler(request *restful.Request, r
 		case io.EOF, nil:
 			break
 		default:
-			writeError(errors.NewBadRequest(fmt.Sprintf("Can not unmarshal Request body to struct, error: %s", err)), response)
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt, err)), response)
 			return
 		}
 	}
@@ -675,7 +764,7 @@ func (app *SubresourceAPIApp) UnpauseVMIRequestHandler(request *restful.Request,
 		case io.EOF, nil:
 			break
 		default:
-			writeError(errors.NewBadRequest(fmt.Sprintf("Can not unmarshal Request body to struct, error: %s", err)), response)
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt, err)), response)
 			return
 		}
 	}
@@ -691,7 +780,7 @@ func (app *SubresourceAPIApp) FreezeVMIRequestHandler(request *restful.Request, 
 
 	validate := func(vmi *v1.VirtualMachineInstance) *errors.StatusError {
 		if vmi.Status.Phase != v1.Running {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VM is not running"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmNotRunning))
 		}
 		return nil
 	}
@@ -707,7 +796,7 @@ func (app *SubresourceAPIApp) UnfreezeVMIRequestHandler(request *restful.Request
 
 	validate := func(vmi *v1.VirtualMachineInstance) *errors.StatusError {
 		if vmi.Status.Phase != v1.Running {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VMI is not running"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmiNotRunning))
 		}
 		return nil
 	}
@@ -722,7 +811,7 @@ func (app *SubresourceAPIApp) SoftRebootVMIRequestHandler(request *restful.Reque
 
 	validate := func(vmi *v1.VirtualMachineInstance) *errors.StatusError {
 		if vmi.Status.Phase != v1.Running {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VM is not running"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmNotRunning))
 		}
 		condManager := controller.NewVirtualMachineInstanceConditionManager()
 		if condManager.HasConditionWithStatus(vmi, v1.VirtualMachineInstancePaused, v12.ConditionTrue) {
@@ -813,11 +902,11 @@ func writeError(error *errors.StatusError, response *restful.Response) {
 func (app *SubresourceAPIApp) GuestOSInfo(request *restful.Request, response *restful.Response) {
 	validate := func(vmi *v1.VirtualMachineInstance) *errors.StatusError {
 		if vmi == nil || vmi.Status.Phase != v1.Running {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VMI is not running"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmiNotRunning))
 		}
 		condManager := controller.NewVirtualMachineInstanceConditionManager()
 		if !condManager.HasCondition(vmi, v1.VirtualMachineInstanceAgentConnected) {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VMI does not have guest agent connected"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmiGuestAgentErr))
 		}
 		return nil
 	}
@@ -825,39 +914,18 @@ func (app *SubresourceAPIApp) GuestOSInfo(request *restful.Request, response *re
 		return conn.GuestInfoURI(vmi)
 	}
 
-	_, url, conn, err := app.prepareConnection(request, validate, getURL)
-	if err != nil {
-		log.Log.Errorf("Cannot prepare connection %s", err.Error())
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp, conErr := conn.Get(url, app.handlerTLSConfiguration)
-	if conErr != nil {
-		log.Log.Errorf("Cannot GET request %s", conErr.Error())
-		response.WriteError(http.StatusInternalServerError, conErr)
-		return
-	}
-
-	guestInfo := v1.VirtualMachineInstanceGuestAgentInfo{}
-	if err := json.Unmarshal([]byte(resp), &guestInfo); err != nil {
-		log.Log.Reason(err).Error("error unmarshalling guest agent response")
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	response.WriteEntity(guestInfo)
+	app.httpGetRequestHandler(request, response, validate, getURL, v1.VirtualMachineInstanceGuestAgentInfo{})
 }
 
 // UserList handles the subresource for providing VM guest user list
 func (app *SubresourceAPIApp) UserList(request *restful.Request, response *restful.Response) {
 	validate := func(vmi *v1.VirtualMachineInstance) *errors.StatusError {
 		if vmi == nil || vmi.Status.Phase != v1.Running {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VMI is not running"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmiNotRunning))
 		}
 		condManager := controller.NewVirtualMachineInstanceConditionManager()
 		if !condManager.HasCondition(vmi, v1.VirtualMachineInstanceAgentConnected) {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VMI does not have guest agent connected"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmiGuestAgentErr))
 		}
 		return nil
 	}
@@ -865,39 +933,18 @@ func (app *SubresourceAPIApp) UserList(request *restful.Request, response *restf
 		return conn.UserListURI(vmi)
 	}
 
-	_, url, conn, err := app.prepareConnection(request, validate, getURL)
-	if err != nil {
-		log.Log.Errorf("Cannot prepare connection %s", err.Error())
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp, conErr := conn.Get(url, app.handlerTLSConfiguration)
-	if conErr != nil {
-		log.Log.Errorf("Cannot GET request %s", conErr.Error())
-		response.WriteError(http.StatusInternalServerError, conErr)
-		return
-	}
-
-	userList := v1.VirtualMachineInstanceGuestOSUserList{}
-	if err := json.Unmarshal([]byte(resp), &userList); err != nil {
-		log.Log.Reason(err).Error("error unmarshalling user list response")
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	response.WriteEntity(userList)
+	app.httpGetRequestHandler(request, response, validate, getURL, v1.VirtualMachineInstanceGuestOSUserList{})
 }
 
 // FilesystemList handles the subresource for providing guest filesystem list
 func (app *SubresourceAPIApp) FilesystemList(request *restful.Request, response *restful.Response) {
 	validate := func(vmi *v1.VirtualMachineInstance) *errors.StatusError {
 		if vmi == nil || vmi.Status.Phase != v1.Running {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VMI is not running"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmiNotRunning))
 		}
 		condManager := controller.NewVirtualMachineInstanceConditionManager()
 		if !condManager.HasCondition(vmi, v1.VirtualMachineInstanceAgentConnected) {
-			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf("VMI does not have guest agent connected"))
+			return errors.NewConflict(v1.Resource("virtualmachineinstance"), vmi.Name, fmt.Errorf(vmiGuestAgentErr))
 		}
 		return nil
 	}
@@ -905,32 +952,10 @@ func (app *SubresourceAPIApp) FilesystemList(request *restful.Request, response 
 		return conn.FilesystemListURI(vmi)
 	}
 
-	_, url, conn, err := app.prepareConnection(request, validate, getURL)
-	if err != nil {
-		log.Log.Errorf("Cannot prepare connection %s", err.Error())
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp, conErr := conn.Get(url, app.handlerTLSConfiguration)
-	if conErr != nil {
-		log.Log.Errorf("Cannot GET request %s", conErr.Error())
-		response.WriteError(http.StatusInternalServerError, conErr)
-		return
-	}
-
-	filesystemList := v1.VirtualMachineInstanceFileSystemList{}
-	if err := json.Unmarshal([]byte(resp), &filesystemList); err != nil {
-		log.Log.Reason(err).Error("error unmarshalling file system list response")
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	response.WriteEntity(filesystemList)
+	app.httpGetRequestHandler(request, response, validate, getURL, v1.VirtualMachineInstanceFileSystemList{})
 }
 
 func generateVMVolumeRequestPatch(vm *v1.VirtualMachine, volumeRequest *v1.VirtualMachineVolumeRequest) (string, error) {
-	verb := getPatchVerb(vm.Status.VolumeRequests)
 	vmCopy := vm.DeepCopy()
 
 	// We only validate the list against other items in the list at this point.
@@ -946,20 +971,20 @@ func generateVMVolumeRequestPatch(vm *v1.VirtualMachine, volumeRequest *v1.Virtu
 		}
 	}
 
-	oldJson, err := json.Marshal(vm.Status.VolumeRequests)
-	if err != nil {
-		return "", err
-	}
-	newJson, err := json.Marshal(vmCopy.Status.VolumeRequests)
-	if err != nil {
-		return "", err
-	}
+	patchBytes, err := k6ttypes.GeneratePatchPayload(
+		k6ttypes.PatchOperation{
+			Op:    k6ttypes.PatchTestOp,
+			Path:  "/status/volumeRequests",
+			Value: vm.Status.VolumeRequests,
+		},
+		k6ttypes.PatchOperation{
+			Op:    getPatchVerb(vm.Status.VolumeRequests),
+			Path:  "/status/volumeRequests",
+			Value: vmCopy.Status.VolumeRequests,
+		},
+	)
 
-	test := fmt.Sprintf(`{ "op": "test", "path": "/status/volumeRequests", "value": %s}`, string(oldJson))
-	update := fmt.Sprintf(`{ "op": "%s", "path": "/status/volumeRequests", "value": %s}`, verb, string(newJson))
-	patch := fmt.Sprintf("[%s, %s]", test, update)
-
-	return patch, nil
+	return string(patchBytes), err
 }
 
 func getPatchVerb(requests []v1.VirtualMachineVolumeRequest) string {
@@ -1094,7 +1119,7 @@ func (app *SubresourceAPIApp) addVolumeRequestHandler(request *restful.Request, 
 		case io.EOF, nil:
 			break
 		default:
-			writeError(errors.NewBadRequest(fmt.Sprintf("Can not unmarshal Request body to struct, error: %s", err)), response)
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt, err)), response)
 			return
 		}
 	} else {
@@ -1156,7 +1181,7 @@ func (app *SubresourceAPIApp) removeVolumeRequestHandler(request *restful.Reques
 		case io.EOF, nil:
 			break
 		default:
-			writeError(errors.NewBadRequest(fmt.Sprintf("Can not unmarshal Request body to struct, error: %s",
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt,
 				err)), response)
 			return
 		}
@@ -1197,7 +1222,7 @@ func (app *SubresourceAPIApp) vmiVolumePatch(name, namespace string, volumeReque
 	}
 
 	if !vmi.IsRunning() {
-		return errors.NewConflict(v1.Resource("virtualmachineinstance"), name, fmt.Errorf("VMI is not running"))
+		return errors.NewConflict(v1.Resource("virtualmachineinstance"), name, fmt.Errorf(vmiNotRunning))
 	}
 
 	patch, err := generateVMIVolumeRequestPatch(vmi, volumeRequest)
@@ -1205,8 +1230,9 @@ func (app *SubresourceAPIApp) vmiVolumePatch(name, namespace string, volumeReque
 		return errors.NewConflict(v1.Resource("virtualmachineinstance"), name, err)
 	}
 
+	dryRunOption := app.getDryRunOption(volumeRequest)
 	log.Log.Object(vmi).V(4).Infof("Patching VMI: %s", patch)
-	if _, err := app.virtCli.VirtualMachineInstance(vmi.Namespace).Patch(vmi.Name, types.JSONPatchType, []byte(patch), &k8smetav1.PatchOptions{}); err != nil {
+	if _, err := app.virtCli.VirtualMachineInstance(vmi.Namespace).Patch(vmi.Name, types.JSONPatchType, []byte(patch), &k8smetav1.PatchOptions{DryRun: dryRunOption}); err != nil {
 		log.Log.Object(vmi).V(1).Errorf("unable to patch vmi: %v", err)
 		if errors.IsInvalid(err) {
 			if statErr, ok := err.(*errors.StatusError); ok {
@@ -1229,8 +1255,9 @@ func (app *SubresourceAPIApp) vmVolumePatchStatus(name, namespace string, volume
 		return errors.NewConflict(v1.Resource("virtualmachine"), name, err)
 	}
 
-	log.Log.Object(vm).V(4).Infof("Patching VM: %s", patch)
-	if err := app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(patch), &k8smetav1.PatchOptions{}); err != nil {
+	dryRunOption := app.getDryRunOption(volumeRequest)
+	log.Log.Object(vm).V(4).Infof(patchingVMFmt, patch)
+	if err := app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(patch), &k8smetav1.PatchOptions{DryRun: dryRunOption}); err != nil {
 		log.Log.Object(vm).V(1).Errorf("unable to patch vm status: %v", err)
 		if errors.IsInvalid(err) {
 			if statErr, ok := err.(*errors.StatusError); ok {
@@ -1240,6 +1267,16 @@ func (app *SubresourceAPIApp) vmVolumePatchStatus(name, namespace string, volume
 		return errors.NewInternalError(fmt.Errorf("unable to patch vm status: %v", err))
 	}
 	return nil
+}
+
+func (app *SubresourceAPIApp) getDryRunOption(volumeRequest *v1.VirtualMachineVolumeRequest) []string {
+	var dryRunOption []string
+	if options := volumeRequest.AddVolumeOptions; options != nil && options.DryRun != nil && options.DryRun[0] == k8smetav1.DryRunAll {
+		dryRunOption = volumeRequest.AddVolumeOptions.DryRun
+	} else if options := volumeRequest.RemoveVolumeOptions; options != nil && options.DryRun != nil && options.DryRun[0] == k8smetav1.DryRunAll {
+		dryRunOption = volumeRequest.RemoveVolumeOptions.DryRun
+	}
+	return dryRunOption
 }
 
 // VMAddVolumeRequestHandler handles the subresource for hot plugging a volume and disk.
@@ -1260,4 +1297,241 @@ func (app *SubresourceAPIApp) VMIAddVolumeRequestHandler(request *restful.Reques
 // VMIRemoveVolumeRequestHandler handles the subresource for hot plugging a volume and disk.
 func (app *SubresourceAPIApp) VMIRemoveVolumeRequestHandler(request *restful.Request, response *restful.Response) {
 	app.removeVolumeRequestHandler(request, response, true)
+}
+
+func getMemoryDumpPatchVerb(request *v1.VirtualMachineMemoryDumpRequest) string {
+	verb := "add"
+	if request != nil {
+		verb = "replace"
+	}
+	return verb
+}
+
+func addMemoryDumpRequest(vm, vmCopy *v1.VirtualMachine, memoryDumpReq *v1.VirtualMachineMemoryDumpRequest) error {
+	claimName := memoryDumpReq.ClaimName
+	if vm.Status.MemoryDumpRequest != nil {
+		if vm.Status.MemoryDumpRequest.Phase == v1.MemoryDumpDissociating {
+			return fmt.Errorf("can't dump memory for pvc [%s] a remove memory dump request is in progress", claimName)
+		}
+		if vm.Status.MemoryDumpRequest.Phase != v1.MemoryDumpCompleted && vm.Status.MemoryDumpRequest.Phase != v1.MemoryDumpFailed {
+			return fmt.Errorf("memory dump request for pvc [%s] already in progress", claimName)
+		}
+	}
+	vmCopy.Status.MemoryDumpRequest = memoryDumpReq
+	return nil
+}
+
+func removeMemoryDumpRequest(vm, vmCopy *v1.VirtualMachine, memoryDumpReq *v1.VirtualMachineMemoryDumpRequest) error {
+	if vm.Status.MemoryDumpRequest == nil {
+		return fmt.Errorf("can't remove memory dump association for vm %s, no association found", vm.Name)
+	}
+
+	claimName := vm.Status.MemoryDumpRequest.ClaimName
+	if vm.Status.MemoryDumpRequest.Remove {
+		return fmt.Errorf("memory dump remove request for pvc [%s] already exists", claimName)
+	}
+	memoryDumpReq.ClaimName = claimName
+	vmCopy.Status.MemoryDumpRequest = memoryDumpReq
+	return nil
+}
+
+func generateVMMemoryDumpRequestPatch(vm *v1.VirtualMachine, memoryDumpReq *v1.VirtualMachineMemoryDumpRequest, removeRequest bool) (string, error) {
+	verb := getMemoryDumpPatchVerb(vm.Status.MemoryDumpRequest)
+	vmCopy := vm.DeepCopy()
+
+	if !removeRequest {
+		if err := addMemoryDumpRequest(vm, vmCopy, memoryDumpReq); err != nil {
+			return "", err
+		}
+	} else {
+		if err := removeMemoryDumpRequest(vm, vmCopy, memoryDumpReq); err != nil {
+			return "", err
+		}
+	}
+
+	oldJson, err := json.Marshal(vm.Status.MemoryDumpRequest)
+	if err != nil {
+		return "", err
+	}
+	newJson, err := json.Marshal(vmCopy.Status.MemoryDumpRequest)
+	if err != nil {
+		return "", err
+	}
+
+	test := fmt.Sprintf(`{ "op": "test", "path": "/status/memoryDumpRequest", "value": %s}`, string(oldJson))
+	update := fmt.Sprintf(`{ "op": "%s", "path": "/status/memoryDumpRequest", "value": %s}`, verb, string(newJson))
+	patch := fmt.Sprintf("[%s, %s]", test, update)
+
+	return patch, nil
+}
+
+func (app *SubresourceAPIApp) fetchPersistentVolumeClaim(name string, namespace string) (*v12.PersistentVolumeClaim, *errors.StatusError) {
+	pvc, err := app.virtCli.CoreV1().PersistentVolumeClaims(namespace).Get(context.TODO(), name, k8smetav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, errors.NewNotFound(v1.Resource("persistentvolumeclaim"), name)
+		}
+		return nil, errors.NewInternalError(fmt.Errorf("unable to retrieve pvc [%s]: %v", name, err))
+	}
+	return pvc, nil
+}
+
+func (app *SubresourceAPIApp) fetchCDIConfig() (*cdiv1.CDIConfig, *errors.StatusError) {
+	cdiConfig, err := app.virtCli.CdiClient().CdiV1beta1().CDIConfigs().Get(context.Background(), storagetypes.ConfigName, k8smetav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errors.NewInternalError(fmt.Errorf("unable to retrieve cdi config: %v", err))
+	}
+	return cdiConfig, nil
+}
+
+func (app *SubresourceAPIApp) validateMemoryDumpClaim(vmi *v1.VirtualMachineInstance, claimName, namespace string) *errors.StatusError {
+	pvc, err := app.fetchPersistentVolumeClaim(claimName, namespace)
+	if err != nil {
+		return err
+	}
+	if storagetypes.IsPVCBlock(pvc.Spec.VolumeMode) {
+		return errors.NewConflict(v1.Resource("persistentvolumeclaim"), claimName, fmt.Errorf(pvcVolumeModeErr))
+	}
+
+	if storagetypes.IsReadOnlyAccessMode(pvc.Spec.AccessModes) {
+		return errors.NewConflict(v1.Resource("persistentvolumeclaim"), claimName, fmt.Errorf(pvcAccessModeErr))
+	}
+
+	pvcSize := pvc.Spec.Resources.Requests.Storage()
+	scaledPvcSize := resource.NewScaledQuantity(pvcSize.ScaledValue(resource.Kilo), resource.Kilo)
+
+	expectedMemoryDumpSize := kutil.CalcExpectedMemoryDumpSize(vmi)
+	cdiConfig, err := app.fetchCDIConfig()
+	if err != nil {
+		return err
+	}
+	var expectedPvcSize *resource.Quantity
+	var overheadErr error
+	if cdiConfig == nil {
+		log.Log.Object(vmi).V(3).Infof(storagetypes.FSOverheadMsg)
+		expectedPvcSize, overheadErr = storagetypes.GetSizeIncludingDefaultFSOverhead(expectedMemoryDumpSize)
+	} else {
+		expectedPvcSize, overheadErr = storagetypes.GetSizeIncludingFSOverhead(expectedMemoryDumpSize, pvc.Spec.StorageClassName, pvc.Spec.VolumeMode, cdiConfig)
+	}
+	if overheadErr != nil {
+		return errors.NewInternalError(overheadErr)
+	}
+	if scaledPvcSize.Cmp(*expectedPvcSize) < 0 {
+		return errors.NewConflict(v1.Resource("persistentvolumeclaim"), claimName, fmt.Errorf(pvcSizeErrFmt, scaledPvcSize.String(), expectedPvcSize.String()))
+	}
+
+	return nil
+}
+
+func (app *SubresourceAPIApp) validateMemoryDumpRequest(vm *v1.VirtualMachine, memoryDumpReq *v1.VirtualMachineMemoryDumpRequest) *errors.StatusError {
+	if memoryDumpReq.ClaimName == "" && vm.Status.MemoryDumpRequest == nil {
+		return errors.NewBadRequest("Memory dump requires claim name to be set")
+	} else if vm.Status.MemoryDumpRequest != nil && memoryDumpReq.ClaimName != "" {
+		if vm.Status.MemoryDumpRequest.ClaimName != memoryDumpReq.ClaimName {
+			return errors.NewConflict(v1.Resource("virtualmachine"), vm.Name, fmt.Errorf(memoryDumpNameConflictErr, memoryDumpReq.ClaimName, vm.Status.MemoryDumpRequest.ClaimName))
+		}
+	} else if vm.Status.MemoryDumpRequest != nil {
+		memoryDumpReq.ClaimName = vm.Status.MemoryDumpRequest.ClaimName
+	}
+
+	vmi, statErr := app.FetchVirtualMachineInstance(vm.Namespace, vm.Name)
+	if statErr != nil {
+		return statErr
+	}
+
+	if !vmi.IsRunning() {
+		return errors.NewConflict(v1.Resource("virtualmachineinstance"), vm.Name, fmt.Errorf(vmiNotRunning))
+	}
+
+	if statErr = app.validateMemoryDumpClaim(vmi, memoryDumpReq.ClaimName, vm.Namespace); statErr != nil {
+		return statErr
+	}
+
+	return nil
+}
+
+func (app *SubresourceAPIApp) vmMemoryDumpRequestPatchStatus(name, namespace string, memoryDumpReq *v1.VirtualMachineMemoryDumpRequest, removeRequest bool) *errors.StatusError {
+	vm, statErr := app.fetchVirtualMachine(name, namespace)
+	if statErr != nil {
+		return statErr
+	}
+
+	if !removeRequest {
+		statErr = app.validateMemoryDumpRequest(vm, memoryDumpReq)
+		if statErr != nil {
+			return statErr
+		}
+	}
+
+	patch, err := generateVMMemoryDumpRequestPatch(vm, memoryDumpReq, removeRequest)
+	if err != nil {
+		return errors.NewConflict(v1.Resource("virtualmachine"), name, err)
+	}
+
+	log.Log.Object(vm).V(4).Infof(patchingVMFmt, patch)
+	if err := app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(patch), &k8smetav1.PatchOptions{}); err != nil {
+		log.Log.Object(vm).V(1).Errorf("unable to patch vm status: %v", err)
+		if errors.IsInvalid(err) {
+			if statErr, ok := err.(*errors.StatusError); ok {
+				return statErr
+			}
+		}
+		return errors.NewInternalError(fmt.Errorf("unable to patch vm status: %v", err))
+	}
+	return nil
+}
+
+func (app *SubresourceAPIApp) MemoryDumpVMRequestHandler(request *restful.Request, response *restful.Response) {
+	name := request.PathParameter("name")
+	namespace := request.PathParameter("namespace")
+
+	if !app.clusterConfig.HotplugVolumesEnabled() {
+		writeError(errors.NewBadRequest("Unable to memory dump because HotplugVolumes feature gate is not enabled."), response)
+		return
+	}
+
+	memoryDumpReq := &v1.VirtualMachineMemoryDumpRequest{}
+	if request.Request.Body != nil {
+		defer request.Request.Body.Close()
+		err := yaml.NewYAMLOrJSONDecoder(request.Request.Body, 1024).Decode(memoryDumpReq)
+		switch err {
+		case io.EOF, nil:
+			break
+		default:
+			writeError(errors.NewBadRequest(fmt.Sprintf(unmarshalRequestErrFmt, err)), response)
+			return
+		}
+	} else {
+		writeError(errors.NewBadRequest("Request with no body"), response)
+		return
+	}
+
+	memoryDumpReq.Phase = v1.MemoryDumpAssociating
+	isRemoveRequest := false
+	if err := app.vmMemoryDumpRequestPatchStatus(name, namespace, memoryDumpReq, isRemoveRequest); err != nil {
+		writeError(err, response)
+		return
+	}
+
+	response.WriteHeader(http.StatusAccepted)
+}
+
+func (app *SubresourceAPIApp) RemoveMemoryDumpVMRequestHandler(request *restful.Request, response *restful.Response) {
+	name := request.PathParameter("name")
+	namespace := request.PathParameter("namespace")
+
+	removeReq := &v1.VirtualMachineMemoryDumpRequest{
+		Phase:  v1.MemoryDumpDissociating,
+		Remove: true,
+	}
+	isRemoveRequest := true
+	if err := app.vmMemoryDumpRequestPatchStatus(name, namespace, removeReq, isRemoveRequest); err != nil {
+		writeError(err, response)
+		return
+	}
+
+	response.WriteHeader(http.StatusAccepted)
 }

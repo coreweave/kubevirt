@@ -20,10 +20,10 @@
 package inotifyinformer
 
 import (
-	"io/ioutil"
 	"os"
+	"path/filepath"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
@@ -68,12 +68,12 @@ var _ = Describe("Inotify", func() {
 		BeforeEach(func() {
 			var err error
 			stopInformer = make(chan struct{})
-			tmpDir, err = ioutil.TempDir("", "kubevirt")
+			tmpDir, err = os.MkdirTemp("", "kubevirt")
 			Expect(err).ToNot(HaveOccurred())
 
 			// create two files
-			Expect(os.Create(tmpDir + "/" + "default_testvmi")).ToNot(BeNil())
-			Expect(os.Create(tmpDir + "/" + "default1_testvmi1")).ToNot(BeNil())
+			Expect(os.Create(filepath.Join(tmpDir, "default_testvmi"))).ToNot(BeNil())
+			Expect(os.Create(filepath.Join(tmpDir, "default1_testvmi1"))).ToNot(BeNil())
 
 			queue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 			informer = cache.NewSharedIndexInformer(
@@ -99,7 +99,7 @@ var _ = Describe("Inotify", func() {
 		It("should detect multiple creations and deletions", func() {
 			num := 5
 			key := "default2/test.vmi2"
-			fileName := tmpDir + "/" + "default2_test.vmi2"
+			fileName := filepath.Join(tmpDir, "default2_test.vmi2")
 
 			for i := 0; i < num; i++ {
 				Expect(os.Create(fileName)).ToNot(BeNil())
@@ -130,7 +130,7 @@ var _ = Describe("Inotify", func() {
 
 				// Adding files in wrong formats should have an impact
 				// TODO should we just ignore them?
-				Expect(os.Create(tmpDir + "/" + "test")).ToNot(BeNil())
+				Expect(os.Create(filepath.Join(tmpDir, "test"))).ToNot(BeNil())
 
 				// No event should be received
 				Consistently(i.ResultChan()).ShouldNot(Receive())

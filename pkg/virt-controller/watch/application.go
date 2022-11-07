@@ -28,14 +28,24 @@ import (
 	"runtime"
 	"time"
 
-	"kubevirt.io/kubevirt/pkg/flavor"
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
+
+	"kubevirt.io/kubevirt/pkg/monitoring/migration"
+	"kubevirt.io/kubevirt/pkg/monitoring/migrationstats"
+
+	clonev1alpha1 "kubevirt.io/api/clone/v1alpha1"
+
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/clone"
+
+	"kubevirt.io/kubevirt/pkg/instancetype"
 
 	"github.com/emicklei/go-restful"
-	vsv1beta1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
+	vsv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	flag "github.com/spf13/pflag"
 	k8sv1 "k8s.io/api/core/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	k8coresv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	clientrest "k8s.io/client-go/rest"
@@ -52,25 +62,30 @@ import (
 	"kubevirt.io/kubevirt/pkg/healthz"
 	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
 
+	exportv1 "kubevirt.io/api/export/v1alpha1"
+	poolv1 "kubevirt.io/api/pool/v1alpha1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	clientutil "kubevirt.io/client-go/util"
+
 	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/controller"
+	clusterutil "kubevirt.io/kubevirt/pkg/util/cluster"
 
 	"kubevirt.io/kubevirt/pkg/monitoring/perfscale"
 	vmiprom "kubevirt.io/kubevirt/pkg/monitoring/vmistats" // import for prometheus metrics
+	vmprom "kubevirt.io/kubevirt/pkg/monitoring/vmstats"
 	"kubevirt.io/kubevirt/pkg/service"
+	"kubevirt.io/kubevirt/pkg/storage/export/export"
+	"kubevirt.io/kubevirt/pkg/storage/snapshot"
 	"kubevirt.io/kubevirt/pkg/util"
-	"kubevirt.io/kubevirt/pkg/util/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-controller/leaderelectionconfig"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/disruptionbudget"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/evacuation"
-	"kubevirt.io/kubevirt/pkg/virt-controller/watch/snapshot"
 	workloadupdater "kubevirt.io/kubevirt/pkg/virt-controller/watch/workload-updater"
 )
 
@@ -80,6 +95,7 @@ const (
 	defaultHost = "0.0.0.0"
 
 	launcherImage       = "virt-launcher"
+	exporterImage       = "virt-exportserver"
 	launcherQemuTimeout = 240
 
 	imagePullSecret = ""
@@ -101,8 +117,8 @@ const (
 )
 
 var (
-	containerDiskDir = filepath.Join(util.VirtShareDir, "/container-disks")
-	hotplugDiskDir   = filepath.Join(util.VirtShareDir, "/hotplug-disks")
+	containerDiskDir = filepath.Join(util.VirtShareDir, "container-disks")
+	hotplugDiskDir   = filepath.Join(util.VirtShareDir, "hotplug-disks")
 
 	leaderGauge = prometheus.NewGauge(
 		prometheus.GaugeOpts{
@@ -138,6 +154,8 @@ type VirtControllerApp struct {
 	vmiInformer   cache.SharedIndexInformer
 	vmiRecorder   record.EventRecorder
 
+	namespaceStore cache.Store
+
 	kubeVirtInformer cache.SharedIndexInformer
 
 	clusterConfig *virtconfig.ClusterConfig
@@ -149,6 +167,9 @@ type VirtControllerApp struct {
 
 	rsController *VMIReplicaSet
 	rsInformer   cache.SharedIndexInformer
+
+	poolController *PoolController
+	poolInformer   cache.SharedIndexInformer
 
 	vmController *VMController
 	vmInformer   cache.SharedIndexInformer
@@ -164,22 +185,33 @@ type VirtControllerApp struct {
 
 	workloadUpdateController *workloadupdater.WorkloadUpdateController
 
-	snapshotController        *snapshot.VMSnapshotController
-	restoreController         *snapshot.VMRestoreController
-	vmSnapshotInformer        cache.SharedIndexInformer
-	vmSnapshotContentInformer cache.SharedIndexInformer
-	vmRestoreInformer         cache.SharedIndexInformer
-	storageClassInformer      cache.SharedIndexInformer
-	allPodInformer            cache.SharedIndexInformer
+	caExportConfigMapInformer    cache.SharedIndexInformer
+	exportRouteConfigMapInformer cache.SharedInformer
+	exportServiceInformer        cache.SharedIndexInformer
+	exportController             *export.VMExportController
+	snapshotController           *snapshot.VMSnapshotController
+	restoreController            *snapshot.VMRestoreController
+	vmExportInformer             cache.SharedIndexInformer
+	routeCache                   cache.Store
+	ingressCache                 cache.Store
+	unmanagedSecretInformer      cache.SharedIndexInformer
+	vmSnapshotInformer           cache.SharedIndexInformer
+	vmSnapshotContentInformer    cache.SharedIndexInformer
+	vmRestoreInformer            cache.SharedIndexInformer
+	storageClassInformer         cache.SharedIndexInformer
+	allPodInformer               cache.SharedIndexInformer
 
 	crdInformer cache.SharedIndexInformer
 
-	flavorInformer        cache.SharedIndexInformer
-	clusterFlavorInformer cache.SharedIndexInformer
+	migrationPolicyInformer cache.SharedIndexInformer
+
+	vmCloneInformer   cache.SharedIndexInformer
+	vmCloneController *clone.VMCloneController
 
 	LeaderElection leaderelectionconfig.Configuration
 
 	launcherImage              string
+	exporterImage              string
 	launcherQemuTimeout        int
 	imagePullSecret            string
 	virtShareDir               string
@@ -204,14 +236,17 @@ type VirtControllerApp struct {
 	nodeControllerThreads             int
 	vmiControllerThreads              int
 	rsControllerThreads               int
+	poolControllerThreads             int
 	vmControllerThreads               int
 	migrationControllerThreads        int
 	evacuationControllerThreads       int
 	disruptionBudgetControllerThreads int
 	launcherSubGid                    int64
+	exportControllerThreads           int
 	snapshotControllerThreads         int
 	restoreControllerThreads          int
 	snapshotControllerResyncPeriod    time.Duration
+	cloneControllerThreads            int
 
 	caConfigMapName          string
 	promCertFilePath         string
@@ -220,13 +255,18 @@ type VirtControllerApp struct {
 	nodeTopologyUpdatePeriod time.Duration
 	reloadableRateLimiter    *ratelimiter.ReloadableRateLimiter
 	leaderElector            *leaderelection.LeaderElector
+
+	onOpenshift bool
 }
 
 var _ service.Service = &VirtControllerApp{}
 
 func init() {
-	vsv1beta1.AddToScheme(scheme.Scheme)
-	snapshotv1.AddToScheme(scheme.Scheme)
+	utilruntime.Must(vsv1.AddToScheme(scheme.Scheme))
+	utilruntime.Must(snapshotv1.AddToScheme(scheme.Scheme))
+	utilruntime.Must(exportv1.AddToScheme(scheme.Scheme))
+	utilruntime.Must(poolv1.AddToScheme(scheme.Scheme))
+	utilruntime.Must(clonev1alpha1.AddToScheme(scheme.Scheme))
 
 	prometheus.MustRegister(leaderGauge)
 	prometheus.MustRegister(readyGauge)
@@ -277,12 +317,14 @@ func Execute() {
 
 	app.crdInformer = app.informerFactory.CRD()
 	app.kubeVirtInformer = app.informerFactory.KubeVirt()
-	app.informerFactory.Start(stopChan)
 
-	app.kubeVirtInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
+	if err := app.kubeVirtInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
 		apiHealthVersion.Clear()
 		cache.DefaultWatchErrorHandler(r, err)
-	})
+	}); err != nil {
+		golog.Fatalf("failed to set the watch error handler: %v", err)
+	}
+	app.informerFactory.Start(stopChan)
 
 	cache.WaitForCacheSync(stopChan, app.crdInformer.HasSynced, app.kubeVirtInformer.HasSynced)
 	app.clusterConfig = virtconfig.NewClusterConfig(app.crdInformer, app.kubeVirtInformer, app.kubevirtNamespace)
@@ -308,16 +350,17 @@ func Execute() {
 	app.vmiInformer = app.informerFactory.VMI()
 	app.kvPodInformer = app.informerFactory.KubeVirtPod()
 	app.nodeInformer = app.informerFactory.KubeVirtNode()
-
+	app.namespaceStore = app.informerFactory.Namespace().GetStore()
 	app.vmiCache = app.vmiInformer.GetStore()
 	app.vmiRecorder = app.newRecorder(k8sv1.NamespaceAll, "virtualmachine-controller")
 
 	app.rsInformer = app.informerFactory.VMIReplicaSet()
+	app.poolInformer = app.informerFactory.VMPool()
 
 	app.persistentVolumeClaimInformer = app.informerFactory.PersistentVolumeClaim()
 	app.persistentVolumeClaimCache = app.persistentVolumeClaimInformer.GetStore()
 
-	app.pdbInformer = app.informerFactory.K8SInformerFactory().Policy().V1beta1().PodDisruptionBudgets().Informer()
+	app.pdbInformer = app.informerFactory.K8SInformerFactory().Policy().V1().PodDisruptionBudgets().Informer()
 
 	app.vmInformer = app.informerFactory.VirtualMachine()
 
@@ -325,11 +368,16 @@ func Execute() {
 
 	app.controllerRevisionInformer = app.informerFactory.ControllerRevision()
 
+	app.vmExportInformer = app.informerFactory.VirtualMachineExport()
 	app.vmSnapshotInformer = app.informerFactory.VirtualMachineSnapshot()
 	app.vmSnapshotContentInformer = app.informerFactory.VirtualMachineSnapshotContent()
 	app.vmRestoreInformer = app.informerFactory.VirtualMachineRestore()
 	app.storageClassInformer = app.informerFactory.StorageClass()
+	app.caExportConfigMapInformer = app.informerFactory.KubeVirtExportCAConfigMap()
+	app.exportRouteConfigMapInformer = app.informerFactory.ExportRouteConfigMap()
+	app.unmanagedSecretInformer = app.informerFactory.UnmanagedSecrets()
 	app.allPodInformer = app.informerFactory.Pod()
+	app.exportServiceInformer = app.informerFactory.ExportService()
 
 	if app.hasCDI {
 		app.dataVolumeInformer = app.informerFactory.DataVolume()
@@ -346,17 +394,35 @@ func Execute() {
 		log.Log.Infof("CDI not detected, DataVolume integration disabled")
 	}
 
-	app.flavorInformer = app.informerFactory.VirtualMachineFlavor()
-	app.clusterFlavorInformer = app.informerFactory.VirtualMachineClusterFlavor()
+	onOpenShift, err := clusterutil.IsOnOpenShift(app.clientSet)
+	if err != nil {
+		golog.Fatalf("Error determining cluster type: %v", err)
+	}
+	if onOpenShift {
+		log.Log.Info("we are on openshift")
+		app.routeCache = app.informerFactory.OperatorRoute().GetStore()
+	} else {
+		log.Log.Info("we are on kubernetes")
+		app.routeCache = app.informerFactory.DummyOperatorRoute().GetStore()
+	}
+	app.ingressCache = app.informerFactory.Ingress().GetStore()
+	app.migrationPolicyInformer = app.informerFactory.MigrationPolicy()
+
+	app.vmCloneInformer = app.informerFactory.VirtualMachineClone()
+
+	app.onOpenshift = onOpenShift
 
 	app.initCommon()
 	app.initReplicaSet()
+	app.initPool()
 	app.initVirtualMachines()
 	app.initDisruptionBudgetController()
 	app.initEvacuationController()
 	app.initSnapshotController()
 	app.initRestoreController()
+	app.initExportController()
 	app.initWorkloadUpdaterController()
+	app.initCloneController()
 	go app.Run()
 
 	<-app.reInitChan
@@ -389,8 +455,11 @@ func (app *VirtControllerApp) shouldChangeRateLimiter() {
 // Update virt-controller log verbosity on relevant config changes
 func (vca *VirtControllerApp) shouldChangeLogVerbosity() {
 	verbosity := vca.clusterConfig.GetVirtControllerVerbosity(vca.host)
-	log.Log.SetVerbosityLevel(int(verbosity))
-	log.Log.V(2).Infof("set log verbosity to %d", verbosity)
+	if err := log.Log.SetVerbosityLevel(int(verbosity)); err != nil {
+		log.Log.Warningf("failed up update log verbosity to %d: %v", verbosity, err)
+	} else {
+		log.Log.V(2).Infof("set log verbosity to %d", verbosity)
+	}
 }
 
 func (vca *VirtControllerApp) Run() {
@@ -398,11 +467,11 @@ func (vca *VirtControllerApp) Run() {
 
 	promCertManager := bootstrap.NewFileCertificateManager(vca.promCertFilePath, vca.promKeyFilePath)
 	go promCertManager.Start()
-	promTLSConfig := webhooks.SetupPromTLS(promCertManager)
+	promTLSConfig := kvtls.SetupPromTLS(promCertManager, vca.clusterConfig)
 
 	go func() {
 		httpLogger := logger.With("service", "http")
-		httpLogger.Level(log.INFO).Log("action", "listening", "interface", vca.BindAddress, "port", vca.Port)
+		_ = httpLogger.Level(log.INFO).Log("action", "listening", "interface", vca.BindAddress, "port", vca.Port)
 		http.Handle("/metrics", promhttp.Handler())
 		server := http.Server{
 			Addr:      vca.Address(),
@@ -435,20 +504,46 @@ func (vca *VirtControllerApp) onStartedLeading() func(ctx context.Context) {
 			vca.vmControllerThreads, vca.migrationControllerThreads, vca.evacuationControllerThreads,
 			vca.disruptionBudgetControllerThreads)
 
-		vmiprom.SetupVMICollector(vca.vmiInformer)
+		vmiprom.SetupVMICollector(vca.vmiInformer, vca.clusterConfig)
+		vmprom.SetupVMCollector(vca.vmInformer)
 		perfscale.RegisterPerfScaleMetrics(vca.vmiInformer)
+		if vca.migrationInformer == nil {
+			vca.migrationInformer = vca.informerFactory.VirtualMachineInstanceMigration()
+		}
+		golog.Printf("\nvca.migrationInformer :%v\n", vca.migrationInformer)
+		migration.RegisterMigrationMetrics(vca.migrationInformer)
+		migrationstats.SetupMigrationsCollector(vca.migrationInformer)
 
 		go vca.evacuationController.Run(vca.evacuationControllerThreads, stop)
 		go vca.disruptionBudgetController.Run(vca.disruptionBudgetControllerThreads, stop)
 		go vca.nodeController.Run(vca.nodeControllerThreads, stop)
 		go vca.vmiController.Run(vca.vmiControllerThreads, stop)
 		go vca.rsController.Run(vca.rsControllerThreads, stop)
+		go vca.poolController.Run(vca.poolControllerThreads, stop)
 		go vca.vmController.Run(vca.vmControllerThreads, stop)
 		go vca.migrationController.Run(vca.migrationControllerThreads, stop)
-		go vca.snapshotController.Run(vca.snapshotControllerThreads, stop)
-		go vca.restoreController.Run(vca.restoreControllerThreads, stop)
+		go func() {
+			if err := vca.snapshotController.Run(vca.snapshotControllerThreads, stop); err != nil {
+				log.Log.Warningf("error running the snapshot controller: %v", err)
+			}
+		}()
+		go func() {
+			if err := vca.restoreController.Run(vca.restoreControllerThreads, stop); err != nil {
+				log.Log.Warningf("error running the restore controller: %v", err)
+			}
+		}()
+		go func() {
+			if err := vca.exportController.Run(vca.exportControllerThreads, stop); err != nil {
+				log.Log.Warningf("error running the export controller: %v", err)
+			}
+		}()
 		go vca.workloadUpdateController.Run(stop)
 		go vca.nodeTopologyUpdater.Run(vca.nodeTopologyUpdatePeriod, stop)
+		go func() {
+			if err := vca.vmCloneController.Run(vca.cloneControllerThreads, stop); err != nil {
+				log.Log.Warningf("error running the clone controller: %v", err)
+			}
+		}()
 
 		cache.WaitForCacheSync(stop, vca.persistentVolumeClaimInformer.HasSynced)
 		close(vca.readyChan)
@@ -470,7 +565,9 @@ func (vca *VirtControllerApp) initCommon() {
 		golog.Fatal(err)
 	}
 
-	containerdisk.SetLocalDirectory(vca.ephemeralDiskDir + "/container-disk-data")
+	if err := containerdisk.SetLocalDirectory(filepath.Join(vca.ephemeralDiskDir, "container-disk-data")); err != nil {
+		log.Log.Warningf("failed to create ephemeral disk dir: %v", err)
+	}
 	vca.templateService = services.NewTemplateService(vca.launcherImage,
 		vca.launcherQemuTimeout,
 		vca.virtShareDir,
@@ -483,6 +580,7 @@ func (vca *VirtControllerApp) initCommon() {
 		virtClient,
 		vca.clusterConfig,
 		vca.launcherSubGid,
+		vca.exporterImage,
 	)
 
 	topologyHinter := topology.NewTopologyHinter(vca.nodeInformer.GetStore(), vca.vmiInformer.GetStore(), runtime.GOARCH, vca.clusterConfig)
@@ -499,6 +597,8 @@ func (vca *VirtControllerApp) initCommon() {
 		vca.cdiConfigInformer,
 		vca.clusterConfig,
 		topologyHinter,
+		vca.namespaceStore,
+		vca.onOpenshift,
 	)
 
 	recorder := vca.newRecorder(k8sv1.NamespaceAll, "node-controller")
@@ -511,9 +611,12 @@ func (vca *VirtControllerApp) initCommon() {
 		vca.nodeInformer,
 		vca.persistentVolumeClaimInformer,
 		vca.pdbInformer,
+		vca.migrationPolicyInformer,
 		vca.vmiRecorder,
 		vca.clientSet,
 		vca.clusterConfig,
+		vca.namespaceStore,
+		vca.onOpenshift,
 	)
 
 	vca.nodeTopologyUpdater = topology.NewNodeTopologyUpdater(vca.clientSet, topologyHinter, vca.nodeInformer)
@@ -522,6 +625,17 @@ func (vca *VirtControllerApp) initCommon() {
 func (vca *VirtControllerApp) initReplicaSet() {
 	recorder := vca.newRecorder(k8sv1.NamespaceAll, "virtualmachinereplicaset-controller")
 	vca.rsController = NewVMIReplicaSet(vca.vmiInformer, vca.rsInformer, recorder, vca.clientSet, controller.BurstReplicas)
+}
+
+func (vca *VirtControllerApp) initPool() {
+	recorder := vca.newRecorder(k8sv1.NamespaceAll, "virtualmachinepool-controller")
+	vca.poolController = NewPoolController(vca.clientSet,
+		vca.vmiInformer,
+		vca.vmInformer,
+		vca.poolInformer,
+		vca.controllerRevisionInformer,
+		recorder,
+		controller.BurstReplicas)
 }
 
 func (vca *VirtControllerApp) initVirtualMachines() {
@@ -533,9 +647,10 @@ func (vca *VirtControllerApp) initVirtualMachines() {
 		vca.dataVolumeInformer,
 		vca.persistentVolumeClaimInformer,
 		vca.controllerRevisionInformer,
-		flavor.NewMethods(vca.flavorInformer.GetStore(), vca.clusterFlavorInformer.GetStore()),
+		instancetype.NewMethods(vca.clientSet),
 		recorder,
-		vca.clientSet)
+		vca.clientSet,
+		vca.clusterConfig)
 }
 
 func (vca *VirtControllerApp) initDisruptionBudgetController() {
@@ -547,6 +662,7 @@ func (vca *VirtControllerApp) initDisruptionBudgetController() {
 		vca.migrationInformer,
 		recorder,
 		vca.clientSet,
+		vca.clusterConfig,
 	)
 
 }
@@ -609,9 +725,45 @@ func (vca *VirtControllerApp) initRestoreController() {
 		DataVolumeInformer:        vca.dataVolumeInformer,
 		PVCInformer:               vca.persistentVolumeClaimInformer,
 		StorageClassInformer:      vca.storageClassInformer,
+		VolumeSnapshotProvider:    vca.snapshotController,
 		Recorder:                  recorder,
 	}
 	vca.restoreController.Init()
+}
+
+func (vca *VirtControllerApp) initExportController() {
+	recorder := vca.newRecorder(k8sv1.NamespaceAll, "export-controller")
+	vca.exportController = &export.VMExportController{
+		TemplateService:           vca.templateService,
+		Client:                    vca.clientSet,
+		VMExportInformer:          vca.vmExportInformer,
+		PVCInformer:               vca.persistentVolumeClaimInformer,
+		PodInformer:               vca.allPodInformer,
+		DataVolumeInformer:        vca.dataVolumeInformer,
+		ServiceInformer:           vca.exportServiceInformer,
+		Recorder:                  recorder,
+		ConfigMapInformer:         vca.caExportConfigMapInformer,
+		IngressCache:              vca.ingressCache,
+		RouteCache:                vca.routeCache,
+		KubevirtNamespace:         vca.kubevirtNamespace,
+		RouteConfigMapInformer:    vca.exportRouteConfigMapInformer,
+		SecretInformer:            vca.unmanagedSecretInformer,
+		VolumeSnapshotProvider:    vca.snapshotController,
+		VMSnapshotInformer:        vca.vmSnapshotInformer,
+		VMSnapshotContentInformer: vca.vmSnapshotContentInformer,
+		VMInformer:                vca.vmInformer,
+		VMIInformer:               vca.vmiInformer,
+		CRDInformer:               vca.crdInformer,
+		KubeVirtInformer:          vca.kubeVirtInformer,
+	}
+	vca.exportController.Init()
+}
+
+func (vca *VirtControllerApp) initCloneController() {
+	recorder := vca.newRecorder(k8sv1.NamespaceAll, "clone-controller")
+	vca.vmCloneController = clone.NewVmCloneController(
+		vca.clientSet, vca.vmCloneInformer, vca.vmSnapshotInformer, vca.vmRestoreInformer, vca.vmInformer, recorder,
+	)
 }
 
 func (vca *VirtControllerApp) leaderProbe(_ *restful.Request, response *restful.Response) {
@@ -621,13 +773,17 @@ func (vca *VirtControllerApp) leaderProbe(_ *restful.Request, response *restful.
 	case _, opened := <-vca.readyChan:
 		if !opened {
 			res["apiserver"] = map[string]interface{}{"leader": "true"}
-			response.WriteHeaderAndJson(http.StatusOK, res, restful.MIME_JSON)
+			if err := response.WriteHeaderAndJson(http.StatusOK, res, restful.MIME_JSON); err != nil {
+				log.Log.Warningf("failed to return 200 OK reply: %v", err)
+			}
 			return
 		}
 	default:
 	}
 	res["apiserver"] = map[string]interface{}{"leader": "false"}
-	response.WriteHeaderAndJson(http.StatusOK, res, restful.MIME_JSON)
+	if err := response.WriteHeaderAndJson(http.StatusOK, res, restful.MIME_JSON); err != nil {
+		log.Log.Warningf("failed to return 200 OK reply: %v", err)
+	}
 }
 
 func (vca *VirtControllerApp) AddFlags() {
@@ -642,6 +798,9 @@ func (vca *VirtControllerApp) AddFlags() {
 
 	flag.StringVar(&vca.launcherImage, "launcher-image", launcherImage,
 		"Shim container for containerized VMIs")
+
+	flag.StringVar(&vca.exporterImage, "exporter-image", exporterImage,
+		"Container for exporting VMs and VM images")
 
 	flag.IntVar(&vca.launcherQemuTimeout, "launcher-qemu-timeout", launcherQemuTimeout,
 		"Amount of time to wait for qemu")
@@ -674,6 +833,9 @@ func (vca *VirtControllerApp) AddFlags() {
 	flag.IntVar(&vca.rsControllerThreads, "rs-controller-threads", defaultControllerThreads,
 		"Number of goroutines to run for replicaset controller")
 
+	flag.IntVar(&vca.poolControllerThreads, "pool-controller-threads", defaultControllerThreads,
+		"Number of goroutines to run for pool controller")
+
 	flag.IntVar(&vca.vmControllerThreads, "vm-controller-threads", defaultControllerThreads,
 		"Number of goroutines to run for vm controller")
 
@@ -695,6 +857,9 @@ func (vca *VirtControllerApp) AddFlags() {
 	flag.IntVar(&vca.restoreControllerThreads, "restore-controller-threads", defaultControllerThreads,
 		"Number of goroutines to run for restore controller")
 
+	flag.IntVar(&vca.exportControllerThreads, "export-controller-threads", defaultControllerThreads,
+		"Number of goroutines to run for virtual machine export controller")
+
 	flag.DurationVar(&vca.snapshotControllerResyncPeriod, "snapshot-controller-resync-period", defaultSnapshotControllerResyncPeriod,
 		"Number of goroutines to run for snapshot controller")
 
@@ -706,6 +871,9 @@ func (vca *VirtControllerApp) AddFlags() {
 
 	flag.StringVar(&vca.promKeyFilePath, "prom-key-file", defaultPromKeyFilePath,
 		"Private key for the client certificate used to prove the identity of the virt-controller when it must call out Promethus during a request")
+
+	flag.IntVar(&vca.cloneControllerThreads, "clone-controller-threads", defaultControllerThreads,
+		"Number of goroutines to run for clone controller")
 }
 
 func (vca *VirtControllerApp) setupLeaderElector() (err error) {

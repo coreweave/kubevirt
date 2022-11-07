@@ -25,11 +25,12 @@ import (
 	"io"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/util"
 )
@@ -44,8 +45,6 @@ var _ = Describe("[sig-compute]PortForward", func() {
 	)
 
 	BeforeEach(func() {
-		tests.BeforeTestCleanup()
-
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
 
@@ -82,7 +81,7 @@ var _ = Describe("[sig-compute]PortForward", func() {
 				Out: &out,
 			})
 			if err != nil {
-				fmt.Fprintln(GinkgoWriter, err)
+				_, _ = fmt.Fprintln(GinkgoWriter, err)
 			}
 			close(streamClosed)
 		}()

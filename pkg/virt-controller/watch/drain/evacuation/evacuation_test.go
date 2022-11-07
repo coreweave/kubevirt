@@ -17,10 +17,11 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/evacuation"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -94,7 +95,7 @@ var _ = Describe("Evacuation", func() {
 		virtClient.EXPECT().VirtualMachineInstanceMigration(v12.NamespaceDefault).Return(migrationInterface).AnyTimes()
 		kubeClient = fake.NewSimpleClientset()
 		virtClient.EXPECT().CoreV1().Return(kubeClient.CoreV1()).AnyTimes()
-		virtClient.EXPECT().PolicyV1beta1().Return(kubeClient.PolicyV1beta1()).AnyTimes()
+		virtClient.EXPECT().PolicyV1().Return(kubeClient.PolicyV1()).AnyTimes()
 
 		// Make sure that all unexpected calls to kubeClient will fail
 		kubeClient.Fake.PrependReactor("*", "*", func(action testing.Action) (handled bool, obj runtime.Object, err error) {
@@ -131,7 +132,7 @@ var _ = Describe("Evacuation", func() {
 			addNode(node)
 			addNode(node1)
 			vmi := newVirtualMachine("testvm", node1.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmiFeeder.Add(vmi)
 
 			controller.Execute()
@@ -148,10 +149,10 @@ var _ = Describe("Evacuation", func() {
 			addNode(node1)
 
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmiFeeder.Add(vmi)
 
-			migrationInterface.EXPECT().Create(gomock.Any()).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
+			migrationInterface.EXPECT().Create(gomock.Any(), &v13.CreateOptions{}).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
 
 			controller.Execute()
 			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
@@ -165,12 +166,12 @@ var _ = Describe("Evacuation", func() {
 			addNode(node1)
 
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{{Type: v1.VirtualMachineInstanceIsMigratable, Status: v12.ConditionFalse}}
 			vmiFeeder.Add(vmi)
 
 			vmi1 := newVirtualMachine("testvm1", node.Name)
-			vmi1.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi1.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi1.Status.Conditions = nil
 			vmiFeeder.Add(vmi1)
 
@@ -187,9 +188,9 @@ var _ = Describe("Evacuation", func() {
 			addNode(node)
 
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi1 := newVirtualMachine("testvm1", node.Name)
-			vmi1.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi1.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmiFeeder.Add(vmi)
 			vmiFeeder.Add(vmi1)
 
@@ -209,9 +210,9 @@ var _ = Describe("Evacuation", func() {
 			addNode(node)
 
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi1 := newVirtualMachine("testvm1", node.Name)
-			vmi1.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi1.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmiFeeder.Add(vmi)
 			vmiFeeder.Add(vmi1)
 			migration := newMigration("mig1", vmi.Name, v1.MigrationRunning)
@@ -227,7 +228,7 @@ var _ = Describe("Evacuation", func() {
 			migration.Status.Phase = v1.MigrationSucceeded
 			migrationFeeder.Modify(migration)
 
-			migrationInterface.EXPECT().Create(gomock.Any()).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
+			migrationInterface.EXPECT().Create(gomock.Any(), &v13.CreateOptions{}).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
 			controller.Execute()
 			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
 		})
@@ -239,10 +240,10 @@ var _ = Describe("Evacuation", func() {
 			node := newNode("foo")
 			addNode(node)
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi.Status.EvacuationNodeName = node.Name
 			vmiFeeder.Add(vmi)
-			migrationInterface.EXPECT().Create(gomock.Any()).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
+			migrationInterface.EXPECT().Create(gomock.Any(), &v13.CreateOptions{}).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
 			controller.Execute()
 			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
 		})
@@ -251,7 +252,7 @@ var _ = Describe("Evacuation", func() {
 			node := newNode("foo")
 			addNode(node)
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{
 				{
 					Type:   v1.VirtualMachineInstanceIsMigratable,
@@ -274,7 +275,7 @@ var _ = Describe("Evacuation", func() {
 			node := newNode("foo")
 			addNode(node)
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{
 				{
 					Type:   v1.VirtualMachineInstanceIsMigratable,
@@ -301,12 +302,12 @@ var _ = Describe("Evacuation", func() {
 					Status: v12.ConditionTrue,
 				},
 			}
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi.Status.EvacuationNodeName = node.Name
 			vmiFeeder.Add(vmi)
 
 			vmi1 := newVirtualMachine("testvm1", node.Name)
-			vmi1.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi1.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi1.Status.Conditions = []v1.VirtualMachineInstanceCondition{
 				{
 					Type:   v1.VirtualMachineInstanceIsMigratable,
@@ -328,7 +329,7 @@ var _ = Describe("Evacuation", func() {
 			migration.Status.Phase = v1.MigrationSucceeded
 			migrationFeeder.Modify(migration)
 
-			migrationInterface.EXPECT().Create(gomock.Any()).
+			migrationInterface.EXPECT().Create(gomock.Any(), &v13.CreateOptions{}).
 				Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
 			controller.Execute()
 			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
@@ -344,7 +345,7 @@ var _ = Describe("Evacuation", func() {
 					Status: v12.ConditionTrue,
 				},
 			}
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 			vmi.Status.EvacuationNodeName = node.Name
 			vmiFeeder.Add(vmi)
 
@@ -364,7 +365,7 @@ var _ = Describe("Evacuation", func() {
 			addNode(node1)
 
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 
 			podSource.Add(newPod(vmi, "runningPod", v12.PodRunning, true))
 			podSource.Add(newPod(vmi, "succededPod", v12.PodSucceeded, true))
@@ -377,7 +378,7 @@ var _ = Describe("Evacuation", func() {
 
 			vmiFeeder.Add(vmi)
 
-			migrationInterface.EXPECT().Create(gomock.Any()).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
+			migrationInterface.EXPECT().Create(gomock.Any(), &v13.CreateOptions{}).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
 
 			controller.Execute()
 			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
@@ -391,7 +392,7 @@ var _ = Describe("Evacuation", func() {
 			addNode(node1)
 
 			vmi := newVirtualMachine("testvm", node.Name)
-			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
 
 			podSource.Add(newPod(vmi, "runningPod", v12.PodRunning, true))
 			podSource.Add(newPod(vmi, "pendingPod", v12.PodPending, true))
@@ -404,13 +405,52 @@ var _ = Describe("Evacuation", func() {
 
 			controller.Execute()
 		})
+
+		It("should migrate the VMI if EvictionStrategy is set in the cluster config", func() {
+			config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+				EvictionStrategy: newEvictionStrategyLiveMigrate(),
+			})
+			controller = evacuation.NewEvacuationController(vmiInformer, migrationInformer, nodeInformer, podInformer, recorder, virtClient, config)
+
+			node := newNode("testnode")
+			node1 := newNode("anothernode")
+			node.Spec.Taints = append(node.Spec.Taints, *newTaint())
+			addNode(node)
+			addNode(node1)
+
+			vmi := newVirtualMachine("testvm", node.Name)
+			vmiFeeder.Add(vmi)
+
+			migrationInterface.EXPECT().Create(gomock.Any(), &v13.CreateOptions{}).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
+
+			controller.Execute()
+			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
+		})
+
+		It("should do nothing if EvictionStrategy is set in the cluster config but VMI opted-out", func() {
+			config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+				EvictionStrategy: newEvictionStrategyLiveMigrate(),
+			})
+			controller = evacuation.NewEvacuationController(vmiInformer, migrationInformer, nodeInformer, podInformer, recorder, virtClient, config)
+
+			node := newNode("testnode")
+			node1 := newNode("anothernode")
+			node.Spec.Taints = append(node.Spec.Taints, *newTaint())
+			addNode(node)
+			addNode(node1)
+
+			vmi := newVirtualMachine("testvm", node.Name)
+			vmi.Spec.EvictionStrategy = newEvictionStrategyNone()
+			vmiFeeder.Add(vmi)
+
+			controller.Execute()
+		})
 	})
 
 	AfterEach(func() {
 		close(stop)
 		// Ensure that we add checks for expected events to every test
 		Expect(recorder.Events).To(BeEmpty())
-		ctrl.Finish()
 	})
 })
 
@@ -468,8 +508,13 @@ func newMigration(name string, vmi string, phase v1.VirtualMachineInstanceMigrat
 	return migration
 }
 
-func newEvictionStrategy() *v1.EvictionStrategy {
+func newEvictionStrategyLiveMigrate() *v1.EvictionStrategy {
 	strategy := v1.EvictionStrategyLiveMigrate
+	return &strategy
+}
+
+func newEvictionStrategyNone() *v1.EvictionStrategy {
+	strategy := v1.EvictionStrategyNone
 	return &strategy
 }
 

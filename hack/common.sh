@@ -1,5 +1,37 @@
 #!/usr/bin/env bash
 
+export KUBEVIRTCI_PODMAN_SOCKET=${KUBEVIRTCI_PODMAN_SOCKET:-"/run/podman/podman.sock"}
+
+detect_podman() {
+    if curl --unix-socket "${KUBEVIRTCI_PODMAN_SOCKET}" http://d/v3.0.0/libpod/info >/dev/null 2>&1; then
+        echo "podman --remote --url=unix://${KUBEVIRTCI_PODMAN_SOCKET}"
+    fi
+}
+
+determine_cri_bin() {
+    if [ "${KUBEVIRT_CRI}" = "podman" ]; then
+        detect_podman
+    elif [ "${KUBEVIRT_CRI}" = "docker" ]; then
+        echo docker
+    else
+        local podman=$(detect_podman)
+        if [ -n "$podman" ]; then
+            echo "$podman"
+        elif docker ps >/dev/null 2>&1; then
+            echo docker
+        else
+            echo ""
+        fi
+    fi
+}
+
+fail_if_cri_bin_missing() {
+    if [ -z "${KUBEVIRT_CRI}" ]; then
+        echo >&2 "no working container runtime found. Neither docker nor podman seems to work."
+        exit 1
+    fi
+}
+
 if [ -f cluster-up/hack/common.sh ]; then
     source cluster-up/hack/common.sh
 fi
@@ -25,6 +57,8 @@ ARCHITECTURE="${BUILD_ARCH:-$(uname -m)}"
 HOST_ARCHITECTURE="$(uname -m)"
 KUBEVIRT_NO_BAZEL=${KUBEVIRT_NO_BAZEL:-false}
 OPERATOR_MANIFEST_PATH=$MANIFESTS_OUT_DIR/release/kubevirt-operator.yaml
+TESTING_MANIFEST_PATH=$MANIFESTS_OUT_DIR/testing
+KUBEVIRT_CRI="$(determine_cri_bin)"
 
 function build_func_tests() {
     mkdir -p "${TESTS_OUT_DIR}/"
@@ -39,7 +73,7 @@ function build_func_tests_image() {
         ${TESTS_OUT_DIR}/
     rsync -ar ${KUBEVIRT_DIR}/manifests/ ${TESTS_OUT_DIR}/manifests
     cd ${TESTS_OUT_DIR}
-    docker build \
+    ${KUBEVIRT_CRI} build \
         -t ${docker_prefix}/${bin_name}:${docker_tag} \
         --label ${job_prefix} \
         --label ${bin_name} .
@@ -48,6 +82,14 @@ function build_func_tests_image() {
 # Use this environment variable to set a custom pkgdir path
 # Useful for cross-compilation where the default -pkdir for cross-builds may not be writable
 #KUBEVIRT_GO_BASE_PKGDIR="${GOPATH}/crossbuild-cache-root/"
+
+# Use this environment variable to specify additional tags for the go build in hack/build-go.sh.
+# To specify tags in the bazel build modify/overwrite the build target in .bazelrc instead.
+if [ -z "$KUBEVIRT_GO_BUILD_TAGS" ]; then
+    KUBEVIRT_GO_BUILD_TAGS="selinux"
+else
+    KUBEVIRT_GO_BUILD_TAGS="selinux,${KUBEVIRT_GO_BUILD_TAGS}"
+fi
 
 # Populate an environment variable with the version info needed.
 # It should be used for everything which needs a version when building (not generating)

@@ -28,21 +28,22 @@ package isolation
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/containernetworking/plugins/pkg/ns"
+	"kubevirt.io/kubevirt/pkg/unsafepath"
+
 	mount "github.com/moby/sys/mountinfo"
 
+	"kubevirt.io/kubevirt/pkg/safepath"
+
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/util"
 )
 
 // IsolationResult is the result of a successful PodIsolationDetector.Detect
 type IsolationResult interface {
-	// cgroup slice
-	Slice() string
 	// process ID
 	Pid() int
 	// parent process ID
@@ -50,73 +51,61 @@ type IsolationResult interface {
 	// full path to the process namespace
 	PIDNamespace() string
 	// full path to the process root mount
-	MountRoot() string
+	MountRoot() (*safepath.Path, error)
 	// full path to the mount namespace
 	MountNamespace() string
-	// full path to the network namespace
-	NetNamespace() string
-	// execute a function in the process network namespace
-	DoNetNS(func() error) error
 	// mounts for the process
 	Mounts(mount.FilterFunc) ([]*mount.Info, error)
 }
 
 type RealIsolationResult struct {
-	pid        int
-	ppid       int
-	slice      string
-	controller []string
+	pid  int
+	ppid int
 }
 
-func NewIsolationResult(pid, ppid int, slice string, controller []string) IsolationResult {
-	return &RealIsolationResult{pid: pid, ppid: ppid, slice: slice, controller: controller}
-}
-
-func (r *RealIsolationResult) DoNetNS(f func() error) error {
-	netns, err := ns.GetNS(r.NetNamespace())
-	if err != nil {
-		return fmt.Errorf("failed to get launcher pod network namespace: %v", err)
-	}
-	return netns.Do(func(_ ns.NetNS) error {
-		return f()
-	})
+func NewIsolationResult(pid, ppid int) IsolationResult {
+	return &RealIsolationResult{pid: pid, ppid: ppid}
 }
 
 func (r *RealIsolationResult) PIDNamespace() string {
 	return fmt.Sprintf("/proc/%d/ns/pid", r.pid)
 }
 
-func (r *RealIsolationResult) Slice() string {
-	return r.slice
-}
-
 func (r *RealIsolationResult) MountNamespace() string {
 	return fmt.Sprintf("/proc/%d/ns/mnt", r.pid)
 }
 
-// IsMounted checks if the given path is a mount point or not. Works with symlinks.
-func (r *RealIsolationResult) IsMounted(mountPoint string) (isMounted bool, err error) {
-	mountPoint, err = filepath.Abs(mountPoint)
+// IsMounted checks if the given path is a mount point or not.
+func IsMounted(mountPoint *safepath.Path) (isMounted bool, err error) {
+	// Ensure that the path is still a valid absolute path without symlinks
+	f, err := safepath.OpenAtNoFollow(mountPoint)
 	if err != nil {
-		return false, fmt.Errorf("failed to resolve %v to an absolute path: %v", mountPoint, err)
+		// treat ErrNotExist as error too
+		// since the inherent property of a safepath.Path is that the path must
+		// have existed at the point of object creation
+		return false, err
 	}
-	mountPoint, err = filepath.EvalSymlinks(mountPoint)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("could not resolve symlinks in path %v: %v", mountPoint, err)
+	defer f.Close()
+	if mountPoint.IsRoot() {
+		// mount.Mounted has purely string matching based special logic on how to treat "/".
+		// Emulating this for safepath here without ever having to call an unsafe method on our
+		// safepath.
+		return true, nil
+	} else {
+		// TODO: Unsafe full path is required, and not a fd, since otherwise mount table lookups and such would not work.
+		return mount.Mounted(unsafepath.UnsafeAbsolute(mountPoint.Raw()))
 	}
-	return mount.Mounted(mountPoint)
 }
 
 // AreMounted checks if given paths are mounted by calling IsMounted.
 // If error occurs, the first error is returned.
-func (r *RealIsolationResult) AreMounted(mountPoints ...string) (isMounted bool, err error) {
+func (r *RealIsolationResult) AreMounted(mountPoints ...*safepath.Path) (isMounted bool, err error) {
 	for _, mountPoint := range mountPoints {
-		isMounted, err = r.IsMounted(mountPoint)
-		if !isMounted || err != nil {
-			return
+		if mountPoint != nil {
+			isMounted, err = IsMounted(mountPoint)
+			if !isMounted || err != nil {
+				return
+			}
 		}
 	}
 
@@ -124,23 +113,27 @@ func (r *RealIsolationResult) AreMounted(mountPoints ...string) (isMounted bool,
 }
 
 // IsBlockDevice checks if the given path is a block device or not.
-func (r *RealIsolationResult) IsBlockDevice(path string) (bool, error) {
-	fileInfo, err := os.Stat(path)
+func IsBlockDevice(path *safepath.Path) (bool, error) {
+	fileInfo, err := safepath.StatAtNoFollow(path)
 	if err != nil {
 		return false, fmt.Errorf("error checking for block device: %v", err)
 	}
 	if fileInfo.IsDir() || (fileInfo.Mode()&os.ModeDevice) == 0 {
-		return false, fmt.Errorf("found %v, but it's not a block device", path)
+		return false, nil
 	}
 	return true, nil
 }
 
-func (r *RealIsolationResult) NetNamespace() string {
-	return fmt.Sprintf("/proc/%d/ns/net", r.pid)
+func (r *RealIsolationResult) MountRoot() (*safepath.Path, error) {
+	return safepath.JoinAndResolveWithRelativeRoot(fmt.Sprintf("/proc/%d/root", r.pid))
 }
 
-func (r *RealIsolationResult) MountRoot() string {
-	return fmt.Sprintf("/proc/%d/root", r.pid)
+func (r *RealIsolationResult) MountRootRelative(relativePath string) (*safepath.Path, error) {
+	mountRoot, err := r.MountRoot()
+	if err != nil {
+		return nil, err
+	}
+	return mountRoot.AppendAndResolveWithRelativeRoot(relativePath)
 }
 
 func (r *RealIsolationResult) Pid() int {
@@ -149,10 +142,6 @@ func (r *RealIsolationResult) Pid() int {
 
 func (r *RealIsolationResult) PPid() int {
 	return r.ppid
-}
-
-func (r *RealIsolationResult) Controller() []string {
-	return r.controller
 }
 
 func NodeIsolationResult() *RealIsolationResult {
@@ -171,16 +160,20 @@ func (r *RealIsolationResult) Mounts(filter mount.FilterFunc) ([]*mount.Info, er
 	return mount.GetMountsFromReader(in, filter)
 }
 
-// MountInfoRoot returns the mount information for the root mount point
-func MountInfoRoot(r IsolationResult) (mountInfo *mount.Info, err error) {
-	mounts, err := r.Mounts(mount.SingleEntryFilter("/"))
+func mountInfoFor(r IsolationResult, mountPoint string) (mountinfo *mount.Info, err error) {
+	mounts, err := r.Mounts(mount.SingleEntryFilter(mountPoint))
 	if err != nil {
 		return nil, fmt.Errorf("failed to process mountinfo for pid %d: %v", r.Pid(), err)
 	}
 	if len(mounts) <= 0 {
-		return nil, fmt.Errorf("no root mount point entry found for pid %d", r.Pid())
+		return nil, fmt.Errorf("no '%s' mount point entry found for pid %d", mountPoint, r.Pid())
 	}
 	return mounts[0], nil
+}
+
+// MountInfoRoot returns the mount information for the root mount point
+func MountInfoRoot(r IsolationResult) (mountinfo *mount.Info, err error) {
+	return mountInfoFor(r, "/")
 }
 
 // parentMountInfoFor takes the mountInfo record of a container (child) and
@@ -206,16 +199,37 @@ func parentMountInfoFor(parent IsolationResult, mountInfo *mount.Info) (*mount.I
 	return mounts[0], nil
 }
 
+func ParentPathForMount(parent IsolationResult, child IsolationResult, mountPoint string) (*safepath.Path, error) {
+	childMountInfo, err := mountInfoFor(child, mountPoint)
+	if err != nil {
+		return nil, err
+	}
+	parentMountInfo, err := parentMountInfoFor(parent, childMountInfo)
+	if err != nil {
+		return nil, err
+	}
+	parentMountRoot, err := parent.MountRoot()
+	if err != nil {
+		return nil, err
+	}
+	path := parentMountRoot
+	path, err = path.AppendAndResolveWithRelativeRoot(parentMountInfo.Mountpoint)
+	if err != nil {
+		return nil, err
+	}
+	return path.AppendAndResolveWithRelativeRoot(strings.TrimPrefix(childMountInfo.Root, parentMountInfo.Root))
+}
+
 // ParentPathForRootMount takes a container (child) and composes a path to
 // the root mount point in the context of the parent.
-func ParentPathForRootMount(parent IsolationResult, child IsolationResult) (string, error) {
-	childRootMountInfo, err := MountInfoRoot(child)
+func ParentPathForRootMount(parent IsolationResult, child IsolationResult) (*safepath.Path, error) {
+	return ParentPathForMount(parent, child, "/")
+}
+
+func SafeJoin(res IsolationResult, elems ...string) (*safepath.Path, error) {
+	mountRoot, err := res.MountRoot()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	parentMountInfo, err := parentMountInfoFor(parent, childRootMountInfo)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(parent.MountRoot(), parentMountInfo.Mountpoint, strings.TrimPrefix(childRootMountInfo.Root, parentMountInfo.Root)), nil
+	return mountRoot.AppendAndResolveWithRelativeRoot(elems...)
 }

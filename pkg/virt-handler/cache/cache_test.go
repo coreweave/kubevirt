@@ -21,18 +21,17 @@ package cache
 
 import (
 	"encoding/xml"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sync"
 	"time"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 
@@ -66,13 +65,13 @@ var _ = Describe("Domain informer", func() {
 		stopChan = make(chan struct{})
 		wg = &sync.WaitGroup{}
 
-		shareDir, err = ioutil.TempDir("", "kubevirt-share")
+		shareDir, err = os.MkdirTemp("", "kubevirt-share")
 		Expect(err).ToNot(HaveOccurred())
 
-		podsDir, err = ioutil.TempDir("", "")
+		podsDir, err = os.MkdirTemp("", "")
 		Expect(err).ToNot(HaveOccurred())
 
-		ghostCacheDir, err = ioutil.TempDir("", "")
+		ghostCacheDir, err = os.MkdirTemp("", "")
 		Expect(err).ToNot(HaveOccurred())
 
 		InitializeGhostRecordCache(ghostCacheDir)
@@ -101,19 +100,18 @@ var _ = Describe("Domain informer", func() {
 		os.RemoveAll(podsDir)
 		os.RemoveAll(ghostCacheDir)
 		DeleteGhostRecord("test", "test")
-		ctrl.Finish()
 	})
 
 	verifyObj := func(key string, domain *api.Domain) {
 		obj, exists, err := informer.GetStore().GetByKey(key)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		if domain != nil {
 			Expect(exists).To(BeTrue())
 
 			eventDomain := obj.(*api.Domain)
 			eventDomain.Spec.XMLName = xml.Name{}
-			Expect(reflect.DeepEqual(&domain.Spec, &eventDomain.Spec)).To(BeTrue())
+			Expect(equality.Semantic.DeepEqual(&domain.Spec, &eventDomain.Spec)).To(BeTrue())
 		} else {
 
 			Expect(exists).To(BeFalse())
@@ -214,7 +212,7 @@ var _ = Describe("Domain informer", func() {
 
 			domainManager.EXPECT().ListAllDomains().Return(list, nil)
 			domainManager.EXPECT().GetGuestOSInfo().Return(&api.GuestOSInfo{})
-			domainManager.EXPECT().InterfacesStatus(list[0].Spec.Devices.Interfaces).Return([]api.InterfaceStatus{})
+			domainManager.EXPECT().InterfacesStatus().Return([]api.InterfaceStatus{})
 
 			runCMDServer(wg, socketPath, domainManager, stopChan, nil)
 
@@ -231,7 +229,7 @@ var _ = Describe("Domain informer", func() {
 			listResults, err := d.listAllKnownDomains()
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(len(listResults)).To(Equal(1))
+			Expect(listResults).To(HaveLen(1))
 		})
 
 		It("should list current domains including inactive domains with ghost record", func() {
@@ -241,7 +239,7 @@ var _ = Describe("Domain informer", func() {
 
 			domainManager.EXPECT().ListAllDomains().Return(list, nil)
 			domainManager.EXPECT().GetGuestOSInfo().Return(&api.GuestOSInfo{})
-			domainManager.EXPECT().InterfacesStatus(list[0].Spec.Devices.Interfaces).Return([]api.InterfaceStatus{})
+			domainManager.EXPECT().InterfacesStatus().Return([]api.InterfaceStatus{})
 
 			err := AddGhostRecord("test1-namespace", "test1", "somefile1", "1234-1")
 			Expect(err).ToNot(HaveOccurred())
@@ -261,7 +259,7 @@ var _ = Describe("Domain informer", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// includes both the domain with an active socket and the ghost record with deleted socket
-			Expect(len(listResults)).To(Equal(2))
+			Expect(listResults).To(HaveLen(2))
 		})
 		It("should detect active domains at startup.", func() {
 			var list []*api.Domain
@@ -271,7 +269,7 @@ var _ = Describe("Domain informer", func() {
 
 			domainManager.EXPECT().ListAllDomains().Return(list, nil)
 			domainManager.EXPECT().GetGuestOSInfo().Return(&api.GuestOSInfo{})
-			domainManager.EXPECT().InterfacesStatus(list[0].Spec.Devices.Interfaces).Return([]api.InterfaceStatus{})
+			domainManager.EXPECT().InterfacesStatus().Return([]api.InterfaceStatus{})
 
 			runCMDServer(wg, socketPath, domainManager, stopChan, nil)
 
@@ -291,7 +289,7 @@ var _ = Describe("Domain informer", func() {
 			domain := api.NewMinimalDomain("test")
 			domainManager.EXPECT().ListAllDomains().Return([]*api.Domain{domain}, nil)
 			domainManager.EXPECT().GetGuestOSInfo().Return(&api.GuestOSInfo{})
-			domainManager.EXPECT().InterfacesStatus(domain.Spec.Devices.Interfaces).Return([]api.InterfaceStatus{})
+			domainManager.EXPECT().InterfacesStatus().Return([]api.InterfaceStatus{})
 			// now prove if we make a change, like adding a label, that the resync
 			// will pick that change up automatically
 			newDomain := domain.DeepCopy()
@@ -299,7 +297,7 @@ var _ = Describe("Domain informer", func() {
 			newDomain.ObjectMeta.Labels["some-label"] = "some-value"
 			domainManager.EXPECT().ListAllDomains().Return([]*api.Domain{newDomain}, nil)
 			domainManager.EXPECT().GetGuestOSInfo().Return(nil)
-			domainManager.EXPECT().InterfacesStatus(newDomain.Spec.Devices.Interfaces).Return(nil)
+			domainManager.EXPECT().InterfacesStatus().Return(nil)
 
 			runCMDServer(wg, socketPath, domainManager, stopChan, nil)
 
@@ -316,7 +314,7 @@ var _ = Describe("Domain informer", func() {
 			time.Sleep(time.Duration(resyncPeriod+1) * time.Second)
 
 			obj, exists, err := informer.GetStore().GetByKey("default/test")
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(exists).To(BeTrue())
 
 			eventDomain := obj.(*api.Domain)
@@ -359,7 +357,7 @@ var _ = Describe("Domain informer", func() {
 
 			Expect(timedOut).To(BeFalse())
 
-		}, 5)
+		})
 
 		It("should detect unresponsive sockets.", func() {
 
@@ -393,7 +391,7 @@ var _ = Describe("Domain informer", func() {
 
 			Expect(timedOut).To(BeFalse())
 
-		}, 6)
+		})
 
 		It("should detect responsive sockets and not mark for deletion.", func() {
 
@@ -437,7 +435,7 @@ var _ = Describe("Domain informer", func() {
 			}
 
 			Expect(timedOut).To(BeTrue())
-		}, 6)
+		})
 
 		It("should not return errors when encountering disconnected clients at startup.", func() {
 			var list []*api.Domain
@@ -447,7 +445,7 @@ var _ = Describe("Domain informer", func() {
 
 			domainManager.EXPECT().ListAllDomains().Return(list, nil)
 			domainManager.EXPECT().GetGuestOSInfo().Return(&api.GuestOSInfo{})
-			domainManager.EXPECT().InterfacesStatus(list[0].Spec.Devices.Interfaces).Return([]api.InterfaceStatus{})
+			domainManager.EXPECT().InterfacesStatus().Return([]api.InterfaceStatus{})
 
 			// This file doesn't have a unix sock server behind it
 			// verify list still completes regardless

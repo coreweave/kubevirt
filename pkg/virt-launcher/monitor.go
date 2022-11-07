@@ -21,7 +21,6 @@ package virtlauncher
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +29,7 @@ import (
 	"time"
 
 	"kubevirt.io/client-go/log"
+
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	"kubevirt.io/kubevirt/pkg/util"
 )
@@ -40,7 +40,8 @@ type OnGracefulShutdownCallback func()
 type monitor struct {
 	timeout                  time.Duration
 	pid                      int
-	cmdlineMatchStr          string
+	pidDir                   string
+	domainName               string
 	start                    time.Time
 	isDone                   bool
 	gracePeriod              int
@@ -57,7 +58,7 @@ func InitializePrivateDirectories(baseDir string) error {
 	if err := util.MkdirAllWithNosec(baseDir); err != nil {
 		return err
 	}
-	if err := diskutils.DefaultOwnershipManager.SetFileOwnership(baseDir); err != nil {
+	if err := diskutils.DefaultOwnershipManager.UnsafeSetFileOwnership(baseDir); err != nil {
 		return err
 	}
 	return nil
@@ -74,19 +75,21 @@ func InitializeDisksDirectories(baseDir string) error {
 	if err != nil {
 		return err
 	}
-	err = diskutils.DefaultOwnershipManager.SetFileOwnership(baseDir)
+	err = diskutils.DefaultOwnershipManager.UnsafeSetFileOwnership(baseDir)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func NewProcessMonitor(cmdlineMatchStr string,
+func NewProcessMonitor(domainName string,
+	pidDir string,
 	gracePeriod int,
 	finalShutdownCallback OnShutdownCallback,
 	gracefulShutdownCallback OnGracefulShutdownCallback) ProcessMonitor {
 	return &monitor{
-		cmdlineMatchStr:          cmdlineMatchStr,
+		domainName:               domainName,
+		pidDir:                   pidDir,
 		gracePeriod:              gracePeriod,
 		finalShutdownCallback:    finalShutdownCallback,
 		gracefulShutdownCallback: gracefulShutdownCallback,
@@ -109,7 +112,7 @@ func (mon *monitor) refresh() {
 		return
 	}
 
-	log.Log.V(4).Infof("Refreshing. CommandPrefix %s pid %d", mon.cmdlineMatchStr, mon.pid)
+	log.Log.V(4).Infof("Refreshing. domainName %s pid %d", mon.domainName, mon.pid)
 
 	expired := mon.isGracePeriodExpired()
 
@@ -117,26 +120,26 @@ func (mon *monitor) refresh() {
 	if mon.pid == 0 {
 		var err error
 
-		mon.pid, err = FindPid(mon.cmdlineMatchStr)
+		mon.pid, err = FindPid(mon.domainName, mon.pidDir)
 		if err != nil {
 
-			log.Log.Infof("Still missing PID for %s, %v", mon.cmdlineMatchStr, err)
+			log.Log.Infof("Still missing PID for %s, %v", mon.domainName, err)
 			// check to see if we've timed out looking for the process
 			elapsed := time.Since(mon.start)
 			if mon.timeout > 0 && elapsed >= mon.timeout {
-				log.Log.Infof("%s not found after timeout", mon.cmdlineMatchStr)
+				log.Log.Infof("%s not found after timeout", mon.domainName)
 				mon.isDone = true
 			} else if expired {
-				log.Log.Infof("%s not found after grace period expired", mon.cmdlineMatchStr)
+				log.Log.Infof("%s not found after grace period expired", mon.domainName)
 				mon.isDone = true
 			} else if mon.gracePeriodStartTime != 0 {
-				log.Log.Infof("%s not found after shutdown initiated", mon.cmdlineMatchStr)
+				log.Log.Infof("%s not found after shutdown initiated", mon.domainName)
 				mon.isDone = true
 			}
 			return
 		}
 
-		log.Log.Infof("Found PID for %s: %d", mon.cmdlineMatchStr, mon.pid)
+		log.Log.Infof("Found PID for %s: %d", mon.domainName, mon.pid)
 	}
 
 	exists, isZombie, err := pidExists(mon.pid)
@@ -145,17 +148,18 @@ func (mon *monitor) refresh() {
 		return
 	}
 	if exists == false {
-		log.Log.Infof("Process %s and pid %d is gone!", mon.cmdlineMatchStr, mon.pid)
+		log.Log.Infof("Process %s and pid %d is gone!", mon.domainName, mon.pid)
 		mon.pid = 0
 		mon.isDone = true
 		return
 	}
 
 	if isZombie {
-		log.Log.Infof("Process %s and pid %d is a zombie, sending SIGCHLD to pid 1 to reap process", mon.cmdlineMatchStr, mon.pid)
+		log.Log.Infof("Process %s and pid %d is a zombie, sending SIGCHLD to pid 1 to reap process", mon.domainName, mon.pid)
 		syscall.Kill(1, syscall.SIGCHLD)
 		mon.pid = 0
 		mon.isDone = true
+		return
 	}
 
 	if expired {
@@ -216,7 +220,7 @@ func pidExists(pid int) (exists bool, isZombie bool, err error) {
 		return false, false, nil
 	}
 
-	dataBytes, err := ioutil.ReadFile(pathStatus)
+	dataBytes, err := os.ReadFile(pathStatus)
 	if err != nil {
 		return false, false, err
 	}
@@ -228,34 +232,11 @@ func pidExists(pid int) (exists bool, isZombie bool, err error) {
 	return exists, isZombie, nil
 }
 
-func FindPid(commandNamePrefix string) (int, error) {
-	entries, err := filepath.Glob("/proc/*/cmdline")
+func FindPid(domainName string, pidDir string) (int, error) {
+	content, err := os.ReadFile(filepath.Join(pidDir, domainName+".pid"))
 	if err != nil {
 		return 0, err
 	}
 
-	for _, entry := range entries {
-		// #nosec No risk for path injection. Reading specific entries under /proc
-		content, err := ioutil.ReadFile(entry)
-		if err != nil {
-			return 0, err
-		}
-
-		if !strings.Contains(string(content), commandNamePrefix) {
-			continue
-		}
-
-		//   <empty> /    proc     /    $PID   /   cmdline
-		// items[0] sep items[1] sep items[2] sep  items[3]
-		items := strings.Split(entry, string(os.PathSeparator))
-		pid, err := strconv.Atoi(items[2])
-		if err != nil {
-			return 0, err
-		}
-
-		// everything matched, hooray!
-		return pid, nil
-	}
-
-	return 0, fmt.Errorf("Process %s not found in /proc", commandNamePrefix)
+	return strconv.Atoi(string(content))
 }

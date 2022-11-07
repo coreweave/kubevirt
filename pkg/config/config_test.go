@@ -19,11 +19,10 @@
 package config
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -48,11 +47,11 @@ var _ = Describe("Creating config images", func() {
 
 		BeforeEach(func() {
 			var err error
-			tempConfDir, err = ioutil.TempDir("", "config-dir")
+			tempConfDir, err = os.MkdirTemp("", "config-dir")
 			Expect(err).NotTo(HaveOccurred())
-			tempISODir, err = ioutil.TempDir("", "iso-dir")
+			tempISODir, err = os.MkdirTemp("", "iso-dir")
 			Expect(err).NotTo(HaveOccurred())
-			expectedLayout = []string{"test-dir=" + tempConfDir + "/test-dir", "test-file2=" + tempConfDir + "/test-file2"}
+			expectedLayout = []string{"test-dir=" + filepath.Join(tempConfDir, "test-dir"), "test-file2=" + filepath.Join(tempConfDir, "test-file2")}
 
 			os.Mkdir(filepath.Join(tempConfDir, "test-dir"), 0755)
 			os.OpenFile(filepath.Join(tempConfDir, "test-dir", "test-file1"), os.O_RDONLY|os.O_CREATE, 0666)

@@ -16,6 +16,9 @@ spec:
         kubevirt.io: disks-images-provider
       name: disks-images-provider
     spec:
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
       serviceAccountName: kubevirt-testing
       containers:
         - name: target
@@ -24,7 +27,7 @@ spec:
           lifecycle:
             preStop:
               exec:
-                command: ["/bin/sh","-c","source /etc/bashrc && chroot /host losetup -d ${LOOP_DEVICE} && chroot /host umount ${LOOP_DEVICE_HP} && chroot /host losetup -d ${LOOP_DEVICE_HP}"]
+                command: ["/bin/sh","-c","source /etc/bashrc && chroot /host umount ${LOOP_DEVICE_HP} && chroot /host losetup -d ${LOOP_DEVICE_HP}"]
           volumeMounts:
           - name: images
             mountPath: /hostImages

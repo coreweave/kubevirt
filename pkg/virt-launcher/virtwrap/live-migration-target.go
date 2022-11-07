@@ -27,6 +27,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	"kubevirt.io/kubevirt/pkg/hooks"
@@ -38,10 +39,6 @@ import (
 )
 
 func (l *LibvirtDomainManager) finalizeMigrationTarget(vmi *v1.VirtualMachineInstance) error {
-	if err := l.hotPlugHostDevices(vmi); err != nil {
-		log.Log.Object(vmi).Reason(err).Error("failed to hot-plug host-devices")
-	}
-
 	if err := l.setGuestTime(vmi); err != nil {
 		return err
 	}
@@ -109,7 +106,7 @@ func (l *LibvirtDomainManager) prepareMigrationTarget(
 			logger.Reason(err).Error("failed to create the migration sockets directory")
 			return err
 		}
-		if err := diskutils.DefaultOwnershipManager.SetFileOwnership(migrationSocketsPath); err != nil {
+		if err := diskutils.DefaultOwnershipManager.UnsafeSetFileOwnership(migrationSocketsPath); err != nil {
 			logger.Reason(err).Error("failed to change ownership on migration sockets directory")
 			return err
 		}

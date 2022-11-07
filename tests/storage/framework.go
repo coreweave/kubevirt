@@ -20,7 +20,7 @@
 package storage
 
 import (
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 )
 
 func SIGDescribe(text string, body func()) bool {
@@ -29,4 +29,8 @@ func SIGDescribe(text string, body func()) bool {
 
 func FSIGDescribe(text string, body func()) bool {
 	return FDescribe("[sig-storage] "+text, body)
+}
+
+func PSIGDescribe(text string, body func()) bool {
+	return PDescribe("[sig-storage] "+text, body)
 }

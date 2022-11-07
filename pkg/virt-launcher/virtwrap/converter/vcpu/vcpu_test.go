@@ -9,8 +9,7 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"kubevirt.io/client-go/log"
@@ -109,8 +108,7 @@ var _ = Describe("VCPU pinning", func() {
 			shuffleCPUSet(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
 		)
 		_, err := pool.FitCores()
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("not enough exclusive threads provided, could not fit 1 core(s)"))
+		Expect(err).To(MatchError(ContainSubstring("not enough exclusive threads provided, could not fit 1 core(s)")))
 	})
 
 	It("should fail assigning vCPUs with the strict policy if cores can't fully be place on a numa node", func() {
@@ -125,8 +123,7 @@ var _ = Describe("VCPU pinning", func() {
 			shuffleCPUSet(0, 1, 2, 6, 7, 8),
 		)
 		_, err := pool.FitCores()
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("could not fit 1 core(s) without crossing numa cell boundaries for individual cores"))
+		Expect(err).To(MatchError(ContainSubstring("could not fit 1 core(s) without crossing numa cell boundaries for individual cores")))
 	})
 
 	It("should pass assigning vCPUs with the relaxed policy if cores can't fully be place on a numa node", func() {
@@ -145,7 +142,7 @@ var _ = Describe("VCPU pinning", func() {
 		Expect(cpuTuneToThreads(cpuTune)).To(Equal([]int{1, 7, 6, 2, 0, 8}))
 	})
 
-	table.DescribeTable("should pick individual threads", func(threadsPerCore int, cpuSet []int, expectedMapping []uint32) {
+	DescribeTable("should pick individual threads", func(threadsPerCore int, cpuSet []int, expectedMapping []uint32) {
 		pool := NewRelaxedCPUPool(
 			&api.CPUTopology{Sockets: 1, Cores: 1, Threads: 2},
 			hostTopology(
@@ -168,12 +165,12 @@ var _ = Describe("VCPU pinning", func() {
 
 		Expect(threadCandidates).To(Equal(expectedMapping))
 	},
-		table.Entry("with 1 thread per host cpu and no missing CPUs in a predictable order",
+		Entry("with 1 thread per host cpu and no missing CPUs in a predictable order",
 			1,
 			[]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
 			[]uint32{1, 7, 0, 6, 2, 8, 3, 9, 4, 10, 5, 11},
 		),
-		table.Entry("with 2 thread per host cpu and missing CPUs (1, 0) from small chunks first",
+		Entry("with 2 thread per host cpu and missing CPUs (1, 0) from small chunks first",
 			2,
 			[]int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
 			[]uint32{7, 6, 2, 8, 3, 9, 4, 10, 5, 11},

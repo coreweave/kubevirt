@@ -34,6 +34,8 @@ import (
 	log2 "github.com/go-kit/kit/log"
 )
 
+const timestampNow = "2006-01-02T15:04:05.000000Z"
+
 type logLevel int32
 
 const (
@@ -198,9 +200,13 @@ type Verbose bool
 // The returned value is a boolean of type Verbose, which implements Info, Infoln
 // and Infof. These methods will write to the Info log if called.
 // Thus, one may write either
+//
 //	if glog.V(2) { glog.Info("log this") }
+//
 // or
+//
 //	glog.V(2).Info("log this")
+//
 // The second form is shorter but the first is cheaper if logging is off because it does
 // not evaluate its arguments.
 //
@@ -388,7 +394,7 @@ func doLogf(skipFrames int, severity logLevel, format string, args ...interface{
 	_, fileName, lineNumber, _ := runtime.Caller(skipFrames)
 	logger.Log(
 		"level", logLevelNames[severity],
-		"timestamp", now.Format("2006-01-02T15:04:05.000000Z"),
+		"timestamp", now.Format(timestampNow),
 		"pos", fmt.Sprintf("%s:%d", filepath.Base(fileName), lineNumber),
 		"component", glogComponent,
 		"msg", fmt.Sprintf(format, args...),
@@ -403,7 +409,7 @@ func doLog(skipFrames int, severity logLevel, args ...interface{}) {
 	_, fileName, lineNumber, _ := runtime.Caller(skipFrames)
 	logger.Log(
 		"level", logLevelNames[severity],
-		"timestamp", now.Format("2006-01-02T15:04:05.000000Z"),
+		"timestamp", now.Format(timestampNow),
 		"pos", fmt.Sprintf("%s:%d", filepath.Base(fileName), lineNumber),
 		"component", glogComponent,
 		"msg", fmt.Sprint(args...),
@@ -417,7 +423,7 @@ func doLogPos(severity logLevel, fileName string, lineNumber int, args ...interf
 	now := time.Now()
 	logger.Log(
 		"level", logLevelNames[severity],
-		"timestamp", now.Format("2006-01-02T15:04:05.000000Z"),
+		"timestamp", now.Format(timestampNow),
 		"pos", fmt.Sprintf("%s:%d", filepath.Base(fileName), lineNumber),
 		"component", glogComponent,
 		"msg", fmt.Sprint(args...),

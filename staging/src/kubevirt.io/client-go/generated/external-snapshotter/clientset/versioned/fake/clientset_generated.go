@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KubeVirt Authors.
+Copyright 2022 The KubeVirt Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,10 +24,9 @@ import (
 	"k8s.io/client-go/discovery"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/testing"
-
 	clientset "kubevirt.io/client-go/generated/external-snapshotter/clientset/versioned"
-	snapshotv1beta1 "kubevirt.io/client-go/generated/external-snapshotter/clientset/versioned/typed/volumesnapshot/v1beta1"
-	fakesnapshotv1beta1 "kubevirt.io/client-go/generated/external-snapshotter/clientset/versioned/typed/volumesnapshot/v1beta1/fake"
+	snapshotv1 "kubevirt.io/client-go/generated/external-snapshotter/clientset/versioned/typed/volumesnapshot/v1"
+	fakesnapshotv1 "kubevirt.io/client-go/generated/external-snapshotter/clientset/versioned/typed/volumesnapshot/v1/fake"
 )
 
 // NewSimpleClientset returns a clientset that will respond with the provided objects.
@@ -77,7 +76,7 @@ func (c *Clientset) Tracker() testing.ObjectTracker {
 
 var _ clientset.Interface = &Clientset{}
 
-// SnapshotV1beta1 retrieves the SnapshotV1beta1Client
-func (c *Clientset) SnapshotV1beta1() snapshotv1beta1.SnapshotV1beta1Interface {
-	return &fakesnapshotv1beta1.FakeSnapshotV1beta1{Fake: &c.Fake}
+// SnapshotV1 retrieves the SnapshotV1Client
+func (c *Clientset) SnapshotV1() snapshotv1.SnapshotV1Interface {
+	return &fakesnapshotv1.FakeSnapshotV1{Fake: &c.Fake}
 }

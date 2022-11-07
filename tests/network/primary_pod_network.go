@@ -22,12 +22,11 @@ package network
 import (
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"kubevirt.io/kubevirt/tests/util"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "kubevirt.io/api/core/v1"
@@ -35,7 +34,6 @@ import (
 
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
-	cd "kubevirt.io/kubevirt/tests/containerdisk"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libvmi"
 )
@@ -61,11 +59,7 @@ var _ = SIGDescribe("Primary Pod Network", func() {
 			var vmi *v1.VirtualMachineInstance
 
 			BeforeEach(func() {
-				vmi = setupVMI(virtClient, vmiWithDefaultBinding())
-			})
-
-			AfterEach(func() {
-				cleanupVMI(virtClient, vmi)
+				vmi = setupVMI(virtClient, libvmi.NewAlpine())
 			})
 
 			It("should report PodIP as its own on interface status", func() { AssertReportedIP(vmi) })
@@ -90,6 +84,7 @@ var _ = SIGDescribe("Primary Pod Network", func() {
 					}
 				)
 				BeforeEach(func() {
+					libnet.SkipWhenClusterNotSupportIpv4(virtClient)
 					var err error
 
 					vmi, err = newFedoraWithGuestAgentAndDefaultInterface(libvmi.InterfaceDeviceWithBridgeBinding(libvmi.DefaultInterfaceName))
@@ -99,10 +94,6 @@ var _ = SIGDescribe("Primary Pod Network", func() {
 					Expect(err).NotTo(HaveOccurred())
 					tests.WaitForSuccessfulVMIStart(vmi)
 					tests.WaitAgentConnected(virtClient, vmi)
-				})
-
-				AfterEach(func() {
-					cleanupVMI(virtClient, vmi)
 				})
 
 				It("should report PodIP/s IPv4 as its own on interface status", func() {
@@ -119,11 +110,13 @@ var _ = SIGDescribe("Primary Pod Network", func() {
 				var vmi *v1.VirtualMachineInstance
 
 				BeforeEach(func() {
-					vmi = setupVMI(virtClient, vmiWithBridgeBinding())
-				})
-
-				AfterEach(func() {
-					cleanupVMI(virtClient, vmi)
+					vmi = setupVMI(
+						virtClient,
+						libvmi.NewAlpine(
+							libvmi.WithInterface(*v1.DefaultBridgeNetworkInterface()),
+							libvmi.WithNetwork(v1.DefaultPodNetwork()),
+						),
+					)
 				})
 
 				It("should report PodIP as its own on interface status", func() { AssertReportedIP(vmi) })
@@ -145,10 +138,6 @@ var _ = SIGDescribe("Primary Pod Network", func() {
 					tests.WaitAgentConnected(virtClient, vmi)
 				})
 
-				AfterEach(func() {
-					cleanupVMI(virtClient, vmi)
-				})
-
 				It("[test_id:4153]should report PodIP/s as its own on interface status", func() {
 					vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
 					Consistently(func() error {
@@ -166,11 +155,13 @@ var _ = SIGDescribe("Primary Pod Network", func() {
 				var vmi *v1.VirtualMachineInstance
 
 				BeforeEach(func() {
-					vmi = setupVMI(virtClient, vmiWithMasqueradeBinding())
-				})
-
-				AfterEach(func() {
-					cleanupVMI(virtClient, vmi)
+					vmi = setupVMI(
+						virtClient,
+						libvmi.NewAlpine(
+							libvmi.WithInterface(*v1.DefaultMasqueradeNetworkInterface()),
+							libvmi.WithNetwork(v1.DefaultPodNetwork()),
+						),
+					)
 				})
 
 				It("[Conformance] should report PodIP as its own on interface status", func() { AssertReportedIP(vmi) })
@@ -191,50 +182,13 @@ func setupVMI(virtClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance)
 	return vmi
 }
 
-func cleanupVMI(virtClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance) {
-	if vmi != nil {
-		By("Deleting the VMI")
-		Expect(virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Delete(vmi.GetName(), &metav1.DeleteOptions{})).To(Succeed())
-
-		By("Waiting for the VMI to be gone")
-		Eventually(func() error {
-			_, err := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Get(vmi.GetName(), &metav1.GetOptions{})
-			return err
-		}, 2*time.Minute, time.Second).Should(SatisfyAll(HaveOccurred(), WithTransform(errors.IsNotFound, BeTrue())), "The VMI should be gone within the given timeout")
-	}
-}
-
-func vmiWithDefaultBinding() *v1.VirtualMachineInstance {
-	vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskAlpine))
-	vmi.Spec.Domain.Devices.Interfaces = nil
-	vmi.Spec.Networks = nil
-	return vmi
-}
-
-func vmiWithBridgeBinding() *v1.VirtualMachineInstance {
-	vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskAlpine))
-	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultBridgeNetworkInterface()}
-	vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
-	return vmi
-}
-
-func vmiWithMasqueradeBinding() *v1.VirtualMachineInstance {
-	vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskAlpine))
-	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultMasqueradeNetworkInterface()}
-	vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
-	return vmi
-}
-
 func newFedoraWithGuestAgentAndDefaultInterface(iface v1.Interface) (*v1.VirtualMachineInstance, error) {
-	networkData, err := libnet.CreateDefaultCloudInitNetworkData()
-	if err != nil {
-		return nil, err
-	}
+	networkData := libnet.CreateDefaultCloudInitNetworkData()
 
-	vmi := libvmi.NewTestToolingFedora(
+	vmi := libvmi.NewFedora(
 		libvmi.WithInterface(iface),
 		libvmi.WithNetwork(v1.DefaultPodNetwork()),
-		libvmi.WithCloudInitNoCloudNetworkData(networkData, false),
+		libvmi.WithCloudInitNoCloudNetworkData(networkData),
 	)
 	return vmi, nil
 }

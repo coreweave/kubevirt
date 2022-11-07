@@ -24,11 +24,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"reflect"
 	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -37,13 +37,29 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
+
 	utiltype "kubevirt.io/kubevirt/pkg/util/types"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
 	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 )
 
-//NodeLabeller struct holds informations needed to run node-labeller
+var nodeLabellerLabels = []string{
+	util.DeprecatedLabelNamespace + util.DeprecatedcpuModelPrefix,
+	util.DeprecatedLabelNamespace + util.DeprecatedcpuFeaturePrefix,
+	util.DeprecatedLabelNamespace + util.DeprecatedHyperPrefix,
+	kubevirtv1.CPUFeatureLabel,
+	kubevirtv1.CPUModelLabel,
+	kubevirtv1.SupportedHostModelMigrationCPU,
+	kubevirtv1.CPUTimerLabel,
+	kubevirtv1.HypervLabel,
+	kubevirtv1.RealtimeLabel,
+	kubevirtv1.SEVLabel,
+	kubevirtv1.HostModelCPULabel,
+	kubevirtv1.HostModelRequiredFeaturesLabel,
+}
+
+// NodeLabeller struct holds informations needed to run node-labeller
 type NodeLabeller struct {
 	clientset               kubecli.KubevirtClient
 	host                    string
@@ -60,6 +76,7 @@ type NodeLabeller struct {
 	domCapabilitiesFileName string
 	capabilities            *api.Capabilities
 	hostCPUModel            hostCPUModel
+	SEV                     SEVConfiguration
 }
 
 func NewNodeLabeller(clusterConfig *virtconfig.ClusterConfig, clientset kubecli.KubevirtClient, host, namespace string) (*NodeLabeller, error) {
@@ -86,7 +103,7 @@ func newNodeLabeller(clusterConfig *virtconfig.ClusterConfig, clientset kubecli.
 	return n, nil
 }
 
-//Run runs node-labeller
+// Run runs node-labeller
 func (n *NodeLabeller) Run(threadiness int, stop chan struct{}) {
 	defer n.queue.ShutDown()
 
@@ -159,9 +176,10 @@ func (n *NodeLabeller) loadAll() error {
 }
 
 func (n *NodeLabeller) run() error {
-	cpuModels := n.getSupportedCpuModels()
+	obsoleteCPUsx86 := n.clusterConfig.GetObsoleteCPUModels()
+	cpuModels := n.getSupportedCpuModels(obsoleteCPUsx86)
 	cpuFeatures := n.getSupportedCpuFeatures()
-	hostCPUModel := n.getHostCpuModel()
+	hostCPUModel := n.GetHostCpuModel()
 
 	originalNode, err := n.clientset.CoreV1().Nodes().Get(context.Background(), n.host, metav1.GetOptions{})
 	if err != nil {
@@ -175,7 +193,7 @@ func (n *NodeLabeller) run() error {
 	}
 
 	//prepare new labels
-	newLabels := n.prepareLabels(cpuModels, cpuFeatures, hostCPUModel)
+	newLabels := n.prepareLabels(cpuModels, cpuFeatures, hostCPUModel, obsoleteCPUsx86)
 	//remove old labeller labels
 	n.removeLabellerLabels(node)
 	//add new labels
@@ -193,7 +211,7 @@ func skipNode(node *v1.Node) bool {
 
 func (n *NodeLabeller) patchNode(originalNode, node *v1.Node) error {
 	p := make([]utiltype.PatchOperation, 0)
-	if !reflect.DeepEqual(originalNode.Labels, node.Labels) {
+	if !equality.Semantic.DeepEqual(originalNode.Labels, node.Labels) {
 		p = append(p, utiltype.PatchOperation{
 			Op:    "test",
 			Path:  "/metadata/labels",
@@ -205,7 +223,7 @@ func (n *NodeLabeller) patchNode(originalNode, node *v1.Node) error {
 		})
 	}
 
-	if !reflect.DeepEqual(originalNode.Annotations, node.Annotations) {
+	if !equality.Semantic.DeepEqual(originalNode.Annotations, node.Annotations) {
 		p = append(p, utiltype.PatchOperation{
 			Op:    "test",
 			Path:  "/metadata/annotations",
@@ -239,7 +257,7 @@ func (n *NodeLabeller) loadHypervFeatures() {
 
 // prepareLabels converts cpu models, features, hyperv features to map[string]string format
 // e.g. "cpu-feature.node.kubevirt.io/Penryn": "true"
-func (n *NodeLabeller) prepareLabels(cpuModels []string, cpuFeatures cpuFeatures, hostCpuModel hostCPUModel) map[string]string {
+func (n *NodeLabeller) prepareLabels(cpuModels []string, cpuFeatures cpuFeatures, hostCpuModel hostCPUModel, obsoleteCPUsx86 map[string]bool) map[string]string {
 	newLabels := make(map[string]string)
 	for key := range cpuFeatures {
 		newLabels[kubevirtv1.CPUFeatureLabel+key] = "true"
@@ -247,6 +265,11 @@ func (n *NodeLabeller) prepareLabels(cpuModels []string, cpuFeatures cpuFeatures
 
 	for _, value := range cpuModels {
 		newLabels[kubevirtv1.CPUModelLabel+value] = "true"
+		newLabels[kubevirtv1.SupportedHostModelMigrationCPU+value] = "true"
+	}
+
+	if _, hostModelObsolete := obsoleteCPUsx86[hostCpuModel.Name]; !hostModelObsolete {
+		newLabels[kubevirtv1.SupportedHostModelMigrationCPU+hostCpuModel.Name] = "true"
 	}
 
 	for _, key := range n.hypervFeatures.items {
@@ -265,7 +288,7 @@ func (n *NodeLabeller) prepareLabels(cpuModels []string, cpuFeatures cpuFeatures
 	}
 
 	newLabels[kubevirtv1.CPUModelVendorLabel+n.cpuModelVendor] = "true"
-	newLabels[kubevirtv1.HostModelCPULabel+hostCpuModel.name] = "true"
+	newLabels[kubevirtv1.HostModelCPULabel+hostCpuModel.Name] = "true"
 
 	capable, err := isNodeRealtimeCapable()
 	if err != nil {
@@ -273,6 +296,10 @@ func (n *NodeLabeller) prepareLabels(cpuModels []string, cpuFeatures cpuFeatures
 	}
 	if capable {
 		newLabels[kubevirtv1.RealtimeLabel] = ""
+	}
+
+	if n.SEV.Supported == "yes" {
+		newLabels[kubevirtv1.SEVLabel] = ""
 	}
 
 	return newLabels
@@ -293,20 +320,13 @@ func (n *NodeLabeller) HostCapabilities() *api.Capabilities {
 // removeLabellerLabels removes labels from node
 func (n *NodeLabeller) removeLabellerLabels(node *v1.Node) {
 	for label := range node.Labels {
-		if strings.Contains(label, util.DeprecatedLabelNamespace+util.DeprecatedcpuModelPrefix) ||
-			strings.Contains(label, util.DeprecatedLabelNamespace+util.DeprecatedcpuFeaturePrefix) ||
-			strings.Contains(label, util.DeprecatedLabelNamespace+util.DeprecatedHyperPrefix) ||
-			strings.Contains(label, kubevirtv1.CPUFeatureLabel) ||
-			strings.Contains(label, kubevirtv1.CPUModelLabel) ||
-			strings.Contains(label, kubevirtv1.CPUTimerLabel) ||
-			strings.Contains(label, kubevirtv1.HypervLabel) ||
-			strings.Contains(label, kubevirtv1.RealtimeLabel) {
+		if isNodeLabellerLabel(label) {
 			delete(node.Labels, label)
 		}
 	}
 
 	for annotation := range node.Annotations {
-		if strings.Contains(annotation, util.DeprecatedLabellerNamespaceAnnotation) {
+		if strings.HasPrefix(annotation, util.DeprecatedLabellerNamespaceAnnotation) {
 			delete(node.Annotations, annotation)
 		}
 	}
@@ -326,4 +346,14 @@ func isNodeRealtimeCapable() (bool, error) {
 	}
 	st := strings.Trim(string(ret), "\n")
 	return fmt.Sprintf("%s = -1", kernelSchedRealtimeRuntimeInMicrosecods) == st, nil
+}
+
+func isNodeLabellerLabel(label string) bool {
+	for _, prefix := range nodeLabellerLabels {
+		if strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+
+	return false
 }

@@ -1,13 +1,12 @@
 package device_manager
 
 import (
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc"
 
@@ -22,7 +21,7 @@ var _ = Describe("Generic Device", func() {
 	var devicePath string
 
 	BeforeEach(func() {
-		workDir, err = ioutil.TempDir("", "kubevirt-test")
+		workDir, err = os.MkdirTemp("", "kubevirt-test")
 		Expect(err).ToNot(HaveOccurred())
 
 		devicePath = path.Join(workDir, "foo")
@@ -45,14 +44,6 @@ var _ = Describe("Generic Device", func() {
 		os.RemoveAll(workDir)
 	})
 
-	It("Should allocate a new device upon request", func() {
-		previousCount := dpi.counter
-		dpi.addNewGenericDevice()
-
-		Expect(dpi.counter).To(Equal(previousCount + 1))
-		Expect(len(dpi.devs)).To(Equal(dpi.counter))
-	})
-
 	It("Should stop if the device plugin socket file is deleted", func() {
 		os.OpenFile(dpi.socketPath, os.O_RDONLY|os.O_CREATE, 0666)
 
@@ -65,7 +56,7 @@ var _ = Describe("Generic Device", func() {
 		}, 2*time.Second, 500*time.Millisecond).Should(Equal(pluginapi.Healthy))
 		Expect(os.Remove(dpi.socketPath)).To(Succeed())
 
-		Expect(<-errChan).To(BeNil())
+		Expect(<-errChan).ToNot(HaveOccurred())
 	})
 
 	It("Should monitor health of device node", func() {
@@ -81,7 +72,7 @@ var _ = Describe("Generic Device", func() {
 
 		By("waiting for healthcheck to send Unhealthy message")
 		Eventually(func() string {
-			return <-dpi.health
+			return (<-dpi.health).Health
 		}, 5*time.Second).Should(Equal(pluginapi.Unhealthy))
 
 		By("Creating a new (fake) device node")
@@ -91,7 +82,7 @@ var _ = Describe("Generic Device", func() {
 
 		By("waiting for healthcheck to send Healthy message")
 		Eventually(func() string {
-			return <-dpi.health
+			return (<-dpi.health).Health
 		}, 5*time.Second).Should(Equal(pluginapi.Healthy))
 	})
 })

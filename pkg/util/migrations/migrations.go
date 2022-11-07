@@ -5,7 +5,11 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	v1 "kubevirt.io/api/core/v1"
+
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
+
+const CancelMigrationFailedVmiNotMigratingErr = "failed to cancel migration - vmi is not migrating"
 
 func ListUnfinishedMigrations(informer cache.SharedIndexInformer) []*v1.VirtualMachineInstanceMigration {
 	objs := informer.GetStore().List()
@@ -58,7 +62,15 @@ func MigrationFailed(vmi *v1.VirtualMachineInstance) bool {
 	return false
 }
 
-func MigrationNeedsProtection(vmi *v1.VirtualMachineInstance) bool {
-	return vmi.Spec.EvictionStrategy != nil &&
-		*vmi.Spec.EvictionStrategy == v1.EvictionStrategyLiveMigrate
+func VMIEvictionStrategy(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance) *v1.EvictionStrategy {
+	if vmi != nil && vmi.Spec.EvictionStrategy != nil {
+		return vmi.Spec.EvictionStrategy
+	}
+	clusterStrategy := clusterConfig.GetConfig().EvictionStrategy
+	return clusterStrategy
+}
+
+func VMIMigratableOnEviction(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance) bool {
+	strategy := VMIEvictionStrategy(clusterConfig, vmi)
+	return strategy != nil && *strategy == v1.EvictionStrategyLiveMigrate
 }

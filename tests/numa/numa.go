@@ -8,25 +8,26 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
-	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/exec"
 	"kubevirt.io/kubevirt/tests/flags"
 	"kubevirt.io/kubevirt/tests/framework/checks"
+	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/util"
 )
 
-var _ = Describe("[sig-compute][serial]NUMA", func() {
+var _ = Describe("[sig-compute][Serial]NUMA", func() {
 
 	var virtClient kubecli.KubevirtClient
 	BeforeEach(func() {
@@ -34,14 +35,13 @@ var _ = Describe("[sig-compute][serial]NUMA", func() {
 		var err error
 		virtClient, err = kubecli.GetKubevirtClient()
 		Expect(err).ToNot(HaveOccurred())
-		tests.BeforeTestCleanup()
 	})
 
 	It("[test_id:7299] topology should be mapped to the guest and hugepages should be allocated", func() {
 		checks.SkipTestIfNoFeatureGate(virtconfig.NUMAFeatureGate)
 		checks.SkipTestIfNotEnoughNodesWithCPUManagerWith2MiHugepages(1)
 		var err error
-		cpuVMI := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
+		cpuVMI := libvmi.NewCirros()
 		cpuVMI.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("128Mi")
 		cpuVMI.Spec.Domain.CPU = &v1.CPU{
 			Cores:                 3,
@@ -55,10 +55,8 @@ var _ = Describe("[sig-compute][serial]NUMA", func() {
 		By("Starting a VirtualMachineInstance")
 		cpuVMI, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(cpuVMI)
 		Expect(err).ToNot(HaveOccurred())
-		tests.WaitForSuccessfulVMIStart(cpuVMI)
+		cpuVMI = tests.WaitForSuccessfulVMIStart(cpuVMI)
 		By("Fetching the numa memory mapping")
-		cpuVMI, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Get(cpuVMI.Name, &k8smetav1.GetOptions{})
-		Expect(err).ToNot(HaveOccurred())
 		handler, err := kubecli.NewVirtHandlerClient(virtClient).Namespace(flags.KubeVirtInstallNamespace).ForNode(cpuVMI.Status.NodeName).Pod()
 		Expect(err).ToNot(HaveOccurred())
 		pid := getQEMUPID(virtClient, handler, cpuVMI)
@@ -112,7 +110,7 @@ func getQEMUPID(virtClient kubecli.KubevirtClient, handlerPod *k8sv1.Pod, vmi *v
 	// The retry is a desperate try to cope with URG in case that URG is not catches by the script
 	// since URG keep ps failing
 	Eventually(func() (err error) {
-		stdout, stderr, err = tests.ExecuteCommandOnPodV2(virtClient, handlerPod, "virt-handler",
+		stdout, stderr, err = exec.ExecuteCommandOnPodWithResults(virtClient, handlerPod, "virt-handler",
 			[]string{
 				"/bin/bash",
 				"-c",
@@ -141,7 +139,7 @@ func getQEMUPID(virtClient kubecli.KubevirtClient, handlerPod *k8sv1.Pod, vmi *v
 }
 
 func getNUMAMapping(virtClient kubecli.KubevirtClient, pod *k8sv1.Pod, pid string) string {
-	stdout, stderr, err := tests.ExecuteCommandOnPodV2(virtClient, pod, "virt-handler",
+	stdout, stderr, err := exec.ExecuteCommandOnPodWithResults(virtClient, pod, "virt-handler",
 		[]string{
 			"/bin/bash",
 			"-c",

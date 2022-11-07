@@ -24,20 +24,26 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 
 	"kubevirt.io/kubevirt/tests/util"
 
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
 
 	v1 "kubevirt.io/api/core/v1"
+	instancetypeapi "kubevirt.io/api/instancetype"
+	instancetypev1alpha2 "kubevirt.io/api/instancetype/v1alpha2"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 var _ = Describe("[sig-compute]Subresource Api", func() {
@@ -51,8 +57,6 @@ var _ = Describe("[sig-compute]Subresource Api", func() {
 	BeforeEach(func() {
 		virtCli, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
-
-		tests.BeforeTestCleanup()
 	})
 
 	Describe("[rfe_id:1195][crit:medium][vendor:cnv-qe@redhat.com][level:component] Rbac Authorization", func() {
@@ -67,12 +71,12 @@ var _ = Describe("[sig-compute]Subresource Api", func() {
 		Context("with correct permissions", func() {
 			It("[test_id:3170]should be allowed to access subresource endpoint", func() {
 				testClientJob(virtCli, true, resource)
-			}, 15)
+			})
 		})
 		Context("Without permissions", func() {
 			It("[test_id:3171]should not be able to access subresource endpoint", func() {
 				testClientJob(virtCli, false, resource)
-			}, 15)
+			})
 		})
 	})
 
@@ -86,6 +90,21 @@ var _ = Describe("[sig-compute]Subresource Api", func() {
 		})
 		Context("Without permissions", func() {
 			It("[test_id:3173]should be able to access subresource version endpoint", func() {
+				testClientJob(virtCli, false, resource)
+			})
+		})
+	})
+
+	Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component] Rbac Authorization For Guestfs Command", func() {
+		resource := "guestfs"
+
+		Context("with authenticated user", func() {
+			It("should be allowed to access subresource guestfs endpoint", func() {
+				testClientJob(virtCli, true, resource)
+			})
+		})
+		Context("Without permissions", func() {
+			It("should be able to access subresource guestfs endpoint", func() {
 				testClientJob(virtCli, false, resource)
 			})
 		})
@@ -222,6 +241,165 @@ var _ = Describe("[sig-compute]Subresource Api", func() {
 				}, 90*time.Second, 1*time.Second).Should(Equal(v1.Running))
 			})
 		})
+
+		Context("ExpandSpec endpoint", func() {
+			Context("instancetype", func() {
+				var (
+					instancetype *instancetypev1alpha2.VirtualMachineInstancetype
+					expectedCpu  *v1.CPU
+					vmi          *v1.VirtualMachineInstance
+				)
+
+				BeforeEach(func() {
+					instancetype = newVirtualMachineInstancetype(nil)
+					instancetype.Spec.CPU.Guest = 2
+
+					expectedCpu = &v1.CPU{
+						Sockets: 2,
+						Cores:   1,
+						Threads: 1,
+					}
+
+					var err error
+					instancetype, err = virtCli.VirtualMachineInstancetype(util.NamespaceTestDefault).
+						Create(context.Background(), instancetype, metav1.CreateOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					vmi = libvmi.New()
+				})
+
+				AfterEach(func() {
+					err := virtCli.VirtualMachineInstancetype(util.NamespaceTestDefault).
+						Delete(context.Background(), instancetype.Name, metav1.DeleteOptions{})
+					Expect(err).ToNot(HaveOccurred())
+				})
+
+				It("[test_id:TODO] should return unchanged VirtualMachine, if instancetype is not used", func() {
+					vm := tests.NewRandomVirtualMachine(vmi, false)
+
+					vm.Spec.Template.Spec.Domain.CPU = &v1.CPU{Sockets: 2, Cores: 1, Threads: 1}
+
+					vm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+					Expect(err).ToNot(HaveOccurred())
+
+					expandedVm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).
+						GetWithExpandedSpec(vm.GetName())
+					Expect(err).ToNot(HaveOccurred())
+
+					Expect(expandedVm.Spec).To(Equal(vm.Spec))
+				})
+
+				It("[test_id:TODO] should return VirtualMachine with instancetype expanded", func() {
+
+					vm := tests.NewRandomVirtualMachine(vmi, false)
+					vm.Spec.Instancetype = &v1.InstancetypeMatcher{
+						Name: instancetype.Name,
+						Kind: instancetypeapi.SingularResourceName,
+					}
+
+					vm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+					Expect(err).ToNot(HaveOccurred())
+
+					expandedVm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).
+						GetWithExpandedSpec(vm.GetName())
+					Expect(err).ToNot(HaveOccurred())
+
+					Expect(expandedVm.Spec.Instancetype).To(BeNil(), "Expanded VM should not have InstancetypeMatcher")
+					Expect(expandedVm.Spec.Template.Spec.Domain.CPU).To(Equal(expectedCpu), "VM should have instancetype expanded")
+				})
+
+				It("[test_id:TODO] should fail, if referenced instancetype does not exist", func() {
+					vm := tests.NewRandomVirtualMachine(vmi, false)
+					vm.Spec.Instancetype = &v1.InstancetypeMatcher{
+						Name: "noniexisting-instancetype",
+						Kind: instancetypeapi.SingularResourceName,
+					}
+
+					vm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+					Expect(err).To(HaveOccurred())
+				})
+
+				It("[test_id:TODO] should fail, if instancetype expansion hits a conflict", func() {
+					vm := tests.NewRandomVirtualMachine(vmi, false)
+					vm.Spec.Instancetype = &v1.InstancetypeMatcher{
+						Name: instancetype.Name,
+						Kind: instancetypeapi.SingularResourceName,
+					}
+
+					vm.Spec.Template.Spec.Domain.CPU = &v1.CPU{Sockets: 1, Cores: 1, Threads: 1}
+
+					vm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+					Expect(err).To(HaveOccurred())
+				})
+			})
+
+			Context("preference", func() {
+				var preference *instancetypev1alpha2.VirtualMachinePreference
+
+				BeforeEach(func() {
+					preference = newVirtualMachinePreference()
+					preference.Spec.Devices = &instancetypev1alpha2.DevicePreferences{
+						PreferredAutoattachGraphicsDevice: pointer.Bool(true),
+					}
+
+					var err error
+					preference, err = virtCli.VirtualMachinePreference(util.NamespaceTestDefault).
+						Create(context.Background(), preference, metav1.CreateOptions{})
+					Expect(err).NotTo(HaveOccurred())
+				})
+
+				AfterEach(func() {
+					err := virtCli.VirtualMachinePreference(util.NamespaceTestDefault).
+						Delete(context.Background(), preference.Name, metav1.DeleteOptions{})
+					Expect(err).ToNot(HaveOccurred())
+				})
+
+				It("[test_id:TODO] should return unchanged VirtualMachine, if preference is not used", func() {
+					// Using NewCirros() here to have some data in spec.
+					vm := tests.NewRandomVirtualMachine(libvmi.NewCirros(), false)
+
+					vm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+					Expect(err).ToNot(HaveOccurred())
+
+					expandedVm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).
+						GetWithExpandedSpec(vm.GetName())
+					Expect(err).ToNot(HaveOccurred())
+
+					Expect(expandedVm.Spec).To(Equal(vm.Spec))
+				})
+
+				It("[test_id:TODO] should return VirtualMachine with preference expanded", func() {
+					// Using NewCirros() here to have some data in spec.
+					vm := tests.NewRandomVirtualMachine(libvmi.NewCirros(), false)
+					vm.Spec.Preference = &v1.PreferenceMatcher{
+						Name: preference.Name,
+						Kind: instancetypeapi.SingularPreferenceResourceName,
+					}
+
+					vm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+					Expect(err).ToNot(HaveOccurred())
+
+					expandedVm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).
+						GetWithExpandedSpec(vm.GetName())
+					Expect(err).ToNot(HaveOccurred())
+
+					Expect(expandedVm.Spec.Preference).To(BeNil(), "Expanded VM should not have InstancetypeMatcher")
+					Expect(*expandedVm.Spec.Template.Spec.Domain.Devices.AutoattachGraphicsDevice).To(BeTrue(), "VM should have preference expanded")
+				})
+
+				It("[test_id:TODO] should fail, if referenced preference does not exist", func() {
+					// Using NewCirros() here to have some data in spec.
+					vm := tests.NewRandomVirtualMachine(libvmi.NewCirros(), false)
+					vm.Spec.Preference = &v1.PreferenceMatcher{
+						Name: "nonexisting-preference",
+						Kind: instancetypeapi.SingularPreferenceResourceName,
+					}
+
+					vm, err := virtCli.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+					Expect(err).To(HaveOccurred())
+				})
+			})
+		})
 	})
 
 	Describe("[rfe_id:1195][crit:medium][vendor:cnv-qe@redhat.com][level:component] the openapi spec for the subresources", func() {
@@ -260,14 +438,14 @@ var _ = Describe("[sig-compute]Subresource Api", func() {
 			It("[test_id:7476]Freeze without guest agent", func() {
 				expectedErr := "Internal error occurred"
 				err = virtCli.VirtualMachineInstance(util.NamespaceTestDefault).Freeze(vm.Name, 0)
-				Expect(err).ToNot(BeNil())
+				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(expectedErr))
 			})
 
 			It("[test_id:7477]Unfreeze without guest agent", func() {
 				expectedErr := "Internal error occurred"
 				err = virtCli.VirtualMachineInstance(util.NamespaceTestDefault).Unfreeze(vm.Name)
-				Expect(err).ToNot(BeNil())
+				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(expectedErr))
 			})
 		})
@@ -350,6 +528,8 @@ var _ = Describe("[sig-compute]Subresource Api", func() {
 })
 
 func testClientJob(virtCli kubecli.KubevirtClient, withServiceAccount bool, resource string) {
+	const subresourceTestLabel = "subresource-access-test-pod"
+	user := int64(1001)
 	namespace := util.NamespaceTestDefault
 	expectedPhase := k8sv1.PodFailed
 	name := "subresource-access-tester"
@@ -357,7 +537,7 @@ func testClientJob(virtCli kubecli.KubevirtClient, withServiceAccount bool, reso
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: name,
 			Labels: map[string]string{
-				v1.AppLabel: tests.SubresourceTestLabel,
+				v1.AppLabel: subresourceTestLabel,
 			},
 		},
 		Spec: k8sv1.PodSpec{
@@ -367,15 +547,24 @@ func testClientJob(virtCli kubecli.KubevirtClient, withServiceAccount bool, reso
 					Name:    name,
 					Image:   fmt.Sprintf("%s/subresource-access-test:%s", flags.KubeVirtUtilityRepoPrefix, flags.KubeVirtUtilityVersionTag),
 					Command: []string{"/subresource-access-test", "-n", namespace, resource},
+					SecurityContext: &k8sv1.SecurityContext{
+						AllowPrivilegeEscalation: pointer.Bool(false),
+						Capabilities:             &k8sv1.Capabilities{Drop: []k8sv1.Capability{"ALL"}},
+					},
 				},
+			},
+			SecurityContext: &k8sv1.PodSecurityContext{
+				RunAsNonRoot:   pointer.Bool(true),
+				RunAsUser:      &user,
+				SeccompProfile: &k8sv1.SeccompProfile{Type: k8sv1.SeccompProfileTypeRuntimeDefault},
 			},
 		},
 	}
 
 	if withServiceAccount {
-		job.Spec.ServiceAccountName = tests.SubresourceServiceAccountName
+		job.Spec.ServiceAccountName = testsuite.SubresourceServiceAccountName
 		expectedPhase = k8sv1.PodSucceeded
-	} else if resource == "version" {
+	} else if resource == "version" || resource == "guestfs" {
 		expectedPhase = k8sv1.PodSucceeded
 	}
 

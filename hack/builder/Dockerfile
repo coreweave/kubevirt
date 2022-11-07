@@ -1,23 +1,27 @@
-FROM quay.io/centos/centos:stream8
+FROM quay.io/centos/centos:stream9
 
 ARG SONOBUOY_ARCH
 ARG BAZEL_ARCH
 
-ENV BAZEL_VERSION 4.2.1
+ENV BAZEL_VERSION=5.3.1
+ENV GIMME_GO_VERSION=1.19.2
+ENV GRADLE_VERSION=6.6
+ENV OPERATOR_COURIER_VERSION=2.1.11
+ENV SONOBUOY_VERSION=0.56.9
+ENV GOLANGCI_LINT_VERSION=v1.46.2
 
-ENV KUBEVIRT_CREATE_BAZELRCS false
+ENV KUBEVIRT_CREATE_BAZELRCS=false
 
 # Install packages
 RUN dnf install -y dnf-plugins-core && \
-    dnf config-manager --enable powertools && \
-    dnf -y install \
+    dnf config-manager --enable crb && \
+    dnf install -y --setopt=install_weak_deps=False \
         java-11-openjdk-devel \
         libvirt-devel \
         cpio \
         patch \
         make \
         git \
-        mercurial \
         sudo \
         gcc \
         gcc-c++ \
@@ -29,17 +33,22 @@ RUN dnf install -y dnf-plugins-core && \
         rsync \
         qemu-img \
         protobuf-compiler \
-        python38 \
-        python38-devel \
-        python38-pip \
+        python3 \
+        python3-devel \
+        python3-pip \
+        python3-setuptools \
         redhat-rpm-config \
         jq \
         wget \
+        rubygems \
         diffutils && \
-    dnf -y clean all
+    dnf clean -y all
 
 # Avoids the need to install sssd-client by disabling lookups
 COPY nsswitch.conf /etc/nsswitch.conf
+
+# Necessary for generation of HTML-formatted API docs (.adoc)
+RUN gem install asciidoctor
 
 # Necessary for Bazel to find Python inside the container
 #
@@ -48,14 +57,13 @@ COPY nsswitch.conf /etc/nsswitch.conf
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
 # install gradle (required for swagger)
-RUN wget https://services.gradle.org/distributions/gradle-6.6-bin.zip && \
+RUN wget https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip && \
     mkdir /opt/gradle && \
-    unzip -d /opt/gradle gradle-6.6-bin.zip
+    unzip -d /opt/gradle gradle-${GRADLE_VERSION}-bin.zip && \
+    rm gradle-${GRADLE_VERSION}-bin.zip
 
-ENV PATH=$PATH:/opt/gradle/gradle-6.6/bin \
+ENV PATH=$PATH:/opt/gradle/gradle-${GRADLE_VERSION}/bin \
     JAVA_HOME=/usr/lib/jvm/java-11
-
-ENV GIMME_GO_VERSION=1.16.6
 
 # reference to master is for an external repo and can't yet be changed
 RUN mkdir -p /gimme && curl -sL \
@@ -68,31 +76,29 @@ ENV GOPATH="/go" GOBIN="/usr/bin" GO111MODULE="on"
 RUN set -x && \
     mkdir -p /go && \
     source /etc/profile.d/gimme.sh && \
-    go get -v golang.org/x/tools/cmd/goimports@d5fe738 && \
-    go get -v mvdan.cc/sh/v3/cmd/shfmt@v3.1.1 && \
-    go get -v k8s.io/code-generator/cmd/deepcopy-gen@v0.20.2 && \
-    go get -v k8s.io/code-generator/cmd/defaulter-gen@v0.20.2  && \
-    go get -v k8s.io/kube-openapi/cmd/openapi-gen@30be4d1 && \
-    go get -v github.com/golang/protobuf/protoc-gen-go@1643683 && \
-    go get -v k8s.io/code-generator/cmd/client-gen@v0.20.2 && \
-    go get -v github.com/securego/gosec/v2/cmd/gosec@0ce48a5 && \
-    go get -v sigs.k8s.io/controller-tools/cmd/controller-gen@v0.4.0 && \
+    go install -v golang.org/x/tools/cmd/goimports@d5fe738 && \
+    go install -v mvdan.cc/sh/v3/cmd/shfmt@v3.1.1 && \
+    go install -v k8s.io/code-generator/cmd/deepcopy-gen@v0.20.2 && \
+    go install -v k8s.io/code-generator/cmd/defaulter-gen@v0.20.2  && \
+    go install -v k8s.io/kube-openapi/cmd/openapi-gen@30be4d1 && \
+    go install -v github.com/golang/protobuf/protoc-gen-go@1643683 && \
+    go install -v k8s.io/code-generator/cmd/client-gen@v0.20.2 && \
+    go install -v github.com/securego/gosec/v2/cmd/gosec@0ce48a5 && \
+    go install -v sigs.k8s.io/controller-tools/cmd/controller-gen@v0.4.0 && \
     go clean -cache -modcache
 
 RUN set -x && \
     source /etc/profile.d/gimme.sh && \
-    go get -v -u github.com/mattn/goveralls@21feffdfd && \
-    go get -v -u github.com/golang/mock/gomock@v1.4.3 && \
-    go get -v -u github.com/rmohr/mock/mockgen@v0.0.0-20170327080805-5980f5d9a70d && \
-    go get -v -u github.com/rmohr/go-swagger-utils/swagger-doc@v0.0.0-20181110145135-878f7deb1d17 && \
-    go get -v -u github.com/onsi/ginkgo/ginkgo@v1.12.0 && \
+    go install -v github.com/mattn/goveralls@21feffdfd && \
+    go install -v github.com/rmohr/mock/mockgen@v0.0.0-20170327080805-5980f5d9a70d && \
+    go install -v github.com/rmohr/go-swagger-utils/swagger-doc@v0.0.0-20181110145135-878f7deb1d17 && \
     go clean -cache -modcache
 
 RUN set -x && \
     source /etc/profile.d/gimme.sh && \
     git clone https://github.com/kubernetes/test-infra.git && \
     cd /test-infra && \
-    git checkout fd0699b906b0593a33ba2bddd3b1ae8822f42dd8 && \
+    git checkout f2693aba912dd40c974304caca999d45ee8dce33 && \
     cd /test-infra/robots/pr-creator && \
     go install && \
     cd /test-infra/robots/issue-creator && \
@@ -103,14 +109,18 @@ RUN set -x && \
     rm -rf /test-infra && \
     rm -rf /go && mkdir /go
 
-RUN pip3 install --upgrade operator-courier==2.1.11
+RUN set -x && \
+    source /etc/profile.d/gimme.sh && \
+    curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOROOT)"/bin $GOLANGCI_LINT_VERSION
 
-ENV SONOBUOY_VERSION=0.19.0
+RUN pip3 install --upgrade operator-courier==${OPERATOR_COURIER_VERSION}
+
 RUN set -x && \
     wget https://github.com/vmware-tanzu/sonobuoy/releases/download/v${SONOBUOY_VERSION}/sonobuoy_${SONOBUOY_VERSION}_linux_${SONOBUOY_ARCH}.tar.gz && \
     tar xvf sonobuoy_${SONOBUOY_VERSION}_linux_${SONOBUOY_ARCH}.tar.gz && \
     chmod +x sonobuoy && \
-    mv sonobuoy /usr/bin
+    mv sonobuoy /usr/bin && \
+    rm sonobuoy_${SONOBUOY_VERSION}_linux_${SONOBUOY_ARCH}.tar.gz
 
 COPY rsyncd.conf /etc/rsyncd.conf
 
@@ -118,6 +128,7 @@ COPY entrypoint.sh /entrypoint.sh
 
 COPY create_bazel_cache_rcs.sh /create_bazel_cache_rcs.sh
 
-RUN curl -L -o /usr/bin/bazel https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-${BAZEL_ARCH} && chmod u+x /usr/bin/bazel
+RUN curl -L -o /usr/bin/bazel https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-${BAZEL_ARCH} && \
+    chmod u+x /usr/bin/bazel
 
 ENTRYPOINT [ "/entrypoint.sh" ]

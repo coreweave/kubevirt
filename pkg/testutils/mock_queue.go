@@ -6,7 +6,7 @@ import (
 	"time"
 
 	k8sv1 "k8s.io/api/core/v1"
-	"k8s.io/api/policy/v1beta1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 	framework "k8s.io/client-go/tools/cache/testing"
@@ -14,6 +14,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -22,11 +23,11 @@ MockWorkQueue is a helper workqueue which can be wrapped around
 any RateLimitingInterface implementing queue. This allows synchronous
 testing of the controller. The typical pattern is:
 
-    MockQueue.ExpectAdd(3)
-    vmiSource.Add(vmi)
-    vmiSource.Add(vmi1)
-    vmiSource.Add(vmi2)
-    MockQueue.Wait()
+	MockQueue.ExpectAdd(3)
+	vmiSource.Add(vmi)
+	vmiSource.Add(vmi1)
+	vmiSource.Add(vmi2)
+	MockQueue.Wait()
 
 This ensures that Source callbacks which are listening on vmiSource
 enqueued three times an object. Since enqueing is typically the last
@@ -176,19 +177,19 @@ type PodDisruptionBudgetFeeder struct {
 	Source    *framework.FakeControllerSource
 }
 
-func (v *PodDisruptionBudgetFeeder) Add(pdb *v1beta1.PodDisruptionBudget) {
+func (v *PodDisruptionBudgetFeeder) Add(pdb *policyv1.PodDisruptionBudget) {
 	v.MockQueue.ExpectAdds(1)
 	v.Source.Add(pdb)
 	v.MockQueue.Wait()
 }
 
-func (v *PodDisruptionBudgetFeeder) Modify(pdb *v1beta1.PodDisruptionBudget) {
+func (v *PodDisruptionBudgetFeeder) Modify(pdb *policyv1.PodDisruptionBudget) {
 	v.MockQueue.ExpectAdds(1)
 	v.Source.Modify(pdb)
 	v.MockQueue.Wait()
 }
 
-func (v *PodDisruptionBudgetFeeder) Delete(pdb *v1beta1.PodDisruptionBudget) {
+func (v *PodDisruptionBudgetFeeder) Delete(pdb *policyv1.PodDisruptionBudget) {
 	v.MockQueue.ExpectAdds(1)
 	v.Source.Delete(pdb)
 	v.MockQueue.Wait()

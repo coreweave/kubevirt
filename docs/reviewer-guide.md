@@ -31,7 +31,8 @@ Make a few passes over the code you want to review.
 
 ## Common Architecture Flaws to Avoid
 
-* Avoid using api GETs/LISTs to retrieve an object from the api-server when an informer is more appropriate. In general, informers should be used in cluster wide components such as virt-controller, virt-api, and virt-operator.
+* Avoid using api GETs/LISTs to retrieve an object from the api-server when an informer is more appropriate. In general, informers should be used in cluster wide components such as virt-controller and virt-operator. 
+* Note that informers should not however be used within virt-api. This is because unlike virt-controller and virt-operator the API can scale freely, does not use any leader election and pre-caching objects with informers can lead to an unexpected high amount of object transfers far beyond context information retrieval via GETs during actual webhook invocations. For this reason using api GETs etc for object retrieval are recommended from within the virt-api. See [this ML thread for more context](https://groups.google.com/g/kubevirt-dev/c/q_hR1tFH4Rk).
 * Use a PATCH instead of an UPDATE operation when a controller does not strictly own the object being modified. An example of this is when the live migration controller needs to modify a VMI. The VMI is owned by a different controller, so the migration controller should use a PATCH on the VMI.
 * Avoid adding informers to node level components such as virt-handler. This causes api-server pressure at scale.
 * Reconcile loops are multithreaded and we must pay attention to thread safety. For example, accessing an external golang map within the reconcile loop must be protected by locks.
@@ -40,6 +41,58 @@ Make a few passes over the code you want to review.
 * When creating kubernetes events, make sure the code path issuing the event doesn't cause the event to fire every time the object is reconciled. For example, if we want to fire an event when a vmi moves to the running phase, we should compare the old phase with the new phase and only fire the event when the phase transition is occurring. A bad example would be to fire the event every time the reconcile loop sees the vmi's phase is Running. This would cause an unnecessary amount of duplicate events to be sent to the api-server.
 * List ordering on CRD APIs matter. If two components need to update a list on the same object, make sure both components do it in a way that preserves the order of the list. For example, both virt-handler and virt-controller need to modify conditions on the VMI status. If both virt-handler and virt-controller are constantly changing the order of the conditions list, that will cause an update storm where both components are competing with one another to write changes.
 * Privileged node-level operations should be added to virt-handler and not virt-launcher to keep the privileges on virt-launcher at a minimum.
+
+## In-Depth PATCH/UPDATE considerations
+
+When trying to determine if an UPDATE or a PATCH should be used, the following has to be considered:
+
+### Updating `spec` or `metadata` sections with a controller
+
+Did the controller in question CREATE the object it operates on?
+- Yes: `Update` can be used
+- No: `Patch` with a narrow focus on the fields of interest needs to be used
+
+Reasoning:
+
+A controller which did not create an object can not have a full picture of the
+object which it operates on. Operating on a compatible API does not mean that
+the typed rest clients of k8s see all existing fields. Deserializing and
+serializing an object can therefore lead to lost information since a the
+final `Update` call would just remove the unknown fields.
+
+On the other hand, if the controller created an object, the operator added all
+information which mattered itself. Any additional information, since the
+controller is the owner, can only be defaulted from the apiserver. Still one has
+to be careful to not hot-loop on such defaulted values.
+
+### Updating `status` sections from a single controller
+
+Does the controller own the `status`?
+- Yes: `UpdateStatus` can be used
+- No: `Patch` needs to be used
+
+Reasoning:
+
+`status` sections are exclusively owned by controllers and are never owned by
+end-users. As such, even if an object gets created by users, and the controller
+does not own the `spec` and the `metadata` it usually owns the `status`.
+
+Since it owns the status it is solely responsible for it and as such it can do
+`UpdateStatus` operations on that section.
+
+### Updating `status` sections from multiple controllers
+
+Does the controller own the `status`?
+- Yes: `UpdateStatus` can be used
+
+Does the controller only enrich certain sections of the `status` and does not own it?
+- Yes: `Patch` with a narrow focus on the fields of interest needs to be used
+
+Reasoning:
+
+This can be derived from the reasoning of the use-cases above. Such
+multi-controller cases very often require special handling during updates (like
+which components get updated first).
 
 ## When is a PR good enough?
 
@@ -62,4 +115,4 @@ The lowest bar for acceptable golang **coding standards** (anti-patterns, coding
 
 The lowest **testing bar** to pass:
 * New code requires new unit tests.
-* New fetures and bug fixes require at least on e2e test (the core case must be tested).
+* New features and bug fixes require at least on e2e test (the core case must be tested).

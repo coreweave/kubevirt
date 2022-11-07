@@ -20,13 +20,14 @@
 package mutators
 
 import (
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/tools/cache"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
@@ -76,7 +77,7 @@ var _ = Describe("Mutating Webhook Namespace Limits", func() {
 			}
 
 			By("Applying namespace range values on the VMI")
-			applyNamespaceLimitRangeValues(&vmi, namespaceLimitInformer)
+			applyNamespaceLimitRangeValues(&vmi, namespaceLimitInformer, vmi.Namespace)
 
 			Expect(vmi.Spec.Domain.Resources.Limits.Memory().String()).To(Equal("64M"))
 			Expect(vmi.Spec.Domain.Resources.Limits.Cpu().String()).To(Equal("2"))
@@ -88,7 +89,7 @@ var _ = Describe("Mutating Webhook Namespace Limits", func() {
 	When("VMI does not have limits under spec", func() {
 		It("should apply all namespace limits", func() {
 			By("Applying namespace range values on the VMI")
-			applyNamespaceLimitRangeValues(&vmi, namespaceLimitInformer)
+			applyNamespaceLimitRangeValues(&vmi, namespaceLimitInformer, vmi.Namespace)
 
 			Expect(vmi.Spec.Domain.Resources.Limits.Memory().String()).To(Equal("256M"))
 			Expect(vmi.Spec.Domain.Resources.Limits.Cpu().String()).To(Equal("4"))
@@ -108,7 +109,7 @@ var _ = Describe("Mutating Webhook Namespace Limits", func() {
 			}
 
 			By("Applying namespace range values on the VMI")
-			applyNamespaceLimitRangeValues(&vmi, namespaceLimitInformer)
+			applyNamespaceLimitRangeValues(&vmi, namespaceLimitInformer, vmi.Namespace)
 
 			Expect(vmi.Spec.Domain.Resources.Limits.Memory().String()).To(Equal("256M"))
 			Expect(vmi.Spec.Domain.Resources.Limits.Cpu().String()).To(Equal("2"))
@@ -126,7 +127,7 @@ var _ = Describe("Mutating Webhook Namespace Limits", func() {
 			}
 
 			By("Applying namespace range values on the VMI")
-			applyNamespaceLimitRangeValues(&vmi, namespaceLimitInformer)
+			applyNamespaceLimitRangeValues(&vmi, namespaceLimitInformer, vmi.Namespace)
 
 			Expect(vmi.Spec.Domain.Resources.Limits.Memory().String()).To(Equal("64M"))
 			Expect(vmi.Spec.Domain.Resources.Limits.Cpu().String()).To(Equal("2"))

@@ -11,6 +11,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/network/cache"
 	netdriver "kubevirt.io/kubevirt/pkg/network/driver"
 	"kubevirt.io/kubevirt/pkg/network/istio"
@@ -18,9 +19,15 @@ import (
 	virtnetlink "kubevirt.io/kubevirt/pkg/network/link"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
 )
 
 const (
+	ipVerifyFailFmt            = "failed to verify whether ipv%s is configured on %s"
+	toDest                     = "--to-destination"
+	src                        = "--source"
+	dport                      = "--dport"
+	strFmt                     = "{ %s }"
 	LibvirtDirectMigrationPort = 49152
 	LibvirtBlockMigrationPort  = 49153
 )
@@ -58,17 +65,24 @@ func (b *MasqueradePodNetworkConfigurator) DiscoverPodNetworkInterface(podIfaceN
 	}
 	b.podNicLink = link
 
-	if err := b.computeIPv4GatewayAndVmIp(); err != nil {
+	ipv4Enabled, err := b.handler.HasIPv4GlobalUnicastAddress(podIfaceName)
+	if err != nil {
+		log.Log.Reason(err).Errorf(ipVerifyFailFmt, "4", podIfaceName)
 		return err
 	}
+	if ipv4Enabled {
+		if err := b.computeIPv4GatewayAndVmIp(); err != nil {
+			return err
+		}
+	}
 
-	ipv6Enabled, err := b.handler.IsIpv6Enabled(podIfaceName)
+	ipv6Enabled, err := b.handler.HasIPv6GlobalUnicastAddress(podIfaceName)
 	if err != nil {
-		log.Log.Reason(err).Errorf("failed to verify whether ipv6 is configured on %s", podIfaceName)
+		log.Log.Reason(err).Errorf(ipVerifyFailFmt, "6", podIfaceName)
 		return err
 	}
 	if ipv6Enabled {
-		if err := b.discoverIPv6GatewayAndVmIp(); err != nil {
+		if err := b.computeIPv6GatewayAndVmIp(); err != nil {
 			return err
 		}
 	}
@@ -87,7 +101,7 @@ func (b *MasqueradePodNetworkConfigurator) computeIPv4GatewayAndVmIp() error {
 	return nil
 }
 
-func (b *MasqueradePodNetworkConfigurator) discoverIPv6GatewayAndVmIp() error {
+func (b *MasqueradePodNetworkConfigurator) computeIPv6GatewayAndVmIp() error {
 	ipv6Gateway, ipv6, err := virtnetlink.GenerateMasqueradeGatewayAndVmIPAddrs(b.vmiSpecNetwork, iptables.ProtocolIPv6)
 	if err != nil {
 		return err
@@ -111,21 +125,35 @@ func (b *MasqueradePodNetworkConfigurator) PreparePodNetworkInterface() error {
 		tapOwner = strconv.Itoa(util.NonRootUID)
 	}
 	tapDeviceName := virtnetlink.GenerateTapDeviceName(b.podNicLink.Attrs().Name)
-	err := createAndBindTapToBridge(b.handler, tapDeviceName, b.bridgeInterfaceName, b.launcherPID, b.podNicLink.Attrs().MTU, tapOwner, b.vmi)
+
+	queues := converter.CalculateNetworkQueues(b.vmi, converter.GetInterfaceType(b.vmiSpecIface))
+	err := createAndBindTapToBridge(b.handler, tapDeviceName, b.bridgeInterfaceName, b.launcherPID, b.podNicLink.Attrs().MTU, tapOwner, queues)
 	if err != nil {
 		log.Log.Reason(err).Errorf("failed to create tap device named %s", tapDeviceName)
 		return err
 	}
 
-	err = b.createNatRules(iptables.ProtocolIPv4)
+	ipv4Enabled, err := b.handler.HasIPv4GlobalUnicastAddress(b.podNicLink.Attrs().Name)
 	if err != nil {
-		log.Log.Reason(err).Errorf("failed to create ipv4 nat rules for vm error: %v", err)
+		log.Log.Reason(err).Errorf(ipVerifyFailFmt, "4", b.podNicLink.Attrs().Name)
 		return err
 	}
+	if ipv4Enabled {
+		err = b.handler.ConfigureRouteLocalNet(api.DefaultBridgeName)
+		if err != nil {
+			log.Log.Reason(err).Errorf("failed to configure routing of local addresses for %s", api.DefaultBridgeName)
+			return err
+		}
+		err = b.createNatRules(iptables.ProtocolIPv4)
+		if err != nil {
+			log.Log.Reason(err).Errorf("failed to create ipv4 nat rules for vm error: %v", err)
+			return err
+		}
+	}
 
-	ipv6Enabled, err := b.handler.IsIpv6Enabled(b.podNicLink.Attrs().Name)
+	ipv6Enabled, err := b.handler.HasIPv6GlobalUnicastAddress(b.podNicLink.Attrs().Name)
 	if err != nil {
-		log.Log.Reason(err).Errorf("failed to verify whether ipv6 is configured on %s", b.podNicLink.Attrs().Name)
+		log.Log.Reason(err).Errorf(ipVerifyFailFmt, "6", b.podNicLink.Attrs().Name)
 		return err
 	}
 	if ipv6Enabled {
@@ -167,16 +195,14 @@ func (b *MasqueradePodNetworkConfigurator) createBridge() error {
 		return err
 	}
 
-	if err := b.handler.AddrAdd(bridge, b.vmGatewayAddr); err != nil {
-		log.Log.Reason(err).Errorf("failed to set bridge IP")
-		return err
+	if b.vmGatewayAddr != nil {
+		if err := b.handler.AddrAdd(bridge, b.vmGatewayAddr); err != nil {
+			log.Log.Reason(err).Errorf("failed to set bridge IP")
+			return err
+		}
 	}
-	ipv6Enabled, err := b.handler.IsIpv6Enabled(b.podNicLink.Attrs().Name)
-	if err != nil {
-		log.Log.Reason(err).Errorf("failed to verify whether ipv6 is configured on %s", b.podNicLink.Attrs().Name)
-		return err
-	}
-	if ipv6Enabled {
+
+	if b.vmGatewayIpv6Addr != nil {
 		if err := b.handler.AddrAdd(bridge, b.vmGatewayIpv6Addr); err != nil {
 			log.Log.Reason(err).Errorf("failed to set bridge IPv6")
 			return err
@@ -248,13 +274,13 @@ func (b *MasqueradePodNetworkConfigurator) createNatRulesUsingIptables(protocol 
 		err = b.handler.IptablesAppendRule(protocol, "nat", "KUBEVIRT_PREINBOUND",
 			"-j",
 			"DNAT",
-			"--to-destination", b.geVmIfaceIpByProtocol(protocol))
+			toDest, b.geVmIfaceIpByProtocol(protocol))
 		if err != nil {
 			return err
 		}
 
 		err = b.handler.IptablesAppendRule(protocol, "nat", "KUBEVIRT_POSTINBOUND",
-			"--source", getLoopbackAdrress(protocol),
+			src, getLoopbackAdrress(protocol),
 			"-j",
 			"SNAT",
 			"--to-source", b.getGatewayByProtocol(protocol))
@@ -266,7 +292,7 @@ func (b *MasqueradePodNetworkConfigurator) createNatRulesUsingIptables(protocol 
 			"--destination", getLoopbackAdrress(protocol),
 			"-j",
 			"DNAT",
-			"--to-destination", b.geVmIfaceIpByProtocol(protocol))
+			toDest, b.geVmIfaceIpByProtocol(protocol))
 		if err != nil {
 			return err
 		}
@@ -282,9 +308,9 @@ func (b *MasqueradePodNetworkConfigurator) createNatRulesUsingIptables(protocol 
 		err = b.handler.IptablesAppendRule(protocol, "nat", "KUBEVIRT_POSTINBOUND",
 			"-p",
 			strings.ToLower(port.Protocol),
-			"--dport",
+			dport,
 			strconv.Itoa(int(port.Port)),
-			"--source", getLoopbackAdrress(protocol),
+			src, getLoopbackAdrress(protocol),
 			"-j",
 			"SNAT",
 			"--to-source", b.getGatewayByProtocol(protocol))
@@ -295,11 +321,11 @@ func (b *MasqueradePodNetworkConfigurator) createNatRulesUsingIptables(protocol 
 		err = b.handler.IptablesAppendRule(protocol, "nat", "KUBEVIRT_PREINBOUND",
 			"-p",
 			strings.ToLower(port.Protocol),
-			"--dport",
+			dport,
 			strconv.Itoa(int(port.Port)),
 			"-j",
 			"DNAT",
-			"--to-destination", b.geVmIfaceIpByProtocol(protocol))
+			toDest, b.geVmIfaceIpByProtocol(protocol))
 		if err != nil {
 			return err
 		}
@@ -307,12 +333,12 @@ func (b *MasqueradePodNetworkConfigurator) createNatRulesUsingIptables(protocol 
 		err = b.handler.IptablesAppendRule(protocol, "nat", "OUTPUT",
 			"-p",
 			strings.ToLower(port.Protocol),
-			"--dport",
+			dport,
 			strconv.Itoa(int(port.Port)),
 			"--destination", getLoopbackAdrress(protocol),
 			"-j",
 			"DNAT",
-			"--to-destination", b.geVmIfaceIpByProtocol(protocol))
+			toDest, b.geVmIfaceIpByProtocol(protocol))
 		if err != nil {
 			return err
 		}
@@ -331,7 +357,7 @@ func (b *MasqueradePodNetworkConfigurator) skipForwardingForPortsUsingIptables(p
 		err := b.handler.IptablesAppendRule(protocol, "nat", chain,
 			"-p", "tcp", "--match", "multiport",
 			"--dports", fmt.Sprintf("%s", strings.Join(ports, ",")),
-			"--source", getLoopbackAdrress(protocol),
+			src, getLoopbackAdrress(protocol),
 			"-j", "RETURN")
 		if err != nil {
 			return err
@@ -381,6 +407,12 @@ func (b *MasqueradePodNetworkConfigurator) createNatRulesUsingNftables(proto ipt
 			err = b.skipForwardingForPortsUsingNftables(proto, istio.ReservedPorts())
 			if err != nil {
 				return err
+			}
+			for _, nonProxiedPort := range istio.NonProxiedPorts() {
+				err = b.forwardPortUsingNftables(proto, nonProxiedPort)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
@@ -433,6 +465,15 @@ func (b *MasqueradePodNetworkConfigurator) createNatRulesUsingNftables(proto ipt
 			if err != nil {
 				return err
 			}
+		} else {
+			for _, nonProxiedPort := range istio.NonProxiedPorts() {
+				if int(port.Port) == nonProxiedPort {
+					err = b.forwardPortUsingNftables(proto, nonProxiedPort)
+					if err != nil {
+						return err
+					}
+				}
+			}
 		}
 
 		err = b.handler.NftablesAppendRule(proto, "nat", "output",
@@ -457,7 +498,7 @@ func (b *MasqueradePodNetworkConfigurator) skipForwardingForPortsUsingNftables(p
 	chainWhereSnatIsPerformed := "KUBEVIRT_POSTINBOUND"
 	for _, chain := range []string{chainWhereDnatIsPerformed, chainWhereSnatIsPerformed} {
 		err := b.handler.NftablesAppendRule(proto, "nat", chain,
-			"tcp", "dport", fmt.Sprintf("{ %s }", strings.Join(ports, ", ")),
+			"tcp", "dport", fmt.Sprintf(strFmt, strings.Join(ports, ", ")),
 			b.handler.GetNFTIPString(proto), "saddr", getLoopbackAdrress(proto),
 			"counter", "return")
 		if err != nil {
@@ -465,6 +506,12 @@ func (b *MasqueradePodNetworkConfigurator) skipForwardingForPortsUsingNftables(p
 		}
 	}
 	return nil
+}
+
+func (b *MasqueradePodNetworkConfigurator) forwardPortUsingNftables(proto iptables.Protocol, port int) error {
+	return b.handler.NftablesAppendRule(proto, "nat", "KUBEVIRT_PREINBOUND",
+		"tcp", "dport", fmt.Sprintf("%d", port), "counter",
+		"dnat", "to", b.geVmIfaceIpByProtocol(proto))
 }
 
 func (b *MasqueradePodNetworkConfigurator) getGatewayByProtocol(proto iptables.Protocol) string {
@@ -488,7 +535,7 @@ func (b *MasqueradePodNetworkConfigurator) getSrcAddressesToSnat(proto iptables.
 	if istio.ProxyInjectionEnabled(b.vmi) && proto == iptables.ProtocolIPv4 {
 		addresses = append(addresses, istio.GetLoopbackAddress())
 	}
-	return fmt.Sprintf("{ %s }", strings.Join(addresses, ", "))
+	return fmt.Sprintf(strFmt, strings.Join(addresses, ", "))
 }
 
 func (b *MasqueradePodNetworkConfigurator) getDstAddressesToDnat(proto iptables.Protocol) (string, error) {
@@ -500,7 +547,7 @@ func (b *MasqueradePodNetworkConfigurator) getDstAddressesToDnat(proto iptables.
 		}
 		addresses = append(addresses, ipv4)
 	}
-	return fmt.Sprintf("{ %s }", strings.Join(addresses, ", ")), nil
+	return fmt.Sprintf(strFmt, strings.Join(addresses, ", ")), nil
 }
 
 func getLoopbackAdrress(proto iptables.Protocol) string {

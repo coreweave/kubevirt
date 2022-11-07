@@ -25,20 +25,20 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/client-go/tools/cache"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
 type MigrationCreateAdmitter struct {
-	VMIInformer   cache.SharedIndexInformer
 	ClusterConfig *virtconfig.ClusterConfig
 	VirtClient    kubecli.KubevirtClient
 }
@@ -86,26 +86,18 @@ func (admitter *MigrationCreateAdmitter) Admit(ar *admissionv1.AdmissionReview) 
 		return resp
 	}
 
-	if !admitter.ClusterConfig.LiveMigrationEnabled() {
-		return webhookutils.ToAdmissionResponseError(fmt.Errorf("LiveMigration feature gate is not enabled in kubevirt-config"))
-	}
-
 	causes := ValidateVirtualMachineInstanceMigrationSpec(k8sfield.NewPath("spec"), &migration.Spec)
 	if len(causes) > 0 {
 		return webhookutils.ToAdmissionResponse(causes)
 	}
 
-	cacheKey := fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.VMIName)
-	obj, exists, err := admitter.VMIInformer.GetStore().GetByKey(cacheKey)
-	if err != nil {
+	vmi, err := admitter.VirtClient.VirtualMachineInstance(migration.Namespace).Get(migration.Spec.VMIName, &metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		// ensure VMI exists for the migration
+		return webhookutils.ToAdmissionResponseError(fmt.Errorf("the VMI \"%s/%s\" does not exist", migration.Namespace, migration.Spec.VMIName))
+	} else if err != nil {
 		return webhookutils.ToAdmissionResponseError(err)
 	}
-
-	// ensure VMI exists for the migration
-	if !exists {
-		return webhookutils.ToAdmissionResponseError(fmt.Errorf("the VMI %s does not exist under the cache", migration.Spec.VMIName))
-	}
-	vmi := obj.(*v1.VirtualMachineInstance)
 
 	// Don't allow introducing a migration job for a VMI that has already finalized
 	if vmi.IsFinal() {

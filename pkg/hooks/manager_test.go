@@ -22,7 +22,6 @@ package hooks
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -30,7 +29,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	hooksInfo "kubevirt.io/kubevirt/pkg/hooks/info"
@@ -85,7 +84,7 @@ var _ = Describe("HooksManager", func() {
 
 		BeforeEach(func() {
 			var err error
-			socketDir, err = ioutil.TempDir("", "hooksocketdir")
+			socketDir, err = os.MkdirTemp("", "hooksocketdir")
 			Expect(err).ToNot(HaveOccurred())
 			os.MkdirAll(socketDir, os.ModePerm)
 		})

@@ -22,9 +22,7 @@ package main
 import (
 	goflag "flag"
 	"fmt"
-	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -35,15 +33,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"libvirt.org/go/libvirt"
 
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/util/retry"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
 	"kubevirt.io/kubevirt/pkg/config"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
@@ -51,7 +47,6 @@ import (
 	"kubevirt.io/kubevirt/pkg/hooks"
 	hotplugdisk "kubevirt.io/kubevirt/pkg/hotplug-disk"
 	"kubevirt.io/kubevirt/pkg/ignition"
-	"kubevirt.io/kubevirt/pkg/network/istio"
 	putil "kubevirt.io/kubevirt/pkg/util"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	virtlauncher "kubevirt.io/kubevirt/pkg/virt-launcher"
@@ -65,7 +60,6 @@ import (
 )
 
 const defaultStartTimeout = 3 * time.Minute
-const httpRequestTimeout = 2 * time.Second
 
 func init() {
 	// must registry the event impl before doing anything else.
@@ -174,12 +168,12 @@ func initializeDirs(ephemeralDiskDir string,
 		panic(err)
 	}
 
-	err = cloudinit.SetLocalDirectory(ephemeralDiskDir + "/cloud-init-data")
+	err = cloudinit.SetLocalDirectory(filepath.Join(ephemeralDiskDir, "cloud-init-data"))
 	if err != nil {
 		panic(err)
 	}
 
-	err = ignition.SetLocalDirectory(ephemeralDiskDir + "/ignition-data")
+	err = ignition.SetLocalDirectory(filepath.Join(ephemeralDiskDir, "ignition-data"))
 	if err != nil {
 		panic(err)
 	}
@@ -189,7 +183,7 @@ func initializeDirs(ephemeralDiskDir string,
 		panic(err)
 	}
 
-	err = hotplugdisk.CreateLocalDirectory(hotplugDiskDir)
+	err = hotplugdisk.SetLocalDirectory(hotplugDiskDir)
 	if err != nil {
 		panic(err)
 	}
@@ -329,20 +323,12 @@ func waitForFinalNotify(deleteNotificationSent chan watch.Event,
 	}
 }
 
-func cleanupContainerDiskDirectory(ephemeralDiskDir string) {
-	// Cleanup the content of ephemeralDiskDir, to make sure that all containerDisk containers terminate
-	err := RemoveContents(ephemeralDiskDir)
-	if err != nil {
-		log.Log.Reason(err).Errorf("could not clean up ephemeral disk directory: %s", ephemeralDiskDir)
-	}
-}
-
 func main() {
 	qemuTimeout := pflag.Duration("qemu-timeout", defaultStartTimeout, "Amount of time to wait for qemu")
 	virtShareDir := pflag.String("kubevirt-share-dir", "/var/run/kubevirt", "Shared directory between virt-handler and virt-launcher")
 	ephemeralDiskDir := pflag.String("ephemeral-disk-dir", "/var/run/kubevirt-ephemeral-disks", "Base directory for ephemeral disk data")
 	containerDiskDir := pflag.String("container-disk-dir", "/var/run/kubevirt/container-disks", "Base directory for container disk data")
-	hotplugDiskDir := pflag.String("hotplug-disk-dir", "/var/run/kubevirt/hotplug-disks", "Base directory for hotplug disk data")
+	hotplugDiskDir := pflag.String("hotplug-disk-dir", v1.HotplugDiskDir, "Base directory for hotplug disk data")
 	name := pflag.String("name", "", "Name of the VirtualMachineInstance")
 	uid := pflag.String("uid", "", "UID of the VirtualMachineInstance")
 	namespace := pflag.String("namespace", "", "Namespace of the VirtualMachineInstance")
@@ -350,15 +336,14 @@ func main() {
 	allowEmulation := pflag.Bool("allow-emulation", false, "Allow use of software emulation as fallback")
 	runWithNonRoot := pflag.Bool("run-as-nonroot", false, "Run libvirtd with the 'virt' user")
 	hookSidecars := pflag.Uint("hook-sidecars", 0, "Number of requested hook sidecars, virt-launcher will wait for all of them to become available")
-	noFork := pflag.Bool("no-fork", false, "Fork and let virt-launcher watch itself to react to crashes if set to false")
 	ovmfPath := pflag.String("ovmf-path", "/usr/share/OVMF", "The directory that contains the EFI roms (like OVMF_CODE.fd)")
-	qemuAgentSysInterval := pflag.Duration("qemu-agent-sys-interval", 120, "Interval in seconds between consecutive qemu agent calls for sys commands")
-	qemuAgentFileInterval := pflag.Duration("qemu-agent-file-interval", 300, "Interval in seconds between consecutive qemu agent calls for file command")
-	qemuAgentUserInterval := pflag.Duration("qemu-agent-user-interval", 10, "Interval in seconds between consecutive qemu agent calls for user command")
-	qemuAgentVersionInterval := pflag.Duration("qemu-agent-version-interval", 300, "Interval in seconds between consecutive qemu agent calls for version command")
-	qemuAgentFSFreezeStatusInterval := pflag.Duration("qemu-fsfreeze-status-interval", 5, "Interval in seconds between consecutive qemu agent calls for fsfreeze status command")
-	keepAfterFailure := pflag.Bool("keep-after-failure", false, "virt-launcher will be kept alive after failure for debugging if set to true")
+	qemuAgentSysInterval := pflag.Duration("qemu-agent-sys-interval", 120*time.Second, "Interval between consecutive qemu agent calls for sys commands")
+	qemuAgentFileInterval := pflag.Duration("qemu-agent-file-interval", 300*time.Second, "Interval between consecutive qemu agent calls for file command")
+	qemuAgentUserInterval := pflag.Duration("qemu-agent-user-interval", 10*time.Second, "Interval between consecutive qemu agent calls for user command")
+	qemuAgentVersionInterval := pflag.Duration("qemu-agent-version-interval", 300*time.Second, "Interval between consecutive qemu agent calls for version command")
+	qemuAgentFSFreezeStatusInterval := pflag.Duration("qemu-fsfreeze-status-interval", 5*time.Second, "Interval between consecutive qemu agent calls for fsfreeze status command")
 	simulateCrash := pflag.Bool("simulate-crash", false, "Causes virt-launcher to immediately crash. This is used by functional tests to simulate crash loop scenarios.")
+	libvirtLogFilters := pflag.String("libvirt-log-filters", "", "Set custom log filters for libvirt")
 
 	// set new default verbosity, was set to 0 by glog
 	goflag.Set("v", "2")
@@ -376,19 +361,6 @@ func main() {
 		} else {
 			log.Log.Warningf("failed to set log verbosity. The value of logVerbosity label should be an integer, got %s instead.", verbosityStr)
 		}
-	}
-
-	if !*noFork {
-		exitCode, err := ForkAndMonitor(*containerDiskDir)
-		if *keepAfterFailure && (exitCode != 0 || err != nil) {
-			log.Log.Infof("keeping virt-launcher container alive since --keep-after-failure is set to true")
-			<-make(chan struct{})
-		}
-		if err != nil {
-			log.Log.Reason(err).Error("monitoring virt-launcher failed")
-			os.Exit(1)
-		}
-		os.Exit(exitCode)
 	}
 
 	if *simulateCrash {
@@ -415,7 +387,7 @@ func main() {
 	stopChan := make(chan struct{})
 
 	l := util.NewLibvirtWrapper(*runWithNonRoot)
-	err = l.SetupLibvirt()
+	err = l.SetupLibvirt(libvirtLogFilters)
 	if err != nil {
 		panic(err)
 	}
@@ -434,7 +406,7 @@ func main() {
 	notifier := notifyclient.NewNotifier(*virtShareDir)
 	defer notifier.Close()
 
-	domainManager, err := virtwrap.NewLibvirtDomainManager(domainConn, *virtShareDir, &agentStore, *ovmfPath, ephemeralDiskCreator)
+	domainManager, err := virtwrap.NewLibvirtDomainManager(domainConn, *virtShareDir, *ephemeralDiskDir, &agentStore, *ovmfPath, ephemeralDiskCreator)
 	if err != nil {
 		panic(err)
 	}
@@ -465,10 +437,14 @@ func main() {
 	}
 
 	finalShutdownCallback := func(pid int) {
-		err := domainManager.KillVMI(vmi)
-		if err != nil {
-			log.Log.Reason(err).Errorf("Unable to stop qemu with libvirt, falling back to SIGTERM")
-			syscall.Kill(pid, syscall.SIGTERM)
+		if err := domainManager.KillVMI(vmi); err != nil {
+			log.Log.Reason(err).Errorf("Unable to stop qemu with libvirt")
+			if pid != 0 {
+				log.Log.Warning("Falling back to SIGTERM")
+				if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+					log.Log.Reason(err).Errorf("Unable to kill PID %d", pid)
+				}
+			}
 		}
 	}
 
@@ -498,7 +474,14 @@ func main() {
 
 	domain := waitForDomainUUID(*qemuTimeout, events, signalStopChan, domainManager)
 	if domain != nil {
-		mon := virtlauncher.NewProcessMonitor(domain.Spec.UUID,
+		var pidDir string
+		if *runWithNonRoot {
+			pidDir = "/run/libvirt/qemu/run"
+		} else {
+			pidDir = "/run/libvirt/qemu"
+		}
+		mon := virtlauncher.NewProcessMonitor(domainName,
+			pidDir,
 			*gracePeriodSeconds,
 			finalShutdownCallback,
 			gracefulShutdownCallback)
@@ -517,154 +500,4 @@ func main() {
 	<-cmdServerDone
 
 	log.Log.Info("Exiting...")
-}
-
-// ForkAndMonitor itself to give qemu an extra grace period to properly terminate
-// in case of virt-launcher crashes
-func ForkAndMonitor(containerDiskDir string) (int, error) {
-	defer cleanupContainerDiskDirectory(containerDiskDir)
-	defer terminateIstioProxy()
-	cmd := exec.Command(os.Args[0], append(os.Args[1:], "--no-fork", "true")...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		log.Log.Reason(err).Error("failed to fork virt-launcher")
-		return 1, err
-	}
-
-	exitStatus := make(chan int, 10)
-	sigs := make(chan os.Signal, 10)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGCHLD)
-	go func() {
-		for sig := range sigs {
-			switch sig {
-			case syscall.SIGCHLD:
-				var wstatus syscall.WaitStatus
-				wpid, err := syscall.Wait4(-1, &wstatus, syscall.WNOHANG, nil)
-				if err != nil {
-					log.Log.Reason(err).Errorf("Failed to reap process %d", wpid)
-				}
-
-				log.Log.Infof("Reaped pid %d with status %d", wpid, int(wstatus))
-				if wpid == cmd.Process.Pid {
-					exitStatus <- wstatus.ExitStatus()
-				}
-
-			default:
-				log.Log.V(3).Log("signalling virt-launcher to shut down")
-				err := cmd.Process.Signal(syscall.SIGTERM)
-				sig.Signal()
-				if err != nil {
-					log.Log.Reason(err).Errorf("received signal %s but can't signal virt-launcher to shut down", sig.String())
-				}
-			}
-		}
-	}()
-
-	exitCode := <-exitStatus
-	if exitCode != 0 {
-		log.Log.Errorf("dirty virt-launcher shutdown: exit-code %d", exitCode)
-	}
-
-	// give qemu some time to shut down in case it survived virt-handler
-	// Most of the time we call `qemu-system=* binaries, but qemu-system-* packages
-	// are not everywhere available where libvirt and qemu are. There we usually call qemu-kvm
-	// which resides in /usr/libexec/qemu-kvm
-	pid, _ := virtlauncher.FindPid("qemu-system")
-	qemuProcessCommandPrefix := "qemu-system"
-	if pid <= 0 {
-		pid, _ = virtlauncher.FindPid("qemu-kvm")
-		qemuProcessCommandPrefix = "qemu-kvm"
-	}
-	if pid > 0 {
-		p, err := os.FindProcess(pid)
-		if err != nil {
-			return 1, err
-		}
-		// Signal qemu to shutdown
-		err = p.Signal(syscall.SIGTERM)
-		if err != nil {
-			return 1, err
-		}
-		// Wait for 10 seconds for the qemu process to disappear
-		err = utilwait.PollImmediate(1*time.Second, 10*time.Second, func() (bool, error) {
-			pid, _ := virtlauncher.FindPid(qemuProcessCommandPrefix)
-			if pid == 0 {
-				return true, nil
-			}
-			return false, nil
-		})
-		if err != nil {
-			return 1, err
-		}
-	}
-	return exitCode, nil
-}
-
-func RemoveContents(dir string) error {
-	files, err := filepath.Glob(filepath.Join(dir, "*.sock"))
-	if err != nil {
-		return err
-	}
-	for _, file := range files {
-		err = os.RemoveAll(file)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func terminateIstioProxy() {
-	httpClient := &http.Client{Timeout: httpRequestTimeout}
-	if istioProxyPresent(httpClient) {
-		isRetriable := func(err error) bool {
-			if net.IsConnectionReset(err) || net.IsConnectionRefused(err) || k8serrors.IsServiceUnavailable(err) {
-				return true
-			}
-			return false
-		}
-		err := retry.OnError(retry.DefaultBackoff, isRetriable, func() error {
-			resp, err := httpClient.Post(fmt.Sprintf("http://localhost:%d/quitquitquit", istio.EnvoyMergedPrometheusTelemetryPort), "", nil)
-			if err != nil {
-				log.Log.Reason(err).Error("failed to request istio-proxy termination, retrying...")
-				return err
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				log.Log.Errorf("status code received: %d", resp.StatusCode)
-				return err
-			}
-			return nil
-		})
-		if err != nil {
-			log.Log.Reason(err).Error("all attempts to terminate istio-proxy failed")
-		}
-	}
-}
-
-func istioProxyPresent(httpClient *http.Client) bool {
-	isRetriable := func(err error) bool {
-		if net.IsConnectionReset(err) || net.IsConnectionRefused(err) {
-			return true
-		}
-		return false
-	}
-	err := retry.OnError(retry.DefaultBackoff, isRetriable, func() error {
-		resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/healthz/ready", istio.EnvoyHealthCheckPort))
-		if err != nil {
-			log.Log.Reason(err).Error("error when checking for istio-proxy presence")
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.Header.Get("server") == "envoy" {
-			return nil
-		}
-		return fmt.Errorf("received response from non-istio health server: %s", resp.Header.Get("server"))
-	})
-	if err != nil {
-		return false
-	}
-	return true
 }

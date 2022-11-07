@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
 
@@ -36,6 +36,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
@@ -51,23 +52,18 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 		ExecutingBatchCmd func(*v1.VirtualMachineInstance, []expect.Batcher, time.Duration)
 	)
 
-	tests.BeforeAll(func() {
+	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
 
 		LaunchVMI = tests.VMILauncherIgnoreWarnings(virtClient)
-
-		ExecutingBatchCmd = func(vmi *v1.VirtualMachineInstance, commands []expect.Batcher, timeout time.Duration) {
-			By("Checking that the VirtualMachineInstance serial console output equals to expected one")
-			err := console.ExpectBatch(vmi, commands, timeout)
-			Expect(err).ToNot(HaveOccurred())
-		}
-
 	})
 
-	BeforeEach(func() {
-		tests.BeforeTestCleanup()
-	})
+	ExecutingBatchCmd = func(vmi *v1.VirtualMachineInstance, commands []expect.Batcher, timeout time.Duration) {
+		By("Checking that the VirtualMachineInstance serial console output equals to expected one")
+		err := console.ExpectBatch(vmi, commands, timeout)
+		Expect(err).ToNot(HaveOccurred())
+	}
 
 	Context("with qemu guest agent", func() {
 		It("[test_id:6220]should propagate public ssh keys", func() {
@@ -101,7 +97,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 					Name:      secretID,
 					Namespace: vmi.Namespace,
 					Labels: map[string]string{
-						tests.SecretLabel: secretID,
+						util.SecretLabel: secretID,
 					},
 				},
 				Type: "Opaque",
@@ -112,7 +108,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 				},
 			}
 			_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			LaunchVMI(vmi)
 
@@ -178,7 +174,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 					Name:      secretID,
 					Namespace: vmi.Namespace,
 					Labels: map[string]string{
-						tests.SecretLabel: secretID,
+						util.SecretLabel: secretID,
 					},
 				},
 				Type: "Opaque",
@@ -187,7 +183,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 				},
 			}
 			_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			LaunchVMI(vmi)
 
@@ -249,7 +245,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 					Name:      secretID,
 					Namespace: vmi.Namespace,
 					Labels: map[string]string{
-						tests.SecretLabel: secretID,
+						util.SecretLabel: secretID,
 					},
 				},
 				Type: "Opaque",
@@ -258,7 +254,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 				},
 			}
 			_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			LaunchVMI(vmi)
 
@@ -310,7 +306,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 					Name:      secretID,
 					Namespace: vmi.Namespace,
 					Labels: map[string]string{
-						tests.SecretLabel: secretID,
+						util.SecretLabel: secretID,
 					},
 				},
 				Type: "Opaque",
@@ -319,7 +315,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 				},
 			}
 			_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			LaunchVMI(vmi)
 
@@ -378,7 +374,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 					Name:      secretID,
 					Namespace: vmi.Namespace,
 					Labels: map[string]string{
-						tests.SecretLabel: secretID,
+						util.SecretLabel: secretID,
 					},
 				},
 				Type: "Opaque",
@@ -389,7 +385,7 @@ var _ = Describe("[sig-compute]Guest Access Credentials", func() {
 				},
 			}
 			_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			LaunchVMI(vmi)
 

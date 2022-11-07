@@ -20,8 +20,10 @@
 package webhooks
 
 import (
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	"crypto/tls"
+	"fmt"
+
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
@@ -29,11 +31,11 @@ import (
 
 var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 
-	table.DescribeTable("test validateCustomizeComponents", func(cc v1.CustomizeComponents, expectedCauses int) {
+	DescribeTable("test validateCustomizeComponents", func(cc v1.CustomizeComponents, expectedCauses int) {
 		causes := validateCustomizeComponents(cc)
-		Expect(len(causes)).To(Equal(expectedCauses))
+		Expect(causes).To(HaveLen(expectedCauses))
 	},
-		table.Entry("invalid values rejected", v1.CustomizeComponents{
+		Entry("invalid values rejected", v1.CustomizeComponents{
 			Patches: []v1.CustomizeComponentsPatch{
 				{
 					ResourceName: "virt-api",
@@ -43,7 +45,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 				},
 			},
 		}, 1),
-		table.Entry("empty patch field rejected", v1.CustomizeComponents{
+		Entry("empty patch field rejected", v1.CustomizeComponents{
 			Patches: []v1.CustomizeComponentsPatch{
 				{
 					ResourceName: "virt-api",
@@ -53,7 +55,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 				},
 			},
 		}, 1),
-		table.Entry("valid values accepted", v1.CustomizeComponents{
+		Entry("valid values accepted", v1.CustomizeComponents{
 			Patches: []v1.CustomizeComponentsPatch{
 				{
 					ResourceName: "virt-api",
@@ -64,4 +66,65 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 			},
 		}, 0),
 	)
+
+	Context("with TLSConfiguration", func() {
+		DescribeTable("should reject", func(tlsConfiguration *v1.TLSConfiguration, expectedErrorMessage string, indexInField int) {
+			causes := validateTLSConfiguration(tlsConfiguration)
+
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Message).To(Equal(expectedErrorMessage))
+			field := "spec.configuration.tlsConfiguration.ciphers"
+			if indexInField != -1 {
+				field = fmt.Sprintf("%s#%d", field, indexInField)
+			}
+			Expect(causes[0].Field).To(Equal(field))
+
+		},
+			Entry("with unspecified minTLSVersion but non empty ciphers",
+				&v1.TLSConfiguration{Ciphers: []string{tls.CipherSuiteName(tls.TLS_AES_256_GCM_SHA384)}},
+				"You cannot specify ciphers when spec.configuration.tlsConfiguration.minTLSVersion is empty or VersionTLS13",
+				-1,
+			),
+			Entry("with specified ciphers and minTLSVersion = 1.3",
+				&v1.TLSConfiguration{Ciphers: []string{tls.CipherSuiteName(tls.TLS_AES_256_GCM_SHA384)}, MinTLSVersion: v1.VersionTLS13},
+				"You cannot specify ciphers when spec.configuration.tlsConfiguration.minTLSVersion is empty or VersionTLS13",
+				-1,
+			),
+			Entry("with unknown cipher in the list",
+				&v1.TLSConfiguration{
+					MinTLSVersion: v1.VersionTLS12,
+					Ciphers:       []string{tls.CipherSuiteName(tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256), "NOT_VALID_CIPHER"},
+				},
+				"NOT_VALID_CIPHER is not a valid cipher",
+				1,
+			),
+		)
+	})
 })
+
+type kubevirtSpecOption func(*v1.KubeVirtSpec)
+
+func newKubeVirtSpec(opts ...kubevirtSpecOption) *v1.KubeVirtSpec {
+	kvSpec := &v1.KubeVirtSpec{
+		Configuration: v1.KubeVirtConfiguration{
+			DeveloperConfiguration: &v1.DeveloperConfiguration{},
+		},
+	}
+
+	for _, kvOptFunc := range opts {
+		kvOptFunc(kvSpec)
+	}
+	return kvSpec
+}
+
+func withFeatureGate(featureGate string) kubevirtSpecOption {
+	return func(kvSpec *v1.KubeVirtSpec) {
+		kvSpec.Configuration.DeveloperConfiguration.FeatureGates = append(kvSpec.Configuration.DeveloperConfiguration.FeatureGates, featureGate)
+	}
+}
+
+func withWorkloadUpdateMethod(method v1.WorkloadUpdateMethod) kubevirtSpecOption {
+	return func(kvSpec *v1.KubeVirtSpec) {
+		kvSpec.WorkloadUpdateStrategy.WorkloadUpdateMethods = append(kvSpec.WorkloadUpdateStrategy.WorkloadUpdateMethods, method)
+	}
+}

@@ -33,6 +33,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/config"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/agent"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -51,22 +52,6 @@ type readReturnData struct {
 }
 type readReturn struct {
 	Return readReturnData `json:"return"`
-}
-
-type execReturn struct {
-	Return execReturnData `json:"return"`
-}
-type execReturnData struct {
-	Pid int `json:"pid"`
-}
-
-type execStatusReturn struct {
-	Return execStatusReturnData `json:"return"`
-}
-type execStatusReturnData struct {
-	Exited   bool   `json:"exited"`
-	ExitCode int    `json:"exitcode"`
-	OutData  string `json:"out-data"`
 }
 
 type AccessCredentialManager struct {

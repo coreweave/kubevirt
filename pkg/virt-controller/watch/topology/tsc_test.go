@@ -3,8 +3,13 @@ package topology_test
 import (
 	"fmt"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	"k8s.io/utils/pointer"
+
+	v1 "kubevirt.io/api/core/v1"
+
+	"kubevirt.io/kubevirt/tests/libvmi"
+
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
@@ -35,12 +40,12 @@ var _ = Describe("TSC", func() {
 		))
 	})
 
-	table.DescribeTable("should calculate the node label diff", func(frequenciesInUse []int64, frequenciesOnNode []int64, nodeFrequency int64, scalable bool, expectedToAdd []int64, expectedToRemove []int64) {
+	DescribeTable("should calculate the node label diff", func(frequenciesInUse []int64, frequenciesOnNode []int64, nodeFrequency int64, scalable bool, expectedToAdd []int64, expectedToRemove []int64) {
 		toAdd, toRemove := topology.CalculateTSCLabelDiff(frequenciesInUse, frequenciesOnNode, nodeFrequency, scalable)
 		Expect(toAdd).To(Equal(expectedToAdd))
 		Expect(toRemove).To(Equal(expectedToRemove))
 	},
-		table.Entry(
+		Entry(
 			"on a scalable node",
 			[]int64{1, 2, 3},
 			[]int64{2, 4},
@@ -49,7 +54,7 @@ var _ = Describe("TSC", func() {
 			[]int64{1, 2, 3, 123},
 			[]int64{4},
 		),
-		table.Entry(
+		Entry(
 			"on a scalable node where not all required frequencies are compatible",
 			[]int64{1, 2, 3, 200},
 			[]int64{2, 4},
@@ -58,7 +63,7 @@ var _ = Describe("TSC", func() {
 			[]int64{1, 2, 3, 123},
 			[]int64{4},
 		),
-		table.Entry(
+		Entry(
 			"on a not scalable node where only the node frequency can be set",
 			[]int64{1, 2, 3},
 			[]int64{2, 4},
@@ -68,6 +73,28 @@ var _ = Describe("TSC", func() {
 			[]int64{2, 4},
 		),
 	)
+
+	Context("needs to be set when", func() {
+
+		It("invtsc feature exists", func() {
+			vmi := libvmi.New(
+				libvmi.WithCPUFeature("invtsc", "require"),
+			)
+
+			Expect(topology.IsManualTSCFrequencyRequired(vmi)).To(BeTrue())
+		})
+
+		It("HyperV reenlightenment is enabled", func() {
+			vmi := libvmi.New()
+			vmi.Spec.Domain.Features = &v1.Features{
+				Hyperv: &v1.FeatureHyperv{
+					Reenlightenment: &v1.FeatureState{Enabled: pointer.Bool(true)},
+				},
+			}
+
+			Expect(topology.IsManualTSCFrequencyRequired(vmi)).To(BeTrue())
+		})
+	})
 })
 
 func tscFrequencyLabel(freq int64) string {

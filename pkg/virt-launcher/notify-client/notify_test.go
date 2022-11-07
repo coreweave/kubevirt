@@ -22,24 +22,23 @@ package eventsclient
 import (
 	"encoding/xml"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"reflect"
 	"time"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"libvirt.org/go/libvirt"
 
 	api2 "kubevirt.io/client-go/api"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/handler-launcher-com/notify/info"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	notifyserver "kubevirt.io/kubevirt/pkg/virt-handler/notify-server"
@@ -73,7 +72,7 @@ var _ = Describe("Notify", func() {
 			eventChan = make(chan watch.Event, 100)
 			deleteNotificationSent = make(chan watch.Event, 100)
 			stopped = false
-			shareDir, err = ioutil.TempDir("", "kubevirt-share")
+			shareDir, err = os.MkdirTemp("", "kubevirt-share")
 			Expect(err).ToNot(HaveOccurred())
 
 			go func() {
@@ -91,11 +90,10 @@ var _ = Describe("Notify", func() {
 			}
 			client.Close()
 			os.RemoveAll(shareDir)
-			ctrl.Finish()
 		})
 
 		Context("server", func() {
-			table.DescribeTable("should accept Domain notify events", func(state libvirt.DomainState, event libvirt.DomainEventType, kubevirtState api.LifeCycle, kubeEventType watch.EventType) {
+			DescribeTable("should accept Domain notify events", func(state libvirt.DomainState, event libvirt.DomainEventType, kubevirtState api.LifeCycle, kubeEventType watch.EventType) {
 				domain := api.NewMinimalDomain("test")
 				x, err := xml.Marshal(domain.Spec)
 				Expect(err).ToNot(HaveOccurred())
@@ -118,16 +116,16 @@ var _ = Describe("Notify", func() {
 					newDomain, ok := event.Object.(*api.Domain)
 					newDomain.Spec.XMLName = xml.Name{}
 					Expect(ok).To(BeTrue(), "should typecase domain")
-					Expect(reflect.DeepEqual(domain.Spec, newDomain.Spec)).To(BeTrue())
+					Expect(equality.Semantic.DeepEqual(domain.Spec, newDomain.Spec)).To(BeTrue())
 					Expect(event.Type).To(Equal(kubeEventType))
 				}
 				Expect(timedOut).To(BeFalse(), "should not time out")
 			},
-				table.Entry("modified for crashed VMIs", libvirt.DOMAIN_CRASHED, libvirt.DOMAIN_EVENT_CRASHED, api.Crashed, watch.Modified),
-				table.Entry("modified for stopped VMIs with shutoff reason", libvirt.DOMAIN_SHUTOFF, libvirt.DOMAIN_EVENT_SHUTDOWN, api.Shutoff, watch.Modified),
-				table.Entry("modified for stopped VMIs with stopped reason", libvirt.DOMAIN_SHUTOFF, libvirt.DOMAIN_EVENT_STOPPED, api.Shutoff, watch.Modified),
-				table.Entry("modified for running VMIs", libvirt.DOMAIN_RUNNING, libvirt.DOMAIN_EVENT_STARTED, api.Running, watch.Modified),
-				table.Entry("added for defined VMIs", libvirt.DOMAIN_SHUTOFF, libvirt.DOMAIN_EVENT_DEFINED, api.Shutoff, watch.Added),
+				Entry("modified for crashed VMIs", libvirt.DOMAIN_CRASHED, libvirt.DOMAIN_EVENT_CRASHED, api.Crashed, watch.Modified),
+				Entry("modified for stopped VMIs with shutoff reason", libvirt.DOMAIN_SHUTOFF, libvirt.DOMAIN_EVENT_SHUTDOWN, api.Shutoff, watch.Modified),
+				Entry("modified for stopped VMIs with stopped reason", libvirt.DOMAIN_SHUTOFF, libvirt.DOMAIN_EVENT_STOPPED, api.Shutoff, watch.Modified),
+				Entry("modified for running VMIs", libvirt.DOMAIN_RUNNING, libvirt.DOMAIN_EVENT_STARTED, api.Running, watch.Modified),
+				Entry("added for defined VMIs", libvirt.DOMAIN_SHUTOFF, libvirt.DOMAIN_EVENT_DEFINED, api.Shutoff, watch.Added),
 			)
 		})
 
@@ -176,10 +174,7 @@ var _ = Describe("Notify", func() {
 
 				interfaceStatus := []api.InterfaceStatus{
 					{
-						Name: "test", Ip: "1.1.1.1/24", Mac: "1", InterfaceName: "eth1",
-					},
-					{
-						Name: "test2",
+						Ip: "1.1.1.1/24", Mac: "1", InterfaceName: "eth1",
 					},
 				}
 
@@ -193,8 +188,8 @@ var _ = Describe("Notify", func() {
 				case event := <-eventChan:
 					newDomain, _ := event.Object.(*api.Domain)
 					newInterfaceStatuses := newDomain.Status.Interfaces
-					Expect(len(newInterfaceStatuses)).To(Equal(2))
-					Expect(reflect.DeepEqual(interfaceStatus, newInterfaceStatuses)).To(BeTrue())
+					Expect(newInterfaceStatuses).To(HaveLen(1))
+					Expect(equality.Semantic.DeepEqual(interfaceStatus, newInterfaceStatuses)).To(BeTrue())
 				}
 				Expect(timedOut).To(BeFalse())
 			})
@@ -226,7 +221,7 @@ var _ = Describe("Notify", func() {
 				case event := <-eventChan:
 					newDomain, _ := event.Object.(*api.Domain)
 					newOSStatus := newDomain.Status.OSInfo
-					Expect(reflect.DeepEqual(osInfoStatus, newOSStatus)).To(BeTrue())
+					Expect(equality.Semantic.DeepEqual(osInfoStatus, newOSStatus)).To(BeTrue())
 				}
 				Expect(timedOut).To(BeFalse())
 			})
@@ -258,7 +253,7 @@ var _ = Describe("Notify", func() {
 				case event := <-eventChan:
 					newDomain, _ := event.Object.(*api.Domain)
 					newFSFreezeStatus := newDomain.Status.FSFreezeStatus
-					Expect(reflect.DeepEqual(fsFreezeStatus, newFSFreezeStatus)).To(BeTrue())
+					Expect(equality.Semantic.DeepEqual(fsFreezeStatus, newFSFreezeStatus)).To(BeTrue())
 				}
 				Expect(timedOut).To(BeFalse())
 			})
@@ -280,7 +275,7 @@ var _ = Describe("Notify", func() {
 			eventChan = make(chan watch.Event, 100)
 			deleteNotificationSent = make(chan watch.Event, 100)
 			stopped = false
-			shareDir, err = ioutil.TempDir("", "kubevirt-share")
+			shareDir, err = os.MkdirTemp("", "kubevirt-share")
 			Expect(err).ToNot(HaveOccurred())
 
 			recorder = record.NewFakeRecorder(10)
@@ -305,7 +300,7 @@ var _ = Describe("Notify", func() {
 			os.RemoveAll(shareDir)
 		})
 
-		It("Should send a k8s event", func(done Done) {
+		It("Should send a k8s event", func() {
 
 			vmi := api2.NewMinimalVMI("fake-vmi")
 			vmi.UID = "4321"
@@ -320,10 +315,9 @@ var _ = Describe("Notify", func() {
 
 			event := <-recorder.Events
 			Expect(event).To(Equal(fmt.Sprintf("%s %s %s involvedObject{kind=VirtualMachineInstance,apiVersion=kubevirt.io/v1}", eventType, eventReason, eventMessage)))
-			close(done)
-		}, 5)
+		})
 
-		It("Should generate a k8s event on IO errors", func(done Done) {
+		It("Should generate a k8s event on IO errors", func() {
 			faultDisk := []libvirt.DomainDiskError{
 				{
 					Disk:  "vda",
@@ -355,9 +349,7 @@ var _ = Describe("Notify", func() {
 			eventCallback(mockCon, domain, libvirtEvent{}, client, deleteNotificationSent, nil, nil, vmi, nil)
 			event := <-recorder.Events
 			Expect(event).To(Equal(fmt.Sprintf("%s %s %s involvedObject{kind=VirtualMachineInstance,apiVersion=kubevirt.io/v1}", eventType, eventReason, eventMessage)))
-			close(done)
-
-		}, 20)
+		})
 
 	})
 
@@ -372,9 +364,6 @@ var _ = Describe("Notify", func() {
 			infoClient = info.NewMockNotifyInfoClient(ctrl)
 		})
 
-		AfterEach(func() {
-			ctrl.Finish()
-		})
 		It("Should report error when server version mismatches", func() {
 
 			fakeResponse := info.NotifyInfoResponse{

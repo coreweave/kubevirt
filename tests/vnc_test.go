@@ -23,19 +23,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/mitchellh/go-vnc"
 
+	"kubevirt.io/kubevirt/tests/clientcmd"
 	"kubevirt.io/kubevirt/tests/util"
 
 	"github.com/gorilla/websocket"
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/client-go/rest"
 
@@ -43,21 +46,21 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/client-go/subresources"
+
 	"kubevirt.io/kubevirt/tests"
 )
 
-var _ = Describe("[Serial][rfe_id:127][crit:medium][arm64][vendor:cnv-qe@redhat.com][level:component][sig-compute]VNC", func() {
+var _ = Describe("[rfe_id:127][crit:medium][arm64][vendor:cnv-qe@redhat.com][level:component][sig-compute]VNC", func() {
 
 	var err error
 	var virtClient kubecli.KubevirtClient
 	var vmi *v1.VirtualMachineInstance
 
 	Describe("[rfe_id:127][crit:medium][vendor:cnv-qe@redhat.com][level:component]A new VirtualMachineInstance", func() {
-		tests.BeforeAll(func() {
+		BeforeEach(func() {
 			virtClient, err = kubecli.GetKubevirtClient()
 			util.PanicOnError(err)
 
-			tests.BeforeTestCleanup()
 			vmi = tests.NewRandomVMI()
 			Expect(virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(util.NamespaceTestDefault).Body(vmi).Do(context.Background()).Error()).To(Succeed())
 			tests.WaitForSuccessfulVMIStart(vmi)
@@ -127,7 +130,7 @@ var _ = Describe("[Serial][rfe_id:127][crit:medium][arm64][vendor:cnv-qe@redhat.
 			})
 		})
 
-		table.DescribeTable("[rfe_id:127][crit:medium][vendor:cnv-qe@redhat.com][level:component]should upgrade websocket connection which look like coming from a browser", func(subresource string) {
+		DescribeTable("[rfe_id:127][crit:medium][vendor:cnv-qe@redhat.com][level:component]should upgrade websocket connection which look like coming from a browser", func(subresource string) {
 			config, err := kubecli.GetKubevirtClientConfig()
 			Expect(err).ToNot(HaveOccurred())
 			// Browsers need a subprotocol, since they will have to use the subprotocol mechanism to forward the bearer token.
@@ -148,8 +151,8 @@ var _ = Describe("[Serial][rfe_id:127][crit:medium][arm64][vendor:cnv-qe@redhat.
 			Expect(err).ToNot(HaveOccurred())
 			Expect(rt.Response.Header.Get("Sec-Websocket-Protocol")).To(Equal(subresources.PlainStreamProtocolName))
 		},
-			table.Entry("[test_id:1612]for vnc", "vnc"),
-			table.Entry("[test_id:1613]for serial console", "console"),
+			Entry("[test_id:1612]for vnc", "vnc"),
+			Entry("[test_id:1613]for serial console", "console"),
 		)
 
 		It("[test_id:1614]should upgrade websocket connections without a subprotocol given", func() {
@@ -169,7 +172,7 @@ var _ = Describe("[Serial][rfe_id:127][crit:medium][arm64][vendor:cnv-qe@redhat.
 		It("[test_id:4272]should connect to vnc with --proxy-only flag", func() {
 
 			By("Invoking virtctl vnc with --proxy-only")
-			proxyOnlyCommand := tests.NewVirtctlCommand("vnc", "--proxy-only", "--namespace", vmi.Namespace, vmi.Name)
+			proxyOnlyCommand := clientcmd.NewVirtctlCommand("vnc", "--proxy-only", "--namespace", vmi.Namespace, vmi.Name)
 
 			r, w, _ := os.Pipe()
 			proxyOnlyCommand.SetOut(w)
@@ -208,7 +211,7 @@ var _ = Describe("[Serial][rfe_id:127][crit:medium][arm64][vendor:cnv-qe@redhat.
 			testPort := "33333"
 
 			By("Invoking virtctl vnc with --proxy-only")
-			proxyOnlyCommand := tests.NewVirtctlCommand("vnc", "--proxy-only", "--port", testPort, "--namespace", vmi.Namespace, vmi.Name)
+			proxyOnlyCommand := clientcmd.NewVirtctlCommand("vnc", "--proxy-only", "--port", testPort, "--namespace", vmi.Namespace, vmi.Name)
 
 			// Run this as go routine to keep proxy open in the background
 			go func() {
@@ -239,6 +242,25 @@ var _ = Describe("[Serial][rfe_id:127][crit:medium][arm64][vendor:cnv-qe@redhat.
 
 				return nil
 			}, 60*time.Second).ShouldNot(HaveOccurred())
+		})
+
+		It("should allow creating a VNC screenshot in PNG format", func() {
+			filePath := filepath.Join(GinkgoT().TempDir(), "screenshot.png")
+
+			// Sometimes we can see initially a 640x480 resolution if we connect very early
+			By("gathering screenshots until we are past the first boot screen and see the expected 720x400 resolution")
+			Eventually(func() image.Image {
+				cmd := clientcmd.NewVirtctlCommand("vnc", "screenshot", "--namespace", vmi.Namespace, "--file", filePath, vmi.Name)
+				Expect(cmd.Execute()).To(Succeed())
+
+				f, err := os.Open(filePath)
+				Expect(err).ToNot(HaveOccurred())
+				defer f.Close()
+
+				img, err := png.Decode(f)
+				Expect(err).ToNot(HaveOccurred())
+				return img
+			}, 10*time.Second).Should(HaveResolution(720, 400))
 		})
 	})
 })
@@ -280,4 +302,48 @@ func upgradeCheckRoundTripperFromConfig(config *rest.Config, subprotocols []stri
 	return &checkUpgradeRoundTripper{
 		Dialer: dialer,
 	}, nil
+}
+
+type ResolutionMatcher struct {
+	X, Y int
+}
+
+func (h ResolutionMatcher) Match(actual interface{}) (success bool, err error) {
+	x, y, err := imgSize(actual)
+	if err != nil {
+		return false, nil
+	}
+	return x == h.X && y == h.Y, nil
+}
+
+func (h ResolutionMatcher) FailureMessage(actual interface{}) (message string) {
+	x, y, err := imgSize(actual)
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("Expected (X: %d, Y: %d) to match (X: %d, Y: %d)", x, y, h.X, h.Y)
+}
+
+func (h ResolutionMatcher) NegatedFailureMessage(actual interface{}) (message string) {
+	x, y, err := imgSize(actual)
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("Expected (X: %d, Y: %d) to not match (X: %d, Y: %d)", x, y, h.X, h.Y)
+}
+
+func HaveResolution(X, Y int) ResolutionMatcher {
+	return ResolutionMatcher{X: X, Y: Y}
+}
+
+func imgSize(actual interface{}) (X, Y int, err error) {
+	if actual == nil {
+		return -1, -1, fmt.Errorf("expected an object of type image.Image but got nil")
+	}
+	img, ok := actual.(image.Image)
+	if !ok {
+		return -1, -1, fmt.Errorf("expected an object of type image.Image")
+	}
+	size := img.Bounds().Size()
+	return size.X, size.Y, nil
 }

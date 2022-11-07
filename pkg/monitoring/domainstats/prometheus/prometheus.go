@@ -36,11 +36,19 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/client-go/version"
+
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
 )
 
-const PrometheusCollectionTimeout = vms.CollectionTimeout
+const (
+	PrometheusCollectionTimeout            = vms.CollectionTimeout
+	MigrateVmiDataRemainingMetricName      = "kubevirt_migrate_vmi_data_remaining_bytes"
+	MigrateVmiDataProcessedMetricName      = "kubevirt_migrate_vmi_data_processed_bytes"
+	MigrateVmiDirtyMemoryRateMetricName    = "kubevirt_migrate_vmi_dirty_memory_rate_bytes"
+	MigrateVmiMemoryTransferRateMetricName = "kubevirt_migrate_vmi_memory_transfer_rate_bytes"
+	MigrateVmiDiskTransferRateMetricName   = "kubevirt_migrate_vmi_disk_transfer_rate_bytes"
+)
 
 var (
 
@@ -67,11 +75,58 @@ func tryToPushMetric(desc *prometheus.Desc, mv prometheus.Metric, err error, ch 
 	ch <- mv
 }
 
+func (metrics *vmiMetrics) updateMigrateInfo(jobInfo *stats.DomainJobInfo) {
+	if jobInfo.DataRemainingSet {
+		metrics.pushCommonMetric(
+			MigrateVmiDataRemainingMetricName,
+			"Number of bytes that still need to be transferred",
+			prometheus.GaugeValue,
+			float64(jobInfo.DataRemaining),
+		)
+	}
+
+	if jobInfo.DataProcessedSet {
+		metrics.pushCommonMetric(
+			MigrateVmiDataProcessedMetricName,
+			"Number of bytes transferred from the beginning of the job.",
+			prometheus.GaugeValue,
+			float64(jobInfo.DataProcessed),
+		)
+	}
+
+	if jobInfo.MemDirtyRateSet {
+		metrics.pushCommonMetric(
+			MigrateVmiDirtyMemoryRateMetricName,
+			"Number of memory pages dirtied by the guest per second.",
+			prometheus.GaugeValue,
+			float64(jobInfo.MemDirtyRate),
+		)
+	}
+
+	if jobInfo.MemoryBpsSet {
+		metrics.pushCommonMetric(
+			MigrateVmiMemoryTransferRateMetricName,
+			"Network throughput used while migrating memory in Bytes per second.",
+			prometheus.GaugeValue,
+			float64(jobInfo.MemoryBps),
+		)
+	}
+
+	if jobInfo.DiskBpsSet {
+		metrics.pushCommonMetric(
+			MigrateVmiDiskTransferRateMetricName,
+			"Network throughput used while migrating disks in Bytes per second.",
+			prometheus.GaugeValue,
+			float64(jobInfo.DiskBps),
+		)
+	}
+}
+
 func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.RSSSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_resident_bytes",
-			"resident set size of the process running the domain.",
+			"Resident set size of the process running the domain.",
 			prometheus.GaugeValue,
 			float64(mem.RSS)*1024,
 		)
@@ -80,7 +135,7 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.AvailableSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_available_bytes",
-			"amount of `usable` memory as seen by the domain.",
+			"amount of usable memory as seen by the domain. This value may not be accurate if a balloon driver is in use or if the guest OS does not initialize all assigned pages",
 			prometheus.GaugeValue,
 			float64(mem.Available)*1024,
 		)
@@ -89,7 +144,7 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.UnusedSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_unused_bytes",
-			"amount of `unused` memory as seen by the domain.",
+			"The amount of memory left completely unused by the system. Memory that is available but used for reclaimable caches should NOT be reported as free.",
 			prometheus.GaugeValue,
 			float64(mem.Unused)*1024,
 		)
@@ -98,7 +153,7 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.SwapInSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_swap_in_traffic_bytes_total",
-			"Swap in memory traffic in bytes.",
+			"The total amount of data read from swap space of the guest in bytes.",
 			prometheus.GaugeValue,
 			float64(mem.SwapIn)*1024,
 		)
@@ -107,7 +162,7 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.SwapOutSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_swap_out_traffic_bytes_total",
-			"Swap out memory traffic in bytes.",
+			"The total amount of memory written out to swap space of the guest in bytes.",
 			prometheus.GaugeValue,
 			float64(mem.SwapOut)*1024,
 		)
@@ -116,7 +171,7 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.MajorFaultSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_pgmajfault",
-			"The number of page faults when disk IO was required.",
+			"The number of page faults when disk IO was required. Page faults occur when a process makes a valid access to virtual memory that is not available. When servicing the page fault, if disk IO is required, it is considered as major fault.",
 			prometheus.CounterValue,
 			float64(mem.MajorFault),
 		)
@@ -125,7 +180,7 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.MinorFaultSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_pgminfault",
-			"The number of other page faults, when disk IO was not required.",
+			"The number of other page faults, when disk IO was not required. Page faults occur when a process makes a valid access to virtual memory that is not available. When servicing the page fault, if disk IO is NOT required, it is considered as minor fault.",
 			prometheus.CounterValue,
 			float64(mem.MinorFault),
 		)
@@ -134,7 +189,7 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.ActualBalloonSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_actual_balloon_bytes",
-			"current balloon bytes.",
+			"Current balloon size in bytes.",
 			prometheus.GaugeValue,
 			float64(mem.ActualBalloon)*1024,
 		)
@@ -143,7 +198,7 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 	if mem.UsableSet {
 		metrics.pushCommonMetric(
 			"kubevirt_vmi_memory_usable_bytes",
-			"The amount of memory which can be reclaimed by balloon without causing host swapping in bytes.",
+			"The amount of memory which can be reclaimed by balloon without pushing the guest system to swap, corresponds to 'Available' in /proc/meminfo",
 			prometheus.GaugeValue,
 			float64(mem.Usable)*1024,
 		)
@@ -151,8 +206,8 @@ func (metrics *vmiMetrics) updateMemory(mem *stats.DomainStatsMemory) {
 
 	if mem.TotalSet {
 		metrics.pushCommonMetric(
-			"kubevirt_vmi_memory_used_total_bytes",
-			"The amount of memory in bytes used by the domain.",
+			"kubevirt_vmi_memory_domain_bytes_total",
+			"The amount of memory in bytes allocated to the domain. The `memory` value in domain xml file.",
 			prometheus.GaugeValue,
 			float64(mem.Total)*1024,
 		)
@@ -172,7 +227,7 @@ func (metrics *vmiMetrics) updateCPUAffinity(cpuMap [][]bool) {
 
 	metrics.pushCustomMetric(
 		"kubevirt_vmi_cpu_affinity",
-		"The vcpu affinity details.",
+		"Details the cpu pinning map via boolean labels in the form of vcpu_X_cpu_Y.",
 		prometheus.CounterValue, 1,
 		affinityLabels,
 		affinityValues,
@@ -186,7 +241,7 @@ func (metrics *vmiMetrics) updateVcpu(vcpuStats []stats.DomainStatsVcpu) {
 		if vcpu.StateSet && vcpu.TimeSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_vcpu_seconds",
-				"Amount of time spent in each state by each vcpu. Where `id` is the vcpu identifier and `state` can be one of the following: [`OFFLINE`, `RUNNING`, `BLOCKED`].",
+				"Total amount of time spent in each state by each vcpu. Where `id` is the vcpu identifier and `state` can be one of the following: [`OFFLINE`, `RUNNING`, `BLOCKED`].",
 				prometheus.CounterValue,
 				float64(vcpu.Time/1000000000),
 				[]string{"id", "state"},
@@ -224,7 +279,7 @@ func (metrics *vmiMetrics) updateBlock(blkStats []stats.DomainStatsBlock) {
 		if block.RdReqsSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_storage_iops_read_total",
-				"I/O read operations.",
+				"Total number of I/O read operations.",
 				prometheus.CounterValue,
 				float64(block.RdReqs),
 				blkLabels,
@@ -235,7 +290,7 @@ func (metrics *vmiMetrics) updateBlock(blkStats []stats.DomainStatsBlock) {
 		if block.WrReqsSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_storage_iops_write_total",
-				"I/O write operations.",
+				"Total number of I/O write operations.",
 				prometheus.CounterValue,
 				float64(block.WrReqs),
 				blkLabels,
@@ -246,7 +301,7 @@ func (metrics *vmiMetrics) updateBlock(blkStats []stats.DomainStatsBlock) {
 		if block.RdBytesSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_storage_read_traffic_bytes_total",
-				"Storage read traffic in bytes.",
+				"Total number of bytes read from storage.",
 				prometheus.CounterValue,
 				float64(block.RdBytes),
 				blkLabels,
@@ -257,7 +312,7 @@ func (metrics *vmiMetrics) updateBlock(blkStats []stats.DomainStatsBlock) {
 		if block.WrBytesSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_storage_write_traffic_bytes_total",
-				"Storage write traffic in bytes.",
+				"Total number of written bytes.",
 				prometheus.CounterValue,
 				float64(block.WrBytes),
 				blkLabels,
@@ -268,7 +323,7 @@ func (metrics *vmiMetrics) updateBlock(blkStats []stats.DomainStatsBlock) {
 		if block.RdTimesSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_storage_read_times_ms_total",
-				"Storage read operation time.",
+				"Total time (ms) spent on read operations.",
 				prometheus.CounterValue,
 				float64(block.RdTimes)/1000000,
 				blkLabels,
@@ -279,7 +334,7 @@ func (metrics *vmiMetrics) updateBlock(blkStats []stats.DomainStatsBlock) {
 		if block.WrTimesSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_storage_write_times_ms_total",
-				"Storage write operation time.",
+				"Total time (ms) spent on write operations.",
 				prometheus.CounterValue,
 				float64(block.WrTimes)/1000000,
 				blkLabels,
@@ -290,7 +345,7 @@ func (metrics *vmiMetrics) updateBlock(blkStats []stats.DomainStatsBlock) {
 		if block.FlReqsSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_storage_flush_requests_total",
-				"storage flush requests.",
+				"Total storage flush requests.",
 				prometheus.CounterValue,
 				float64(block.FlReqs),
 				blkLabels,
@@ -301,7 +356,7 @@ func (metrics *vmiMetrics) updateBlock(blkStats []stats.DomainStatsBlock) {
 		if block.FlTimesSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_storage_flush_times_ms_total",
-				"total time (ms) spent on cache flushing.",
+				"Total time (ms) spent on cache flushing.",
 				prometheus.CounterValue,
 				float64(block.FlTimes)/1000000,
 				blkLabels,
@@ -336,7 +391,7 @@ func (metrics *vmiMetrics) updateNetwork(netStats []stats.DomainStatsNet) {
 				metrics.pushPrometheusMetric(desc, prometheus.CounterValue, float64(net.RxBytes), []string{net.Name, "rx"})
 				metrics.pushCustomMetric(
 					"kubevirt_vmi_network_receive_bytes_total",
-					"Network traffic receive in bytes.",
+					"Total network traffic received in bytes.",
 					prometheus.CounterValue,
 					float64(net.RxBytes),
 					netLabels,
@@ -348,7 +403,7 @@ func (metrics *vmiMetrics) updateNetwork(netStats []stats.DomainStatsNet) {
 				metrics.pushPrometheusMetric(desc, prometheus.CounterValue, float64(net.TxBytes), []string{net.Name, "tx"})
 				metrics.pushCustomMetric(
 					"kubevirt_vmi_network_transmit_bytes_total",
-					"Network traffic transmit in bytes.",
+					"Total network traffic transmitted in bytes.",
 					prometheus.CounterValue,
 					float64(net.TxBytes),
 					netLabels,
@@ -360,7 +415,7 @@ func (metrics *vmiMetrics) updateNetwork(netStats []stats.DomainStatsNet) {
 		if net.RxPktsSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_network_receive_packets_total",
-				"Network traffic receive packets.",
+				"Total network traffic received packets.",
 				prometheus.CounterValue,
 				float64(net.RxPkts),
 				netLabels,
@@ -371,7 +426,7 @@ func (metrics *vmiMetrics) updateNetwork(netStats []stats.DomainStatsNet) {
 		if net.TxPktsSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_network_transmit_packets_total",
-				"Network traffic transmit packets.",
+				"Total network traffic transmitted packets.",
 				prometheus.CounterValue,
 				float64(net.TxPkts),
 				netLabels,
@@ -382,7 +437,7 @@ func (metrics *vmiMetrics) updateNetwork(netStats []stats.DomainStatsNet) {
 		if net.RxErrsSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_network_receive_errors_total",
-				"Network receive error packets.",
+				"Total network received error packets.",
 				prometheus.CounterValue,
 				float64(net.RxErrs),
 				netLabels,
@@ -393,7 +448,7 @@ func (metrics *vmiMetrics) updateNetwork(netStats []stats.DomainStatsNet) {
 		if net.TxErrsSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_network_transmit_errors_total",
-				"Network transmit error packets.",
+				"Total network transmitted error packets.",
 				prometheus.CounterValue,
 				float64(net.TxErrs),
 				netLabels,
@@ -404,7 +459,7 @@ func (metrics *vmiMetrics) updateNetwork(netStats []stats.DomainStatsNet) {
 		if net.RxDropSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_network_receive_packets_dropped_total",
-				"The number of rx packets dropped on vNIC interfaces.",
+				"The total number of rx packets dropped on vNIC interfaces.",
 				prometheus.CounterValue,
 				float64(net.RxDrop),
 				netLabels,
@@ -415,13 +470,43 @@ func (metrics *vmiMetrics) updateNetwork(netStats []stats.DomainStatsNet) {
 		if net.TxDropSet {
 			metrics.pushCustomMetric(
 				"kubevirt_vmi_network_transmit_packets_dropped_total",
-				"The number of tx packets dropped on vNIC interfaces.",
+				"The total number of tx packets dropped on vNIC interfaces.",
 				prometheus.CounterValue,
 				float64(net.TxDrop),
 				netLabels,
 				netLabelValues,
 			)
 		}
+	}
+}
+
+func (metrics *vmiMetrics) updateFilesystem(vmFSStats k6tv1.VirtualMachineInstanceFileSystemList) {
+	if len(vmFSStats.Items) == 0 {
+		return
+	}
+
+	fsLabels := []string{"disk_name", "mount_point", "file_system_type"}
+
+	for _, fsStat := range vmFSStats.Items {
+		fsLabelValues := []string{fsStat.DiskName, fsStat.MountPoint, fsStat.FileSystemType}
+
+		metrics.pushCustomMetric(
+			"kubevirt_vmi_filesystem_capacity_bytes_total",
+			"Total VM filesystem capacity in bytes.",
+			prometheus.GaugeValue,
+			float64(fsStat.TotalBytes),
+			fsLabels,
+			fsLabelValues,
+		)
+
+		metrics.pushCustomMetric(
+			"kubevirt_vmi_filesystem_used_bytes",
+			"Used VM filesystem capacity in bytes.",
+			prometheus.GaugeValue,
+			float64(fsStat.UsedBytes),
+			fsLabels,
+			fsLabelValues,
+		)
 	}
 }
 
@@ -488,6 +573,11 @@ type prometheusScraper struct {
 	ch chan<- prometheus.Metric
 }
 
+type VirtualMachineInstanceStats struct {
+	DomainStats *stats.DomainStats
+	FsStats     k6tv1.VirtualMachineInstanceFileSystemList
+}
+
 func (ps *prometheusScraper) Scrape(socketFile string, vmi *k6tv1.VirtualMachineInstance) {
 	ts := time.Now()
 	cli, err := cmdclient.NewClient(socketFile)
@@ -501,13 +591,22 @@ func (ps *prometheusScraper) Scrape(socketFile string, vmi *k6tv1.VirtualMachine
 	}
 	defer cli.Close()
 
-	vmStats, exists, err := cli.GetDomainStats()
+	vmStats := &VirtualMachineInstanceStats{}
+	var exists bool
+
+	vmStats.DomainStats, exists, err = cli.GetDomainStats()
 	if err != nil {
-		log.Log.Reason(err).Errorf("failed to update stats from socket %s", socketFile)
+		log.Log.Reason(err).Errorf("failed to update domain stats from socket %s", socketFile)
 		return
 	}
-	if !exists || vmStats.Name == "" {
+	if !exists || vmStats.DomainStats.Name == "" {
 		log.Log.V(2).Infof("disappearing VM on %s, ignored", socketFile) // VM may be shutting down
+		return
+	}
+
+	vmStats.FsStats, err = cli.GetFilesystems()
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to update filesystem stats from socket %s", socketFile)
 		return
 	}
 
@@ -524,8 +623,8 @@ func (ps *prometheusScraper) Scrape(socketFile string, vmi *k6tv1.VirtualMachine
 	ps.Report(socketFile, vmi, vmStats)
 }
 
-func (ps *prometheusScraper) Report(socketFile string, vmi *k6tv1.VirtualMachineInstance, vmStats *stats.DomainStats) {
-	// statsMaxAge is an estimation - and there is not better way to do that. So it is possible that
+func (ps *prometheusScraper) Report(socketFile string, vmi *k6tv1.VirtualMachineInstance, vmStats *VirtualMachineInstanceStats) {
+	// statsMaxAge is an estimation - and there is no better way to do that. So it is possible that
 	// GetDomainStats() takes enough time to lag behind, but not enough to trigger the statsMaxAge check.
 	// In this case the next functions will end up writing on a closed channel. This will panic.
 	// It is actually OK in this case to abort the goroutine that panicked -that's what we want anyway,
@@ -559,17 +658,19 @@ type vmiMetrics struct {
 	ch             chan<- prometheus.Metric
 }
 
-func (metrics *vmiMetrics) updateMetrics(vmStats *stats.DomainStats) {
+func (metrics *vmiMetrics) updateMetrics(vmStats *VirtualMachineInstanceStats) {
 	metrics.updateKubernetesLabels()
 
-	metrics.updateMemory(vmStats.Memory)
-	metrics.updateVcpu(vmStats.Vcpu)
-	metrics.updateBlock(vmStats.Block)
-	metrics.updateNetwork(vmStats.Net)
+	metrics.updateMemory(vmStats.DomainStats.Memory)
+	metrics.updateVcpu(vmStats.DomainStats.Vcpu)
+	metrics.updateBlock(vmStats.DomainStats.Block)
+	metrics.updateNetwork(vmStats.DomainStats.Net)
 
-	if vmStats.CPUMapSet {
-		metrics.updateCPUAffinity(vmStats.CPUMap)
+	if vmStats.DomainStats.CPUMapSet {
+		metrics.updateCPUAffinity(vmStats.DomainStats.CPUMap)
 	}
+	metrics.updateMigrateInfo(vmStats.DomainStats.MigrateDomainJobInfo)
+	metrics.updateFilesystem(vmStats.FsStats)
 }
 
 func (metrics *vmiMetrics) newPrometheusDesc(name string, help string, customLabels []string) *prometheus.Desc {

@@ -5,8 +5,8 @@ package virtwrap
 
 import (
 	gomock "github.com/golang/mock/gomock"
-
 	v1 "kubevirt.io/api/core/v1"
+
 	v10 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	cmd_client "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	api "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -230,14 +230,24 @@ func (_mr *_MockDomainManagerRecorder) FinalizeVirtualMachineMigration(arg0 inte
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "FinalizeVirtualMachineMigration", arg0)
 }
 
-func (_m *MockDomainManager) InterfacesStatus(domainInterfaces []api.Interface) []api.InterfaceStatus {
-	ret := _m.ctrl.Call(_m, "InterfacesStatus", domainInterfaces)
+func (_m *MockDomainManager) HotplugHostDevices(vmi *v1.VirtualMachineInstance) error {
+	ret := _m.ctrl.Call(_m, "HotplugHostDevices", vmi)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockDomainManagerRecorder) HotplugHostDevices(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "HotplugHostDevices", arg0)
+}
+
+func (_m *MockDomainManager) InterfacesStatus() []api.InterfaceStatus {
+	ret := _m.ctrl.Call(_m, "InterfacesStatus")
 	ret0, _ := ret[0].([]api.InterfaceStatus)
 	return ret0
 }
 
-func (_mr *_MockDomainManagerRecorder) InterfacesStatus(arg0 interface{}) *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "InterfacesStatus", arg0)
+func (_mr *_MockDomainManagerRecorder) InterfacesStatus() *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "InterfacesStatus")
 }
 
 func (_m *MockDomainManager) GetGuestOSInfo() *api.GuestOSInfo {
@@ -269,4 +279,14 @@ func (_m *MockDomainManager) GuestPing(_param0 string) error {
 
 func (_mr *_MockDomainManagerRecorder) GuestPing(arg0 interface{}) *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "GuestPing", arg0)
+}
+
+func (_m *MockDomainManager) MemoryDump(vmi *v1.VirtualMachineInstance, dumpPath string) error {
+	ret := _m.ctrl.Call(_m, "MemoryDump", vmi, dumpPath)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockDomainManagerRecorder) MemoryDump(arg0, arg1 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "MemoryDump", arg0, arg1)
 }

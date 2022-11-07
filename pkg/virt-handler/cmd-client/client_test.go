@@ -21,12 +21,11 @@ package cmdclient
 
 import (
 	"errors"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
 	gomock "github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -35,6 +34,7 @@ import (
 	"kubevirt.io/client-go/api"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 )
 
@@ -59,10 +59,10 @@ var _ = Describe("Virt remote commands", func() {
 			},
 		}
 
-		shareDir, err = ioutil.TempDir("", "kubevirt-share")
+		shareDir, err = os.MkdirTemp("", "kubevirt-share")
 		Expect(err).ToNot(HaveOccurred())
 
-		podsDir, err = ioutil.TempDir("", "pods")
+		podsDir, err = os.MkdirTemp("", "pods")
 		Expect(err).ToNot(HaveOccurred())
 
 		socketsDir = filepath.Join(shareDir, "sockets")
@@ -115,7 +115,7 @@ var _ = Describe("Virt remote commands", func() {
 			// listing all sockets should detect both the new and legacy sockets
 			sockets, err := ListAllSockets()
 			Expect(err).ToNot(HaveOccurred())
-			Expect(len(sockets)).To(Equal(2))
+			Expect(sockets).To(HaveLen(2))
 		})
 
 		It("Detect unresponsive socket", func() {
@@ -146,13 +146,13 @@ var _ = Describe("Virt remote commands", func() {
 			legacy := IsLegacySocket("/some/path/something_sock")
 			Expect(legacy).To(BeTrue())
 
-			legacy = IsLegacySocket("/some/path/" + StandardLauncherSocketFileName)
+			legacy = IsLegacySocket(filepath.Join("/some/path", StandardLauncherSocketFileName))
 			Expect(legacy).To(BeFalse())
 
 			monEnabled := SocketMonitoringEnabled("/some/path/something_sock")
 			Expect(monEnabled).To(BeFalse())
 
-			monEnabled = SocketMonitoringEnabled("/some/path/" + StandardLauncherSocketFileName)
+			monEnabled = SocketMonitoringEnabled(filepath.Join("/some/path", StandardLauncherSocketFileName))
 			Expect(monEnabled).To(BeTrue())
 		})
 
@@ -167,9 +167,6 @@ var _ = Describe("Virt remote commands", func() {
 				ctrl = gomock.NewController(GinkgoT())
 				mockCmdClient = cmdv1.NewMockCmdClient(ctrl)
 				client = newV1Client(mockCmdClient, nil)
-			})
-			AfterEach(func() {
-				ctrl.Finish()
 			})
 
 			var (

@@ -22,16 +22,17 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"io/ioutil"
 	"log"
+	"os"
 
 	restful "github.com/emicklei/go-restful"
 	"github.com/spf13/pflag"
 
 	klog "kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/util/openapi"
 	virt_api "kubevirt.io/kubevirt/pkg/virt-api"
-	"kubevirt.io/kubevirt/pkg/virt-api/rest"
+	"kubevirt.io/kubevirt/pkg/virt-api/definitions"
 )
 
 func dumpOpenApiSpec(dumppath *string, apiws []*restful.WebService) {
@@ -40,7 +41,7 @@ func dumpOpenApiSpec(dumppath *string, apiws []*restful.WebService) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = ioutil.WriteFile(*dumppath, data, 0644)
+	err = os.WriteFile(*dumppath, data, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,5 +59,5 @@ func main() {
 	// arguments for NewVirtAPIApp have no influence on the generated spec
 	app := virt_api.NewVirtApi()
 	app.Compose()
-	dumpOpenApiSpec(dumpapispecpath, rest.ComposeAPIDefinitions())
+	dumpOpenApiSpec(dumpapispecpath, definitions.ComposeAPIDefinitions())
 }

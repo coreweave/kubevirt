@@ -23,13 +23,15 @@ import (
 	"fmt"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice"
 )
 
 const (
-	AliasPrefix      = "gpu-"
-	DefaultDisplayOn = true
+	failedCreateGPUHostDeviceFmt = "failed to create GPU host-devices: %v"
+	AliasPrefix                  = "gpu-"
+	DefaultDisplayOn             = true
 )
 
 func CreateHostDevices(vmiGPUs []v1.GPU) ([]api.HostDevice, error) {
@@ -43,17 +45,17 @@ func CreateHostDevicesFromPools(vmiGPUs []v1.GPU, pciAddressPool, mdevAddressPoo
 	hostDevicesMetaData := createHostDevicesMetadata(vmiGPUs)
 	pciHostDevices, err := hostdevice.CreatePCIHostDevices(hostDevicesMetaData, pciPool)
 	if err != nil {
-		return nil, fmt.Errorf("failed to creade GPU host-devices: %v", err)
+		return nil, fmt.Errorf(failedCreateGPUHostDeviceFmt, err)
 	}
 	mdevHostDevices, err := hostdevice.CreateMDEVHostDevices(hostDevicesMetaData, mdevPool, DefaultDisplayOn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to creade GPU host-devices: %v", err)
+		return nil, fmt.Errorf(failedCreateGPUHostDeviceFmt, err)
 	}
 
 	hostDevices := append(pciHostDevices, mdevHostDevices...)
 
 	if err := validateCreationOfAllDevices(vmiGPUs, hostDevices); err != nil {
-		return nil, fmt.Errorf("failed to creade GPU host-devices: %v", err)
+		return nil, fmt.Errorf(failedCreateGPUHostDeviceFmt, err)
 	}
 
 	return hostDevices, nil

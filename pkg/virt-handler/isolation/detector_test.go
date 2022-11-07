@@ -21,14 +21,11 @@ package isolation
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
 
-	gomock "github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -37,7 +34,8 @@ import (
 	"github.com/mitchellh/go-ps"
 
 	v1 "kubevirt.io/api/core/v1"
-	"kubevirt.io/kubevirt/pkg/virt-handler/cgroup"
+
+	"kubevirt.io/kubevirt/pkg/unsafepath"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 )
 
@@ -49,8 +47,6 @@ var _ = Describe("Isolation Detector", func() {
 		var tmpDir string
 		var podUID string
 		var finished chan struct{} = nil
-		var ctrl *gomock.Controller
-		var cgroupParser *cgroup.MockParser
 
 		podUID = "pid-uid-1234"
 		vm := api.NewMinimalVMIWithNS("default", "testvm")
@@ -64,13 +60,13 @@ var _ = Describe("Isolation Detector", func() {
 
 		BeforeEach(func() {
 			var err error
-			tmpDir, err = ioutil.TempDir("", "kubevirt")
+			tmpDir, err = os.MkdirTemp("", "kubevirt")
 			Expect(err).ToNot(HaveOccurred())
 
 			cmdclient.SetLegacyBaseDir(tmpDir)
 			cmdclient.SetPodsBaseDir(tmpDir)
 
-			os.MkdirAll(tmpDir+"/sockets/", os.ModePerm)
+			os.MkdirAll(filepath.Join(tmpDir, "sockets/"), os.ModePerm)
 			socketFile := cmdclient.SocketFilePathOnHost(podUID)
 			os.MkdirAll(filepath.Dir(socketFile), os.ModePerm)
 			socket, err = net.Listen("unix", socketFile)
@@ -87,14 +83,6 @@ var _ = Describe("Isolation Detector", func() {
 					conn.Close()
 				}
 			}()
-
-			ctrl = gomock.NewController(GinkgoT())
-			cgroupParser = cgroup.NewMockParser(ctrl)
-			cgroupParser.
-				EXPECT().
-				Parse(gomock.Eq(os.Getpid())).
-				Return(map[string]string{"devices": "/"}, nil).
-				AnyTimes()
 		})
 
 		AfterEach(func() {
@@ -103,78 +91,61 @@ var _ = Describe("Isolation Detector", func() {
 			if finished != nil {
 				<-finished
 			}
-
-			ctrl.Finish()
 		})
 
 		It("Should detect the PID of the test suite", func() {
-			result, err := NewSocketBasedIsolationDetector(tmpDir, cgroupParser).Allowlist([]string{"devices"}).Detect(vm)
+			result, err := NewSocketBasedIsolationDetector(tmpDir).Allowlist([]string{"devices"}).Detect(vm)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(result.Pid()).To(Equal(os.Getpid()))
 		})
 
-		It("Should not detect any slice if there is no matching controller", func() {
-			_, err := NewSocketBasedIsolationDetector(tmpDir, cgroupParser).Allowlist([]string{"not_existing_slice"}).Detect(vm)
-			Expect(err).To(HaveOccurred())
-		})
-
-		It("Should detect the 'devices' controller slice of the test suite", func() {
-			result, err := NewSocketBasedIsolationDetector(tmpDir, cgroupParser).Allowlist([]string{"devices"}).Detect(vm)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Slice()).To(HavePrefix("/"))
-		})
-
 		It("Should detect the PID namespace of the test suite", func() {
-			result, err := NewSocketBasedIsolationDetector(tmpDir, cgroupParser).Allowlist([]string{"devices"}).Detect(vm)
+			result, err := NewSocketBasedIsolationDetector(tmpDir).Allowlist([]string{"devices"}).Detect(vm)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(result.PIDNamespace()).To(Equal(fmt.Sprintf("/proc/%d/ns/pid", os.Getpid())))
 		})
 
 		It("Should detect the Parent PID of the test suite", func() {
-			result, err := NewSocketBasedIsolationDetector(tmpDir, cgroupParser).Allowlist([]string{"devices"}).Detect(vm)
+			result, err := NewSocketBasedIsolationDetector(tmpDir).Allowlist([]string{"devices"}).Detect(vm)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(result.PPid()).To(Equal(os.Getppid()))
 		})
 
 		It("Should detect the Mount root of the test suite", func() {
-			result, err := NewSocketBasedIsolationDetector(tmpDir, cgroupParser).Allowlist([]string{"devices"}).Detect(vm)
+			result, err := NewSocketBasedIsolationDetector(tmpDir).Allowlist([]string{"devices"}).Detect(vm)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.MountRoot()).To(Equal(fmt.Sprintf("/proc/%d/root", os.Getpid())))
-		})
-
-		It("Should detect the Network namespace of the test suite", func() {
-			result, err := NewSocketBasedIsolationDetector(tmpDir, cgroupParser).Allowlist([]string{"devices"}).Detect(vm)
+			root, err := result.MountRoot()
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.NetNamespace()).To(Equal(fmt.Sprintf("/proc/%d/ns/net", os.Getpid())))
+			Expect(unsafepath.UnsafeAbsolute(root.Raw())).To(Equal(fmt.Sprintf("/proc/%d/root", os.Getpid())))
 		})
 	})
 })
 
 var _ = Describe("findIsolatedQemuProcess", func() {
 	const virtLauncherPid = 1
-	virtLauncherProc := ProcessStub{pid: virtLauncherPid, ppid: 0, binary: "virt-launcher"}
-	virtLauncherForkedProc := ProcessStub{pid: 26, ppid: 1, binary: "virt-launcher --no-fork true"}
-	libvirtdProc := ProcessStub{pid: 226, ppid: 26, binary: "libvirtd"}
+	fakeProcess1 := ProcessStub{pid: virtLauncherPid, ppid: 0, binary: "fake-process-1"}
+	fakeProcess2 := ProcessStub{pid: 26, ppid: virtLauncherPid, binary: "fake-process-2"}
+	fakeProcess3 := ProcessStub{pid: 226, ppid: 26, binary: "fake-process-3"}
 	virtLauncherProcesses := []ps.Process{
-		virtLauncherProc,
-		virtLauncherForkedProc,
-		libvirtdProc}
+		fakeProcess1,
+		fakeProcess2,
+		fakeProcess3}
 
-	qemuKvmProc := ProcessStub{pid: 101, ppid: 1, binary: "qemu-kvm"}
-	qemuSystemProc := ProcessStub{pid: 101, ppid: 1, binary: "qemu-system"}
+	qemuKvmProc := ProcessStub{pid: 101, ppid: virtLauncherPid, binary: "qemu-kvm"}
+	qemuSystemProc := ProcessStub{pid: 101, ppid: virtLauncherPid, binary: "qemu-system"}
 
-	table.DescribeTable("should return QEMU process",
+	DescribeTable("should return QEMU process",
 		func(processes []ps.Process, pid int, expectedProcess ps.Process) {
 			proc, err := findIsolatedQemuProcess(processes, pid)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(proc).To(Equal(expectedProcess))
 		},
-		table.Entry("when qemu-kvm binary running",
+		Entry("when qemu-kvm binary running",
 			append(virtLauncherProcesses, qemuKvmProc),
 			virtLauncherPid,
 			qemuKvmProc,
 		),
-		table.Entry("when qemu-system binary running",
+		Entry("when qemu-system binary running",
 			append(virtLauncherProcesses, qemuSystemProc),
 			virtLauncherPid,
 			qemuSystemProc,

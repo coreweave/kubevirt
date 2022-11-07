@@ -17,27 +17,29 @@ Originally copied from https://github.com/kubernetes/kubernetes/blob/d8695d06b71
 package sysctl
 
 import (
-	"io/ioutil"
+	"os"
 	"path"
-	"strconv"
 	"strings"
 
 	"kubevirt.io/kubevirt/pkg/util"
 )
 
 const (
-	sysctlBase        = "/proc/sys"
-	NetIPv6Forwarding = "net/ipv6/conf/all/forwarding"
-	NetIPv4Forwarding = "net/ipv4/ip_forward"
-	Ipv4ArpIgnoreAll  = "net/ipv4/conf/all/arp_ignore"
+	sysctlBase            = "/proc/sys"
+	NetIPv6Forwarding     = "net/ipv6/conf/all/forwarding"
+	NetIPv4Forwarding     = "net/ipv4/ip_forward"
+	Ipv4ArpIgnoreAll      = "net/ipv4/conf/all/arp_ignore"
+	PingGroupRange        = "net/ipv4/ping_group_range"
+	IPv4RouteLocalNet     = "net/ipv4/conf/%s/route_localnet"
+	UnprivilegedPortStart = "net/ipv4/ip_unprivileged_port_start"
 )
 
 // Interface is an injectable interface for running sysctl commands.
 type Interface interface {
 	// GetSysctl returns the value for the specified sysctl setting
-	GetSysctl(sysctl string) (int, error)
+	GetSysctl(sysctl string) (string, error)
 	// SetSysctl modifies the specified sysctl flag to the new value
-	SetSysctl(sysctl string, newVal int) error
+	SetSysctl(sysctl string, newVal string) error
 }
 
 // New returns a new Interface for accessing sysctl
@@ -50,19 +52,16 @@ type procSysctl struct {
 }
 
 // GetSysctl returns the value for the specified sysctl setting
-func (*procSysctl) GetSysctl(sysctl string) (int, error) {
-	data, err := ioutil.ReadFile(path.Join(sysctlBase, sysctl))
+func (*procSysctl) GetSysctl(sysctl string) (string, error) {
+	data, err := os.ReadFile(path.Join(sysctlBase, sysctl))
 	if err != nil {
-		return -1, err
+		return "-1", err
 	}
-	val, err := strconv.Atoi(strings.Trim(string(data), " \n"))
-	if err != nil {
-		return -1, err
-	}
+	val := strings.Trim(string(data), " \n")
 	return val, nil
 }
 
 // SetSysctl modifies the specified sysctl flag to the new value
-func (*procSysctl) SetSysctl(sysctl string, newVal int) error {
-	return util.WriteFileWithNosec(path.Join(sysctlBase, sysctl), []byte(strconv.Itoa(newVal)))
+func (*procSysctl) SetSysctl(sysctl string, newVal string) error {
+	return util.WriteFileWithNosec(path.Join(sysctlBase, sysctl), []byte(newVal))
 }

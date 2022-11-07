@@ -25,7 +25,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -33,8 +33,7 @@ import (
 	"sync"
 
 	"github.com/emicklei/go-restful"
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/ghttp"
 
@@ -45,6 +44,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/testutils"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
@@ -81,7 +81,7 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 		backend = ghttp.NewTLSServer()
 		backendAddr := strings.Split(backend.Addr(), ":")
 		backendPort, err := strconv.Atoi(backendAddr[1])
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 		backendIP = backendAddr[0]
 		server = ghttp.NewServer()
 		flag.Set("kubeconfig", "")
@@ -134,16 +134,16 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 	}
 
 	Context("handler functions", func() {
-		table.DescribeTable("should return error when feature gate is not enabled", func(fn func(*restful.Request, *restful.Response)) {
+		DescribeTable("should return error when feature gate is not enabled", func(fn func(*restful.Request, *restful.Response)) {
 
 			fn(request, response)
 			Expect(recorder.Code).To(Equal(http.StatusForbidden))
 		},
-			table.Entry("start function", app.StartClusterProfilerHandler),
-			table.Entry("stop function", app.StopClusterProfilerHandler),
-			table.Entry("dump function", app.DumpClusterProfilerHandler),
+			Entry("start function", app.StartClusterProfilerHandler),
+			Entry("stop function", app.StopClusterProfilerHandler),
+			Entry("dump function", app.DumpClusterProfilerHandler),
 		)
-		table.DescribeTable("start/stop should return success when feature gate is enabled", func(fn func(*restful.Request, *restful.Response), cmd string) {
+		DescribeTable("start/stop should return success when feature gate is enabled", func(fn func(*restful.Request, *restful.Response), cmd string) {
 
 			results := v1.ClusterProfilerResults{
 				ComponentResults: make(map[string]v1.ProfilerResult),
@@ -161,19 +161,19 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 			fn(request, response)
 			Expect(recorder.Code).To(Equal(http.StatusOK))
 		},
-			table.Entry("start function", app.StartClusterProfilerHandler, "start"),
-			table.Entry("stop function", app.StopClusterProfilerHandler, "stop"),
+			Entry("start function", app.StartClusterProfilerHandler, "start"),
+			Entry("stop function", app.StopClusterProfilerHandler, "stop"),
 		)
 
-		table.DescribeTable("dump should return success when feature gate is enabled", func(fn func(*restful.Request, *restful.Response), cmd string) {
+		DescribeTable("dump should return success when feature gate is enabled", func(fn func(*restful.Request, *restful.Response), cmd string) {
 
 			results := v1.ClusterProfilerResults{
 				ComponentResults: make(map[string]v1.ProfilerResult),
 			}
 
 			b, err := json.Marshal(&v1.ClusterProfilerRequest{})
-			Expect(err).To(BeNil())
-			request.Request.Body = ioutil.NopCloser(bytes.NewBuffer(b))
+			Expect(err).ToNot(HaveOccurred())
+			request.Request.Body = io.NopCloser(bytes.NewBuffer(b))
 
 			backend.AppendHandlers(
 				ghttp.CombineHandlers(
@@ -187,7 +187,7 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 			fn(request, response)
 			Expect(recorder.Code).To(Equal(http.StatusOK))
 		},
-			table.Entry("dump function", app.DumpClusterProfilerHandler, "dump"),
+			Entry("dump function", app.DumpClusterProfilerHandler, "dump"),
 		)
 	})
 

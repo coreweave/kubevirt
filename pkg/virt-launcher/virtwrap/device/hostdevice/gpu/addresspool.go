@@ -21,24 +21,20 @@ package gpu
 
 import (
 	v1 "kubevirt.io/api/core/v1"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice"
-)
 
-const (
-	pciResourcePrefix  = "PCI_RESOURCE"
-	mdevResourcePrefix = "MDEV_PCI_RESOURCE"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice"
 )
 
 // NewPCIAddressPool creates a PCI address pool based on the provided list of host-devices and
 // the environment variables that describe the resource.
 func NewPCIAddressPool(gpuDevices []v1.GPU) *hostdevice.AddressPool {
-	return hostdevice.NewAddressPool(pciResourcePrefix, extractResources(gpuDevices))
+	return hostdevice.NewAddressPool(v1.PCIResourcePrefix, extractResources(gpuDevices))
 }
 
 // NewMDEVAddressPool creates a MDEV address pool based on the provided list of host-devices and
 // the environment variables that describe the resource.
 func NewMDEVAddressPool(gpuDevices []v1.GPU) *hostdevice.AddressPool {
-	return hostdevice.NewAddressPool(mdevResourcePrefix, extractResources(gpuDevices))
+	return hostdevice.NewAddressPool(v1.MDevResourcePrefix, extractResources(gpuDevices))
 }
 
 func extractResources(gpuDevices []v1.GPU) []string {

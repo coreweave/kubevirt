@@ -1,13 +1,15 @@
 package selinux
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"kubevirt.io/kubevirt/pkg/safepath"
+	"kubevirt.io/kubevirt/pkg/unsafepath"
 	virt_chroot "kubevirt.io/kubevirt/pkg/virt-handler/virt-chroot"
 
 	"kubevirt.io/client-go/log"
@@ -67,7 +69,7 @@ func lookupPath(binary string, prefix string, paths []string) (string, bool, err
 	for _, path := range paths {
 		fullPath := filepath.Join(prefix, path, binary)
 		_, err := os.Stat(fullPath)
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
 			return "", false, err
@@ -124,15 +126,15 @@ func (se *SELinuxImpl) selinux(args ...string) (out []byte, err error) {
 }
 
 func defaultCopyPolicyFunc(policyName string, dir string) (err error) {
-	sourceFile := "/" + policyName + ".cil"
+	sourceFile := filepath.Join("/", policyName+".cil")
 	// #nosec No risk for path injection. Using static string path
-	input, err := ioutil.ReadFile(sourceFile)
+	input, err := os.ReadFile(sourceFile)
 	if err != nil {
 		return fmt.Errorf("failed to read a policy file %v: %v ", sourceFile, err)
 	}
 
-	destinationFile := dir + "/" + sourceFile
-	err = ioutil.WriteFile(destinationFile, input, 0600)
+	destinationFile := filepath.Join(dir, sourceFile)
+	err = os.WriteFile(destinationFile, input, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create a policy file %v: %v ", destinationFile, err)
 	}
@@ -141,7 +143,7 @@ func defaultCopyPolicyFunc(policyName string, dir string) (err error) {
 
 func (se *SELinuxImpl) InstallPolicy(dir string) (err error) {
 	for _, policyName := range POLICY_FILES {
-		fileDest := dir + "/" + policyName + ".cil"
+		fileDest := filepath.Join(dir, policyName+".cil")
 		err := se.copyPolicyFunc(policyName, dir)
 		if err != nil {
 			return fmt.Errorf("failed to copy policy %v - err: %v", fileDest, err)
@@ -164,10 +166,10 @@ type SELinux interface {
 	IsPermissive() bool
 }
 
-func RelabelFiles(newLabel string, continueOnError bool, files ...string) error {
+func RelabelFiles(newLabel string, continueOnError bool, files ...*safepath.Path) error {
 	relabelArgs := []string{"selinux", "relabel", newLabel}
 	for _, file := range files {
-		cmd := exec.Command("virt-chroot", append(relabelArgs, file)...)
+		cmd := exec.Command("virt-chroot", append(relabelArgs, "--root", unsafepath.UnsafeRoot(file.Raw()), unsafepath.UnsafeRelative(file.Raw()))...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		err := cmd.Run()

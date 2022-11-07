@@ -7,58 +7,63 @@ aliases:
       - rmohr
       - stu-gott
       - fabiand
-      - mazzystr
-      - danielBelenky
       - AlonaKaplan
       - dhiller
       - jean-edouard
       - mhenriks
       - enp0s3
+      - xpivarc
+      - vasiliy-ul
   emeritus_approvers:
+      - danielBelenky
+      - mazzystr
       - cynepco3hahue
       - slintes
       - mfranczy
       - SchSeba
       - codificat
       - ashleyschuett
+      - zcahana
   code-reviewers:
-      - davidvossel
       - rmohr
       - stu-gott
       - vladikr
       - dhiller
-      - vatsalparekh
       - enp0s3
       - jean-edouard
       - AlonaKaplan
-      - omeryahud
       - mhenriks
       - maiqueb
       - EdDev
-      - yuhaohaoyu
       - acardace
-      - zcahana
       - xpivarc
-  ux-reviewers:
-      - matthewcarleton
+      - marceloamaral
+      - vasiliy-ul
+      - iholder-redhat
+      - alicefr
+      - 0xFelix
+      - lyarwood
   test-reviewers:
       - jerry7z
-      - ILpinto
-      - rnetser
       - kbidarkar
   test-approvers:
-      - ILpinto
       - kbidarkar
       - phoracek
       - enp0s3
+      - xpivarc
   network-reviewers:
       - AlonaKaplan
       - EdDev
       - RamLavi
-      - alonSadan
       - maiqueb
       - ormergi
       - oshoval
       - phoracek
       - qinqon
       - rhrazdil
+  network-approvers:
+      - AlonaKaplan
+  scale-approvers:
+      - rthallisey
+  scale-reviewers:
+      - rthallisey

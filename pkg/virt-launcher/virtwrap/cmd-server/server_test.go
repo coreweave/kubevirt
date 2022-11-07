@@ -22,16 +22,16 @@ package cmdserver
 import (
 	"context"
 	"errors"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/info"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
@@ -57,7 +57,7 @@ var _ = Describe("Virt remote commands", func() {
 	BeforeEach(func() {
 		stop = make(chan struct{})
 		stopped = false
-		shareDir, err = ioutil.TempDir("", "kubevirt-share")
+		shareDir, err = os.MkdirTemp("", "kubevirt-share")
 		Expect(err).ToNot(HaveOccurred())
 
 		ctrl = gomock.NewController(GinkgoT())
@@ -76,7 +76,6 @@ var _ = Describe("Virt remote commands", func() {
 		if stopped == false {
 			close(stop)
 		}
-		ctrl.Finish()
 		client.Close()
 		os.RemoveAll(shareDir)
 	})
@@ -87,58 +86,58 @@ var _ = Describe("Virt remote commands", func() {
 			domain := api.NewMinimalDomain("testvmi")
 			domainManager.EXPECT().SyncVMI(vmi, allowEmulation, &cmdv1.VirtualMachineOptions{}).Return(&domain.Spec, nil)
 
-			err := client.SyncVirtualMachine(vmi, &cmdv1.VirtualMachineOptions{})
-			Expect(err).ToNot(HaveOccurred())
+			Expect(client.SyncVirtualMachine(vmi, &cmdv1.VirtualMachineOptions{})).To(Succeed())
 		})
 
 		It("should kill a vmi", func() {
 			vmi := v1.NewVMIReferenceFromName("testvmi")
 			domainManager.EXPECT().KillVMI(vmi)
 
-			err := client.KillVirtualMachine(vmi)
-			Expect(err).ToNot(HaveOccurred())
+			Expect(client.KillVirtualMachine(vmi)).To(Succeed())
 		})
 
 		It("should shutdown a vmi", func() {
 			vmi := v1.NewVMIReferenceFromName("testvmi")
 			domainManager.EXPECT().SignalShutdownVMI(vmi)
-			err := client.ShutdownVirtualMachine(vmi)
-			Expect(err).ToNot(HaveOccurred())
+			Expect(client.ShutdownVirtualMachine(vmi)).To(Succeed())
 		})
 
 		It("should freeze a vmi", func() {
 			vmi := v1.NewVMIReferenceFromName("testvmi")
 			domainManager.EXPECT().FreezeVMI(vmi, int32(0))
-			err := client.FreezeVirtualMachine(vmi, int32(0))
-			Expect(err).ToNot(HaveOccurred())
+			Expect(client.FreezeVirtualMachine(vmi, int32(0))).To(Succeed())
 		})
 
 		It("should unfreeze a vmi", func() {
 			vmi := v1.NewVMIReferenceFromName("testvmi")
 			domainManager.EXPECT().UnfreezeVMI(vmi)
-			err := client.UnfreezeVirtualMachine(vmi)
-			Expect(err).ToNot(HaveOccurred())
+			Expect(client.UnfreezeVirtualMachine(vmi)).To(Succeed())
 		})
 
 		It("should soft reboot a vmi", func() {
 			vmi := v1.NewVMIReferenceFromName("testvmi")
 			domainManager.EXPECT().SoftRebootVMI(vmi)
-			err := client.SoftRebootVirtualMachine(vmi)
+			Expect(client.SoftRebootVirtualMachine(vmi)).To(Succeed())
+		})
+
+		It("should call memory dump", func() {
+			vmi := v1.NewVMIReferenceFromName("testvmi")
+			dumpPath := "path/to/dump/volMem"
+			domainManager.EXPECT().MemoryDump(vmi, dumpPath)
+			err := client.VirtualMachineMemoryDump(vmi, dumpPath)
 			Expect(err).ToNot(HaveOccurred())
 		})
 
 		It("should pause a vmi", func() {
 			vmi := v1.NewVMIReferenceFromName("testvmi")
 			domainManager.EXPECT().PauseVMI(vmi)
-			err := client.PauseVirtualMachine(vmi)
-			Expect(err).ToNot(HaveOccurred())
+			Expect(client.PauseVirtualMachine(vmi)).To(Succeed())
 		})
 
 		It("should unpause a vmi", func() {
 			vmi := v1.NewVMIReferenceFromName("testvmi")
 			domainManager.EXPECT().UnpauseVMI(vmi)
-			err := client.UnpauseVirtualMachine(vmi)
-			Expect(err).ToNot(HaveOccurred())
+			Expect(client.UnpauseVirtualMachine(vmi)).To(Succeed())
 		})
 
 		It("should list domains when no guest agent info exists", func() {
@@ -147,12 +146,12 @@ var _ = Describe("Virt remote commands", func() {
 
 			domainManager.EXPECT().ListAllDomains().Return(list, nil)
 			domainManager.EXPECT().GetGuestOSInfo().Return(nil)
-			domainManager.EXPECT().InterfacesStatus(list[0].Spec.Devices.Interfaces).Return(nil)
+			domainManager.EXPECT().InterfacesStatus().Return(nil)
 			domain, exists, err := client.GetDomain()
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(exists).To(BeTrue())
-			Expect(domain).ToNot(Equal(nil))
+			Expect(domain).ToNot(BeNil())
 			Expect(domain.ObjectMeta.Name).To(Equal("testvmi1"))
 			Expect(domain.Status.OSInfo).To(Equal(api.GuestOSInfo{}))
 			Expect(domain.Status.Interfaces).To(BeNil())
@@ -164,11 +163,10 @@ var _ = Describe("Virt remote commands", func() {
 
 			fakeInterfaces := []api.InterfaceStatus{
 				{
-					Name: "eth1",
-					Mac:  "00:00:00:00:00:01",
+					Mac: "00:00:00:00:00:01",
 				},
 			}
-			domainManager.EXPECT().InterfacesStatus(list[0].Spec.Devices.Interfaces).Return(fakeInterfaces)
+			domainManager.EXPECT().InterfacesStatus().Return(fakeInterfaces)
 			domainManager.EXPECT().ListAllDomains().Return(list, nil)
 			const osName = "fedora"
 			domainManager.EXPECT().GetGuestOSInfo().Return(&api.GuestOSInfo{Name: osName})
@@ -191,12 +189,11 @@ var _ = Describe("Virt remote commands", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(exists).To(BeFalse())
-			Expect(domain).ToNot(Equal(nil))
+			Expect(domain).ToNot(BeNil())
 		})
 
 		It("client should return disconnected after server stops", func() {
-			err := client.Ping()
-			Expect(err).ToNot(HaveOccurred())
+			Expect(client.Ping()).To(Succeed())
 
 			close(stop)
 			stopped = true
@@ -204,11 +201,11 @@ var _ = Describe("Virt remote commands", func() {
 
 			client.Close()
 
-			err = client.Ping()
+			err := client.Ping()
 			Expect(err).To(HaveOccurred())
 			Expect(cmdclient.IsDisconnected(err)).To(BeTrue())
 
-			_, err = cmdclient.NewClient(shareDir + "/server.sock")
+			_, err = cmdclient.NewClient(filepath.Join(shareDir, "server.sock"))
 			Expect(err).To(HaveOccurred())
 		})
 
@@ -225,7 +222,7 @@ var _ = Describe("Virt remote commands", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(exists).To(BeTrue())
-			Expect(domStats).ToNot(Equal(nil))
+			Expect(domStats).ToNot(BeNil())
 			Expect(domStats.Name).To(Equal(list[0].Name))
 			Expect(domStats.UUID).To(Equal(list[0].UUID))
 		})
@@ -335,19 +332,19 @@ var _ = Describe("Virt remote commands", func() {
 			It("does not return exit code errors", func() {
 				expectExec().Times(1).Return("", agent.ExecExitCode{ExitCode: 1})
 				_, err := server.Exec(context.TODO(), execRequest())
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			})
 			It("returns non-zero exit code and stdOut if possible", func() {
 				expectExec().Times(1).Return(testStdOut, agent.ExecExitCode{ExitCode: 1})
 				resp, err := server.Exec(context.TODO(), execRequest())
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(resp.ExitCode).To(BeEquivalentTo(1))
 				Expect(resp.StdOut).To(Equal(testStdOut))
 			})
 			It("returns zero exit code and stdOut if possible", func() {
 				expectExec().Times(1).Return(testStdOut, nil)
 				resp, err := server.Exec(context.TODO(), execRequest())
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(resp.ExitCode).To(BeEquivalentTo(0))
 				Expect(resp.StdOut).To(Equal(testStdOut))
 			})
@@ -358,7 +355,7 @@ var _ = Describe("Virt remote commands", func() {
 				// then success should not be true.
 				expectExec().Times(1).Return(testStdOut, agent.ExecExitCode{ExitCode: 1})
 				resp, err := server.Exec(context.TODO(), execRequest())
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(resp.Response.Success).To(BeTrue())
 			})
 			It("should call guest ping", func() {
@@ -375,7 +372,7 @@ var _ = Describe("Virt remote commands", func() {
 			It("returns zero exit code", func() {
 				expectGuestPing().Times(1).Return(nil)
 				resp, err := server.GuestPing(context.TODO(), guestPingRequest())
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(resp.Response.Success).To(BeTrue())
 			})
 		})
@@ -390,10 +387,6 @@ var _ = Describe("Virt remote commands", func() {
 		BeforeEach(func() {
 			ctrl = gomock.NewController(GinkgoT())
 			infoClient = info.NewMockCmdInfoClient(ctrl)
-		})
-
-		AfterEach(func() {
-			ctrl.Finish()
 		})
 
 		It("Should report error when server version mismatches", func() {

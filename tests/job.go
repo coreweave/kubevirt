@@ -88,7 +88,9 @@ const (
 // In addition, the following arguments control the job behavior:
 // retry: The number of times the job should try and run the pod.
 // ttlAfterFinished: The period of time between the job finishing and its auto-deletion.
-//                   Make sure to leave enough time for the reporter to collect the logs.
+//
+//	Make sure to leave enough time for the reporter to collect the logs.
+//
 // timeout: The overall time at which the job is terminated, regardless of it finishing or not.
 func NewJob(name string, cmd, args []string, retry, ttlAfterFinished int32, timeout int64) *batchv1.Job {
 	pod := RenderPod(name, cmd, args)
@@ -110,7 +112,7 @@ func NewJob(name string, cmd, args []string, retry, ttlAfterFinished int32, time
 // NewHelloWorldJob takes a DNS entry or an IP and a port which it will use to create a job
 // which tries to contact the host on the provided port.
 // It expects to receive "Hello World!" to succeed.
-func NewHelloWorldJob(host string, port string) *batchv1.Job {
+func NewHelloWorldJobTCP(host string, port string) *batchv1.Job {
 	check := fmt.Sprintf(`set -x; x="$(head -n 1 < <(nc %s %s -i 3 -w 3 --no-shutdown))"; echo "$x" ; if [ "$x" = "Hello World!" ]; then echo "succeeded"; exit 0; else echo "failed"; exit 1; fi`, host, port)
 	return newHelloWorldJob(check)
 }
@@ -141,7 +143,7 @@ fi`,
 // This pod tries to contact the host on the provided port, over HTTP.
 // On success - it expects to receive "Hello World!".
 func NewHelloWorldJobHTTP(host string, port string) *batchv1.Job {
-	check := fmt.Sprintf(`set -x; x="$(head -n 1 < <(curl %s:%s))"; echo "$x" ; if [ "$x" = "Hello World!" ]; then echo "succeeded"; exit 0; else echo "failed"; exit 1; fi`, FormatIPForURL(host), port)
+	check := fmt.Sprintf(`set -x; x="$(head -n 1 < <(curl --silent %s:%s))"; echo "$x" ; if [ "$x" = "Hello World!" ]; then echo "succeeded"; exit 0; else echo "failed"; exit 1; fi`, FormatIPForURL(host), port)
 	return newHelloWorldJob(check)
 }
 

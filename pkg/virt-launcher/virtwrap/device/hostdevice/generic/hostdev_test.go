@@ -22,10 +22,11 @@ package generic_test
 import (
 	"fmt"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice/generic"
 )
@@ -71,9 +72,6 @@ var _ = Describe("Generic HostDevice", func() {
 		mdevPool := newAddressPoolStub()
 		mdevPool.AddResource(hostdevResource1, hostdevMDEVAddress1)
 
-		hostDevices, err := generic.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.HostDevices, pciPool, mdevPool)
-		Expect(err).NotTo(HaveOccurred())
-
 		hostPCIAddress := api.Address{Type: "pci", Domain: "0x0000", Bus: "0x81", Slot: "0x01", Function: "0x0"}
 		expectHostDevice0 := api.HostDevice{
 			Alias:   api.NewUserDefinedAlias(generic.AliasPrefix + hostdevName0),
@@ -91,7 +89,8 @@ var _ = Describe("Generic HostDevice", func() {
 			Model:  "vfio-pci",
 		}
 
-		Expect(hostDevices, err).To(Equal([]api.HostDevice{expectHostDevice0, expectHostDevice1}))
+		Expect(generic.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.HostDevices, pciPool, mdevPool)).
+			To(Equal([]api.HostDevice{expectHostDevice0, expectHostDevice1}))
 	})
 })
 

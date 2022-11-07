@@ -23,7 +23,7 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	k8sv1 "k8s.io/api/core/v1"
@@ -32,6 +32,7 @@ import (
 	"kubevirt.io/kubevirt/tests/util"
 
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/tests"
 )
 
@@ -101,7 +102,7 @@ var _ = SIGDescribe("[Serial]K8s IO events", func() {
 			return false
 		}, 30*time.Second, 5*time.Second).Should(BeTrue())
 		err := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Delete(vmi.ObjectMeta.Name, &metav1.DeleteOptions{})
-		Expect(err).To(BeNil(), "Failed to delete VMI")
+		Expect(err).ToNot(HaveOccurred(), "Failed to delete VMI")
 		tests.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120)
 	})
 })

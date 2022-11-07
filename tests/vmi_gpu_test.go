@@ -7,16 +7,18 @@ import (
 	"strings"
 
 	expect "github.com/google/goexpect"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"kubevirt.io/kubevirt/tests/exec"
 	"kubevirt.io/kubevirt/tests/util"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
+
 	hwutil "kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 
@@ -80,7 +82,7 @@ var _ = Describe("[Serial][sig-compute]GPU", func() {
 			pod := libvmi.GetPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
 			Expect(pod.Status.Phase).To(Equal(k8sv1.PodPending))
 			Expect(pod.Status.Conditions[0].Type).To(Equal(k8sv1.PodScheduled))
-			Expect(strings.Contains(pod.Status.Conditions[0].Message, "Insufficient "+gpuName)).To(Equal(true))
+			Expect(strings.Contains(pod.Status.Conditions[0].Message, "Insufficient "+gpuName)).To(BeTrue())
 			Expect(pod.Status.Conditions[0].Reason).To(Equal("Unschedulable"))
 		})
 
@@ -118,7 +120,7 @@ var _ = Describe("[Serial][sig-compute]GPU", func() {
 
 			readyPod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
 
-			gpuOutput, err := tests.ExecuteCommandOnPod(
+			gpuOutput, err := exec.ExecuteCommandOnPod(
 				virtClient,
 				readyPod,
 				"compute",
@@ -128,7 +130,7 @@ var _ = Describe("[Serial][sig-compute]GPU", func() {
 			Expect(err).ToNot(HaveOccurred())
 			addrList := parseDeviceAddress(gpuOutput)
 
-			Expect(len(addrList)).To(Equal(len(domSpec.Devices.HostDevices)))
+			Expect(addrList).To(HaveLen(len(domSpec.Devices.HostDevices)))
 			for n, addr := range addrList {
 				Expect(domSpec.Devices.HostDevices[n].Type).To(Equal("pci"))
 				Expect(domSpec.Devices.HostDevices[n].Managed).To(Equal("yes"))

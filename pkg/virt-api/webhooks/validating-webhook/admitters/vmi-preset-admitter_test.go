@@ -22,8 +22,7 @@ package admitters
 import (
 	"encoding/json"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,13 +31,14 @@ import (
 	"kubevirt.io/client-go/api"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 )
 
 var _ = Describe("Validating VMIPreset Admitter", func() {
 	vmiPresetAdmitter := &VMIPresetAdmitter{}
 
-	table.DescribeTable("should reject documents containing unknown or missing fields for", func(data string, validationResult string, gvr metav1.GroupVersionResource, review func(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse) {
+	DescribeTable("should reject documents containing unknown or missing fields for", func(data string, validationResult string, gvr metav1.GroupVersionResource, review func(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse) {
 		input := map[string]interface{}{}
 		json.Unmarshal([]byte(data), &input)
 
@@ -54,7 +54,7 @@ var _ = Describe("Validating VMIPreset Admitter", func() {
 		Expect(resp.Allowed).To(BeFalse())
 		Expect(resp.Result.Message).To(Equal(validationResult))
 	},
-		table.Entry("VirtualMachineInstancePreset creation and update",
+		Entry("VirtualMachineInstancePreset creation and update",
 			`{"very": "unknown", "spec": { "extremely": "unknown" }}`,
 			`.very in body is a forbidden property, spec.extremely in body is a forbidden property, spec.selector in body is required`,
 			webhooks.VirtualMachineInstancePresetGroupVersionResource,
@@ -65,7 +65,7 @@ var _ = Describe("Validating VMIPreset Admitter", func() {
 		vmi := api.NewMinimalVMI("testvmi")
 		vmiPDomain := &v1.DomainSpec{}
 		vmiDomainByte, _ := json.Marshal(vmi.Spec.Domain)
-		Expect(json.Unmarshal(vmiDomainByte, &vmiPDomain)).To(BeNil())
+		Expect(json.Unmarshal(vmiDomainByte, &vmiPDomain)).To(Succeed())
 
 		vmiPDomain.Devices.Disks = append(vmiPDomain.Devices.Disks, v1.Disk{
 			Name: "testdisk",
@@ -92,7 +92,7 @@ var _ = Describe("Validating VMIPreset Admitter", func() {
 
 		resp := vmiPresetAdmitter.Admit(ar)
 		Expect(resp.Allowed).To(BeFalse())
-		Expect(len(resp.Result.Details.Causes)).To(Equal(1))
+		Expect(resp.Result.Details.Causes).To(HaveLen(1))
 		Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.domain.devices.disks[0]"))
 	})
 	It("should accept valid vmi spec", func() {

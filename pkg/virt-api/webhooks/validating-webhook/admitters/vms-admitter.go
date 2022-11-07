@@ -23,36 +23,39 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	authv1 "k8s.io/api/authorization/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/cache"
 
+	"kubevirt.io/kubevirt/pkg/controller"
+	migrationutil "kubevirt.io/kubevirt/pkg/util/migrations"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	cdiclone "kubevirt.io/containerized-data-importer/pkg/clone"
-	"kubevirt.io/kubevirt/pkg/controller"
-	"kubevirt.io/kubevirt/pkg/flavor"
-	migrationutil "kubevirt.io/kubevirt/pkg/util/migrations"
-	typesutil "kubevirt.io/kubevirt/pkg/util/types"
+
+	"kubevirt.io/kubevirt/pkg/instancetype"
+	typesutil "kubevirt.io/kubevirt/pkg/storage/types"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
-var validRunStrategies = []v1.VirtualMachineRunStrategy{v1.RunStrategyHalted, v1.RunStrategyManual, v1.RunStrategyAlways, v1.RunStrategyRerunOnFailure}
+var validRunStrategies = []v1.VirtualMachineRunStrategy{v1.RunStrategyHalted, v1.RunStrategyManual, v1.RunStrategyAlways, v1.RunStrategyRerunOnFailure, v1.RunStrategyOnce}
 
 type CloneAuthFunc func(pvcNamespace, pvcName, saNamespace, saName string) (bool, string, error)
 
 type VMsAdmitter struct {
-	VMIInformer        cache.SharedIndexInformer
-	DataSourceInformer cache.SharedIndexInformer
-	FlavorMethods      flavor.Methods
-	ClusterConfig      *virtconfig.ClusterConfig
-	cloneAuthFunc      CloneAuthFunc
+	VirtClient          kubecli.KubevirtClient
+	DataSourceInformer  cache.SharedIndexInformer
+	InstancetypeMethods instancetype.Methods
+	ClusterConfig       *virtconfig.ClusterConfig
+	cloneAuthFunc       CloneAuthFunc
 }
 
 type sarProxy struct {
@@ -67,11 +70,10 @@ func NewVMsAdmitter(clusterConfig *virtconfig.ClusterConfig, client kubecli.Kube
 	proxy := &sarProxy{client: client}
 
 	return &VMsAdmitter{
-		VMIInformer:        informers.VMIInformer,
-		DataSourceInformer: informers.DataSourceInformer,
-		FlavorMethods:      flavor.NewMethods(informers.FlavorInformer.GetStore(), informers.ClusterFlavorInformer.GetStore()),
-
-		ClusterConfig: clusterConfig,
+		VirtClient:          client,
+		DataSourceInformer:  informers.DataSourceInformer,
+		InstancetypeMethods: instancetype.NewMethods(client),
+		ClusterConfig:       clusterConfig,
 		cloneAuthFunc: func(pvcNamespace, pvcName, saNamespace, saName string) (bool, string, error) {
 			return cdiclone.CanServiceAccountClonePVC(proxy, pvcNamespace, pvcName, saNamespace, saName)
 		},
@@ -97,12 +99,16 @@ func (admitter *VMsAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1
 		return webhookutils.ToAdmissionResponseError(err)
 	}
 
-	causes := admitter.applyFlavorToVm(&vm)
+	// We apply any referenced instancetype and preferences early here to the VirtualMachine in order to
+	// validate the resulting VirtualMachineInstanceSpec below. As we don't want to persist these changes
+	// we pass a copy of the original VirtualMachine here and to the validation call below.
+	vmCopy := vm.DeepCopy()
+	causes := admitter.applyInstancetypeToVm(vmCopy)
 	if len(causes) > 0 {
 		return webhookutils.ToAdmissionResponse(causes)
 	}
 
-	causes = ValidateVirtualMachineSpec(k8sfield.NewPath("spec"), &vm.Spec, admitter.ClusterConfig, accountName)
+	causes = ValidateVirtualMachineSpec(k8sfield.NewPath("spec"), &vmCopy.Spec, admitter.ClusterConfig, accountName)
 	if len(causes) > 0 {
 		return webhookutils.ToAdmissionResponse(causes)
 	}
@@ -165,24 +171,31 @@ func (admitter *VMsAdmitter) AdmitStatus(ar *admissionv1.AdmissionReview) *admis
 	return &reviewResponse
 }
 
-func (admitter *VMsAdmitter) applyFlavorToVm(vm *v1.VirtualMachine) []metav1.StatusCause {
-	flavorProfile, err := admitter.FlavorMethods.FindProfile(vm)
+func (admitter *VMsAdmitter) applyInstancetypeToVm(vm *v1.VirtualMachine) []metav1.StatusCause {
+	instancetypeSpec, err := admitter.InstancetypeMethods.FindInstancetypeSpec(vm)
 	if err != nil {
 		return []metav1.StatusCause{{
 			Type:    metav1.CauseTypeFieldValueNotFound,
-			Message: fmt.Sprintf("Could not find flavor profile: %v", err),
-			Field:   k8sfield.NewPath("spec", "flavor").String(),
+			Message: fmt.Sprintf("Failure to find instancetype: %v", err),
+			Field:   k8sfield.NewPath("spec", "instancetype").String(),
 		}}
 	}
-	if flavorProfile == nil {
+
+	preferenceSpec, err := admitter.InstancetypeMethods.FindPreferenceSpec(vm)
+	if err != nil {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueNotFound,
+			Message: fmt.Sprintf("Failure to find preference: %v", err),
+			Field:   k8sfield.NewPath("spec", "preference").String(),
+		}}
+	}
+
+	if instancetypeSpec == nil && preferenceSpec == nil {
 		return nil
 	}
 
-	conflicts := admitter.FlavorMethods.ApplyToVmi(
-		k8sfield.NewPath("spec", "template", "spec"),
-		flavorProfile,
-		&vm.Spec.Template.Spec,
-	)
+	conflicts := admitter.InstancetypeMethods.ApplyToVmi(k8sfield.NewPath("spec", "template", "spec"), instancetypeSpec, preferenceSpec, &vm.Spec.Template.Spec)
+
 	if len(conflicts) == 0 {
 		return nil
 	}
@@ -191,7 +204,7 @@ func (admitter *VMsAdmitter) applyFlavorToVm(vm *v1.VirtualMachine) []metav1.Sta
 	for _, conflict := range conflicts {
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: "VMI field conflicts with selected Flavor profile",
+			Message: "VM field conflicts with selected Instancetype",
 			Field:   conflict.String(),
 		})
 	}
@@ -361,16 +374,14 @@ func (admitter *VMsAdmitter) validateVolumeRequests(vm *v1.VirtualMachine) ([]me
 
 	// get VMI if vm is active
 	if vm.Status.Ready {
-		obj, exists, err := admitter.VMIInformer.GetStore().GetByKey(controller.VirtualMachineKey(vm))
-		if err != nil {
+		var err error
+
+		vmi, err = admitter.VirtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+		if err != nil && !errors.IsNotFound(err) {
 			return nil, err
-		} else if exists {
-			// If VMI exists, lets simulate whether the new volume will be successful
-			vmi = obj.(*v1.VirtualMachineInstance)
-			if vmi.DeletionTimestamp == nil {
-				// ignore validating the vmi if it is being deleted
-				vmiExists = true
-			}
+		} else if err == nil && vmi.DeletionTimestamp == nil {
+			// ignore validating the vmi if it is being deleted
+			vmiExists = true
 		}
 	}
 
@@ -437,7 +448,7 @@ func (admitter *VMsAdmitter) validateVolumeRequests(vm *v1.VirtualMachine) ([]me
 			}
 
 			vmVolume, ok := vmVolumeMap[name]
-			if ok && !reflect.DeepEqual(newVolume, vmVolume) {
+			if ok && !equality.Semantic.DeepEqual(newVolume, vmVolume) {
 				return []metav1.StatusCause{{
 					Type:    metav1.CauseTypeFieldValueInvalid,
 					Message: fmt.Sprintf("AddVolume request for [%s] conflicts with an existing volume of the same name on the vmi template.", name),
@@ -446,7 +457,7 @@ func (admitter *VMsAdmitter) validateVolumeRequests(vm *v1.VirtualMachine) ([]me
 			}
 
 			vmiVolume, ok := vmiVolumeMap[name]
-			if ok && !reflect.DeepEqual(newVolume, vmiVolume) {
+			if ok && !equality.Semantic.DeepEqual(newVolume, vmiVolume) {
 				return []metav1.StatusCause{{
 					Type:    metav1.CauseTypeFieldValueInvalid,
 					Message: fmt.Sprintf("AddVolume request for [%s] conflicts with an existing volume of the same name on currently running vmi", name),
@@ -521,7 +532,7 @@ func validateRestoreStatus(ar *admissionv1.AdmissionRequest, vm *v1.VirtualMachi
 		}}
 	}
 
-	if !reflect.DeepEqual(oldVM.Spec, vm.Spec) {
+	if !equality.Semantic.DeepEqual(oldVM.Spec, vm.Spec) {
 		strategy, _ := vm.RunStrategy()
 		if strategy != v1.RunStrategyHalted {
 			return []metav1.StatusCause{{
@@ -548,7 +559,7 @@ func validateSnapshotStatus(ar *admissionv1.AdmissionRequest, vm *v1.VirtualMach
 		}}
 	}
 
-	if !reflect.DeepEqual(oldVM.Spec, vm.Spec) {
+	if !equality.Semantic.DeepEqual(oldVM.Spec, vm.Spec) {
 		return []metav1.StatusCause{{
 			Type:    metav1.CauseTypeFieldValueNotSupported,
 			Message: fmt.Sprintf("Cannot update VM spec until snapshot %q completes", *vm.Status.SnapshotInProgress),

@@ -22,10 +22,11 @@ package gpu_test
 import (
 	"fmt"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice/gpu"
 )
@@ -71,9 +72,6 @@ var _ = Describe("GPU HostDevice", func() {
 		mdevPool := newAddressPoolStub()
 		mdevPool.AddResource(gpuResource1, gpuMDEVAddress1)
 
-		hostDevices, err := gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)
-		Expect(err).NotTo(HaveOccurred())
-
 		hostPCIAddress := api.Address{Type: "pci", Domain: "0x0000", Bus: "0x81", Slot: "0x01", Function: "0x0"}
 		expectHostDevice0 := api.HostDevice{
 			Alias:   api.NewUserDefinedAlias(gpu.AliasPrefix + gpuName0),
@@ -93,7 +91,8 @@ var _ = Describe("GPU HostDevice", func() {
 			RamFB:   "on",
 		}
 
-		Expect(hostDevices, err).To(Equal([]api.HostDevice{expectHostDevice0, expectHostDevice1}))
+		Expect(gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)).
+			To(Equal([]api.HostDevice{expectHostDevice0, expectHostDevice1}))
 	})
 	It("creates MDEV with display option turned off", func() {
 		_false := false
@@ -113,9 +112,6 @@ var _ = Describe("GPU HostDevice", func() {
 		mdevPool := newAddressPoolStub()
 		mdevPool.AddResource(gpuResource1, gpuMDEVAddress1)
 
-		hostDevices, err := gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)
-		Expect(err).NotTo(HaveOccurred())
-
 		hostMDEVAddress := api.Address{UUID: gpuMDEVAddress1}
 		expectHostDevice1 := api.HostDevice{
 			Alias:  api.NewUserDefinedAlias(gpu.AliasPrefix + gpuName1),
@@ -125,7 +121,8 @@ var _ = Describe("GPU HostDevice", func() {
 			Model:  "vfio-pci",
 		}
 
-		Expect(hostDevices, err).To(Equal([]api.HostDevice{expectHostDevice1}))
+		Expect(gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)).
+			To(Equal([]api.HostDevice{expectHostDevice1}))
 	})
 	It("creates MDEV with display ramFB option turned off", func() {
 		_false := false
@@ -147,9 +144,6 @@ var _ = Describe("GPU HostDevice", func() {
 		mdevPool := newAddressPoolStub()
 		mdevPool.AddResource(gpuResource1, gpuMDEVAddress1)
 
-		hostDevices, err := gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)
-		Expect(err).NotTo(HaveOccurred())
-
 		hostMDEVAddress := api.Address{UUID: gpuMDEVAddress1}
 		expectHostDevice1 := api.HostDevice{
 			Alias:   api.NewUserDefinedAlias(gpu.AliasPrefix + gpuName1),
@@ -160,7 +154,8 @@ var _ = Describe("GPU HostDevice", func() {
 			Display: "on",
 		}
 
-		Expect(hostDevices, err).To(Equal([]api.HostDevice{expectHostDevice1}))
+		Expect(gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)).
+			To(Equal([]api.HostDevice{expectHostDevice1}))
 	})
 	It("creates MDEV with enabled display and ramfb by default", func() {
 		vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
@@ -177,9 +172,6 @@ var _ = Describe("GPU HostDevice", func() {
 		mdevPool := newAddressPoolStub()
 		mdevPool.AddResource(gpuResource1, gpuMDEVAddress1)
 
-		hostDevices, err := gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)
-		Expect(err).NotTo(HaveOccurred())
-
 		hostMDEVAddress := api.Address{UUID: gpuMDEVAddress1}
 		expectHostDevice1 := api.HostDevice{
 			Alias:   api.NewUserDefinedAlias(gpu.AliasPrefix + gpuName1),
@@ -191,7 +183,8 @@ var _ = Describe("GPU HostDevice", func() {
 			RamFB:   "on",
 		}
 
-		Expect(hostDevices, err).To(Equal([]api.HostDevice{expectHostDevice1}))
+		Expect(gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)).
+			To(Equal([]api.HostDevice{expectHostDevice1}))
 	})
 })
 

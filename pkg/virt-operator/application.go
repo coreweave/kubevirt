@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"os"
 
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
+
 	"github.com/emicklei/go-restful"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
@@ -35,7 +37,6 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 
-	"kubevirt.io/kubevirt/pkg/util/webhooks"
 	validating_webhooks "kubevirt.io/kubevirt/pkg/util/webhooks/validating-webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	operator_webhooks "kubevirt.io/kubevirt/pkg/virt-operator/webhooks"
@@ -54,6 +55,7 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	clientutil "kubevirt.io/client-go/util"
+
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
 	"kubevirt.io/kubevirt/pkg/service"
@@ -63,6 +65,8 @@ import (
 	install "kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/install"
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
+
+const VirtOperator = "virt-operator"
 
 const (
 	controllerThreads = 3
@@ -97,6 +101,7 @@ type VirtOperatorApp struct {
 	operatorCertManager certificate.Manager
 
 	clusterConfig *virtconfig.ClusterConfig
+	host          string
 }
 
 var (
@@ -130,7 +135,13 @@ func Execute() {
 
 	service.Setup(&app)
 
-	log.InitializeLogging("virt-operator")
+	log.InitializeLogging(VirtOperator)
+
+	host, err := os.Hostname()
+	if err != nil {
+		golog.Fatalf("unable to get hostname: %v", err)
+	}
+	app.host = host
 
 	err = util.VerifyEnv()
 	if err != nil {
@@ -142,7 +153,7 @@ func Execute() {
 		os.Setenv(k, v)
 	}
 
-	config, err := kubecli.GetConfig()
+	config, err := kubecli.GetKubevirtClientConfig()
 	if err != nil {
 		panic(err)
 	}
@@ -229,11 +240,15 @@ func Execute() {
 		log.Log.Info("we are on openshift")
 		app.informers.SCC = app.informerFactory.OperatorSCC()
 		app.stores.SCCCache = app.informerFactory.OperatorSCC().GetStore()
+		app.informers.Route = app.informerFactory.OperatorRoute()
+		app.stores.RouteCache = app.informerFactory.OperatorRoute().GetStore()
 		app.stores.IsOnOpenshift = true
 	} else {
 		log.Log.Info("we are on kubernetes")
 		app.informers.SCC = app.informerFactory.DummyOperatorSCC()
 		app.stores.SCCCache = app.informerFactory.DummyOperatorSCC().GetStore()
+		app.informers.Route = app.informerFactory.DummyOperatorRoute()
+		app.stores.RouteCache = app.informerFactory.DummyOperatorRoute().GetStore()
 	}
 
 	serviceMonitorEnabled, err := util.IsServiceMonitorEnabled(app.clientSet)
@@ -269,24 +284,28 @@ func Execute() {
 
 	app.prepareCertManagers()
 
-	app.kubeVirtRecorder = app.getNewRecorder(k8sv1.NamespaceAll, "virt-operator")
+	app.kubeVirtRecorder = app.getNewRecorder(k8sv1.NamespaceAll, VirtOperator)
 	app.kubeVirtController = *NewKubeVirtController(app.clientSet, app.aggregatorClient.ApiregistrationV1().APIServices(), app.kubeVirtInformer, app.kubeVirtRecorder, app.stores, app.informers, app.operatorNamespace)
 
-	image := os.Getenv(util.OperatorImageEnvName)
+	image := util.GetOperatorImage()
 	if image == "" {
 		golog.Fatalf("Error getting operator's image: %v", err)
 	}
 	log.Log.Infof("Operator image: %s", image)
 
-	app.clusterConfig = virtconfig.NewClusterConfig(app.informerFactory.CRD(),
+	app.clusterConfig = virtconfig.NewClusterConfig(
+		app.informerFactory.CRD(),
 		app.informerFactory.KubeVirt(),
-		app.operatorNamespace)
+		app.operatorNamespace,
+	)
+
+	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
 
 	app.Run()
 }
 
 func (app *VirtOperatorApp) Run() {
-	promTLSConfig := webhooks.SetupPromTLS(app.operatorCertManager)
+	promTLSConfig := kvtls.SetupPromTLS(app.operatorCertManager, app.clusterConfig)
 
 	go func() {
 
@@ -318,7 +337,7 @@ func (app *VirtOperatorApp) Run() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	endpointName := "virt-operator"
+	endpointName := VirtOperator
 
 	recorder := app.getNewRecorder(k8sv1.NamespaceAll, endpointName)
 
@@ -348,9 +367,9 @@ func (app *VirtOperatorApp) Run() {
 
 	go app.operatorCertManager.Start()
 
-	caManager := webhooks.NewKubernetesClientCAManager(apiAuthConfig.GetStore())
+	caManager := kvtls.NewKubernetesClientCAManager(apiAuthConfig.GetStore())
 
-	tlsConfig := webhooks.SetupTLSWithCertManager(caManager, app.operatorCertManager, tls.VerifyClientCertIfGiven)
+	tlsConfig := kvtls.SetupTLSWithCertManager(caManager, app.operatorCertManager, tls.VerifyClientCertIfGiven, app.clusterConfig)
 
 	webhookServer := &http.Server{
 		Addr:      fmt.Sprintf("%s:%d", app.BindAddress, 8444),
@@ -362,7 +381,7 @@ func (app *VirtOperatorApp) Run() {
 		validating_webhooks.Serve(w, r, operator_webhooks.NewKubeVirtDeletionAdmitter(app.clientSet))
 	}))
 	mux.HandleFunc(components.KubeVirtUpdateValidatePath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		validating_webhooks.Serve(w, r, operator_webhooks.NewKubeVirtUpdateAdmitter(app.clientSet))
+		validating_webhooks.Serve(w, r, operator_webhooks.NewKubeVirtUpdateAdmitter(app.clientSet, app.clusterConfig))
 	}))
 	webhookServer.Handler = &mux
 	go func() {
@@ -430,4 +449,13 @@ func (app *VirtOperatorApp) prepareCertManagers() {
 			app.informers.Secrets.GetStore(),
 		),
 	)
+}
+
+func (app *VirtOperatorApp) shouldChangeLogVerbosity() {
+	verbosity := app.clusterConfig.GetVirtOperatorVerbosity(app.host)
+	if err := log.Log.SetVerbosityLevel(int(verbosity)); err != nil {
+		log.Log.Warningf("failed up update log verbosity to %d: %v", verbosity, err)
+	} else {
+		log.Log.V(2).Infof("set log verbosity to %d", verbosity)
+	}
 }

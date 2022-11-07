@@ -20,16 +20,17 @@
 package vmistats
 
 import (
-	"github.com/onsi/ginkgo/extensions/table"
 	"github.com/prometheus/client_golang/prometheus"
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	k6tv1 "kubevirt.io/api/core/v1"
+
+	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
 var _ = BeforeSuite(func() {
@@ -40,15 +41,19 @@ var _ = Describe("VMI Stats Collector", func() {
 	Context("VMI Eviction blocker", func() {
 
 		liveMigrateEvictPolicy := k6tv1.EvictionStrategyLiveMigrate
-		table.DescribeTable("Add evictionion alert matrics", func(evictionPolicy *k6tv1.EvictionStrategy, migrateCondStatus k8sv1.ConditionStatus, expectedVal float64) {
+		DescribeTable("Add eviction alert metrics", func(evictionPolicy *k6tv1.EvictionStrategy, migrateCondStatus k8sv1.ConditionStatus, expectedVal float64) {
+			vmiInformer, _ := testutils.NewFakeInformerFor(&k6tv1.VirtualMachineInstance{})
+			clusterConfig, _, _ := testutils.NewFakeClusterConfigUsingKV(&k6tv1.KubeVirt{})
+			collector := &VMICollector{
+				vmiInformer:   vmiInformer,
+				clusterConfig: clusterConfig,
+			}
 
 			ch := make(chan prometheus.Metric, 1)
 			defer close(ch)
 
 			vmis := createVMISForEviction(evictionPolicy, migrateCondStatus)
-			for _, vmi := range vmis {
-				updateVMIEvictionBlocker(vmi, ch)
-			}
+			collector.updateVMIMetrics(vmis, ch)
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -58,12 +63,12 @@ var _ = Describe("VMI Stats Collector", func() {
 			Expect(result.Desc().String()).To(ContainSubstring("kubevirt_vmi_non_evictable"))
 			Expect(dto.Gauge.GetValue()).To(BeEquivalentTo(expectedVal))
 		},
-			table.Entry("VMI Eviction policy set to LiveMigration and vm is not migratable", &liveMigrateEvictPolicy, k8sv1.ConditionFalse, 1.0),
-			table.Entry("VMI Eviction policy set to LiveMigration and vm migratable status is not known", &liveMigrateEvictPolicy, k8sv1.ConditionUnknown, 1.0),
-			table.Entry("VMI Eviction policy set to LiveMigration and vm is migratable", &liveMigrateEvictPolicy, k8sv1.ConditionTrue, 0.0),
-			table.Entry("VMI Eviction policy is not set and vm is not migratable", nil, k8sv1.ConditionFalse, 0.0),
-			table.Entry("VMI Eviction policy is not set and vm is migratable", nil, k8sv1.ConditionTrue, 0.0),
-			table.Entry("VMI Eviction policy is not set and vm migratable status is not known", nil, k8sv1.ConditionUnknown, 0.0),
+			Entry("VMI Eviction policy set to LiveMigration and vm is not migratable", &liveMigrateEvictPolicy, k8sv1.ConditionFalse, 1.0),
+			Entry("VMI Eviction policy set to LiveMigration and vm migratable status is not known", &liveMigrateEvictPolicy, k8sv1.ConditionUnknown, 1.0),
+			Entry("VMI Eviction policy set to LiveMigration and vm is migratable", &liveMigrateEvictPolicy, k8sv1.ConditionTrue, 0.0),
+			Entry("VMI Eviction policy is not set and vm is not migratable", nil, k8sv1.ConditionFalse, 0.0),
+			Entry("VMI Eviction policy is not set and vm is migratable", nil, k8sv1.ConditionTrue, 0.0),
+			Entry("VMI Eviction policy is not set and vm migratable status is not known", nil, k8sv1.ConditionUnknown, 0.0),
 		)
 	})
 })
@@ -103,12 +108,12 @@ var _ = Describe("Utility functions", func() {
 
 			countMap = makeVMICountMetricMap(nil)
 			Expect(countMap).NotTo(BeNil())
-			Expect(len(countMap)).To(Equal(0))
+			Expect(countMap).To(BeEmpty())
 
 			vmis := []*k6tv1.VirtualMachineInstance{}
 			countMap = makeVMICountMetricMap(vmis)
 			Expect(countMap).NotTo(BeNil())
-			Expect(len(countMap)).To(Equal(0))
+			Expect(countMap).To(BeEmpty())
 		})
 
 		It("should handle different VMI phases", func() {
@@ -184,7 +189,7 @@ var _ = Describe("Utility functions", func() {
 
 			countMap := makeVMICountMetricMap(vmis)
 			Expect(countMap).NotTo(BeNil())
-			Expect(len(countMap)).To(Equal(3))
+			Expect(countMap).To(HaveLen(3))
 
 			running := vmiCountMetric{
 				Phase:    "running",

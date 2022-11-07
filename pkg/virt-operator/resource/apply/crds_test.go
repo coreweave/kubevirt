@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	jsonpatch "github.com/evanphx/json-patch"
@@ -18,6 +18,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
 
@@ -54,10 +55,6 @@ var _ = Describe("Apply CRDs", func() {
 		kv = &v1.KubeVirt{}
 	})
 
-	AfterEach(func() {
-		ctrl.Finish()
-	})
-
 	It("should not roll out subresources on existing CRDs before control-plane rollover", func() {
 		crd := &extv1.CustomResourceDefinition{
 			TypeMeta: v12.TypeMeta{
@@ -92,9 +89,9 @@ var _ = Describe("Apply CRDs", func() {
 			patch, err := jsonpatch.DecodePatch(a.Patch)
 			Expect(err).ToNot(HaveOccurred())
 			obj, err := json.Marshal(crdWithoutSubresource)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			obj, err = patch.Apply(obj)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			crd := &extv1.CustomResourceDefinition{}
 			Expect(json.Unmarshal(obj, crd)).To(Succeed())
 			Expect(crd.Spec.Versions[0].Subresources.Status).To(BeNil())
@@ -147,9 +144,9 @@ var _ = Describe("Apply CRDs", func() {
 			patch, err := jsonpatch.DecodePatch(a.Patch)
 			Expect(err).ToNot(HaveOccurred())
 			obj, err := json.Marshal(crdWithoutSubresource)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			obj, err = patch.Apply(obj)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			crd := &extv1.CustomResourceDefinition{}
 			Expect(json.Unmarshal(obj, crd)).To(Succeed())
 			Expect(crd.Spec.Versions[0].Subresources.Status).ToNot(BeNil())

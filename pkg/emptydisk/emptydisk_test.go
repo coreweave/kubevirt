@@ -2,11 +2,10 @@ package emptydisk
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -39,7 +38,7 @@ var _ = Describe("EmptyDisk", func() {
 
 	BeforeEach(func() {
 		var err error
-		emptyDiskBaseDir, err = ioutil.TempDir("", "emptydisk-dir")
+		emptyDiskBaseDir, err = os.MkdirTemp("", "emptydisk-dir")
 		Expect(err).ToNot(HaveOccurred())
 		creator = &emptyDiskCreator{
 			emptyDiskBaseDir: emptyDiskBaseDir,
@@ -47,7 +46,7 @@ var _ = Describe("EmptyDisk", func() {
 		}
 	})
 	AfterEach(func() {
-		os.RemoveAll(emptyDiskBaseDir)
+		Expect(os.RemoveAll(emptyDiskBaseDir)).To(Succeed())
 	})
 
 	Describe("a vmi with emptyDisks attached", func() {
@@ -77,10 +76,11 @@ var _ = Describe("EmptyDisk", func() {
 		It("should leave pre-existing disks alone", func() {
 			vmi := api.NewMinimalVMI("testvmi")
 			AppendEmptyDisk(vmi, "testdisk")
-			ioutil.WriteFile(filePathForVolumeName(emptyDiskBaseDir, "testdisk"), []byte("test"), 0777)
-			err := creator.CreateTemporaryDisks(vmi)
+			err := os.WriteFile(filePathForVolumeName(emptyDiskBaseDir, "testdisk"), []byte("test"), 0777)
 			Expect(err).ToNot(HaveOccurred())
-			data, err := ioutil.ReadFile(filePathForVolumeName(emptyDiskBaseDir, "testdisk"))
+			err = creator.CreateTemporaryDisks(vmi)
+			Expect(err).ToNot(HaveOccurred())
+			data, err := os.ReadFile(filePathForVolumeName(emptyDiskBaseDir, "testdisk"))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(data)).To(Equal("test"))
 		})
@@ -91,8 +91,8 @@ var _ = Describe("EmptyDisk", func() {
 func fakeCreatorFunc(filePath string, _ string) error {
 	fmt.Println(filePath)
 	f, err := os.Create(filePath)
-	if err == nil {
-		f.Close()
+	if err != nil {
+		return err
 	}
-	return err
+	return f.Close()
 }

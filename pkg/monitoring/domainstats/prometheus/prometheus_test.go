@@ -28,10 +28,11 @@ import (
 
 	"libvirt.org/go/libvirt"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	k6tv1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
 )
 
@@ -39,6 +40,19 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = Describe("Prometheus", func() {
+	newVmStats := func(domainStats *stats.DomainStats, fsStats *k6tv1.VirtualMachineInstanceFileSystemList) *VirtualMachineInstanceStats {
+		if fsStats == nil {
+			fsStats = &k6tv1.VirtualMachineInstanceFileSystemList{
+				Items: []k6tv1.VirtualMachineInstanceFileSystem{},
+			}
+		}
+
+		return &VirtualMachineInstanceStats{
+			DomainStats: domainStats,
+			FsStats:     *fsStats,
+		}
+	}
+
 	Context("on blocked source", func() {
 		It("should handle closed reporting socket", func() {
 			ch := make(chan prometheus.Metric)
@@ -47,7 +61,7 @@ var _ = Describe("Prometheus", func() {
 			ps := prometheusScraper{ch: ch}
 
 			testReportPanic := func() {
-				vmStats := &stats.DomainStats{
+				domainStats := &stats.DomainStats{
 					Cpu: &stats.DomainStatsCPU{},
 					Memory: &stats.DomainStatsMemory{
 						// trigger write on a socket. We need a value set - any value
@@ -56,7 +70,7 @@ var _ = Describe("Prometheus", func() {
 					},
 				}
 				vmi := k6tv1.VirtualMachineInstance{}
-				ps.Report("test", &vmi, vmStats)
+				ps.Report("test", &vmi, newVmStats(domainStats, nil))
 			}
 			Expect(testReportPanic).ToNot(Panic())
 		})
@@ -69,7 +83,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					// trigger write on a socket. We need a value set - any value
@@ -78,7 +92,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -91,7 +105,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					AvailableSet: true,
@@ -99,7 +113,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -116,7 +130,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					UnusedSet: true,
@@ -124,7 +138,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -141,7 +155,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					SwapInSet: true,
@@ -149,7 +163,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -166,7 +180,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					SwapOutSet: true,
@@ -174,7 +188,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -191,7 +205,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					MajorFaultSet: true,
@@ -199,7 +213,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -216,7 +230,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					MinorFaultSet: true,
@@ -224,7 +238,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -241,7 +255,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					ActualBalloonSet: true,
@@ -249,7 +263,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -266,7 +280,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					UsableSet: true,
@@ -274,7 +288,7 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -291,7 +305,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					TotalSet: true,
@@ -299,16 +313,71 @@ var _ = Describe("Prometheus", func() {
 				},
 			}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
 			result.Write(dto)
 
 			Expect(result).ToNot(BeNil())
-			Expect(result.Desc().String()).To(ContainSubstring("kubevirt_vmi_memory_used_total_bytes"))
+			Expect(result.Desc().String()).To(ContainSubstring("kubevirt_vmi_memory_domain_bytes_total"))
 			Expect(dto.Gauge.GetValue()).To(BeEquivalentTo(float64(1024)))
 		})
+
+		DescribeTable("Assert vmi migration metrics",
+			func(metricName string, migrateDomainJobInfoStats *stats.DomainJobInfo) {
+				ch := make(chan prometheus.Metric, 1)
+				defer close(ch)
+
+				ps := prometheusScraper{ch: ch}
+
+				domainStats := &stats.DomainStats{
+					Cpu:                  &stats.DomainStatsCPU{},
+					Memory:               &stats.DomainStatsMemory{},
+					MigrateDomainJobInfo: migrateDomainJobInfoStats,
+				}
+				vmi := k6tv1.VirtualMachineInstance{}
+				ps.Report("test", &vmi, newVmStats(domainStats, nil))
+
+				result := <-ch
+				dto := &io_prometheus_client.Metric{}
+				result.Write(dto)
+
+				Expect(result).ToNot(BeNil())
+				Expect(result.Desc().String()).To(ContainSubstring(metricName))
+				Expect(dto.Gauge.GetValue()).To(BeEquivalentTo(float64(1)))
+			},
+			Entry("should handle Data_Processed metrics for VMs",
+				MigrateVmiDataProcessedMetricName,
+				&stats.DomainJobInfo{
+					DataProcessedSet: true,
+					DataProcessed:    1,
+				}),
+			Entry("should handle Data_Remaining metrics for VMs",
+				MigrateVmiDataRemainingMetricName,
+				&stats.DomainJobInfo{
+					DataRemainingSet: true,
+					DataRemaining:    1,
+				}),
+			Entry("should handle MemDirtyRate metrics for VMs",
+				MigrateVmiDirtyMemoryRateMetricName,
+				&stats.DomainJobInfo{
+					MemDirtyRateSet: true,
+					MemDirtyRate:    1,
+				}),
+			Entry("should handle MemoryBps metrics for VMs",
+				MigrateVmiMemoryTransferRateMetricName,
+				&stats.DomainJobInfo{
+					MemoryBpsSet: true,
+					MemoryBps:    1,
+				}),
+			Entry("should handle DiskBps metrics for VMs",
+				MigrateVmiDiskTransferRateMetricName,
+				&stats.DomainJobInfo{
+					DiskBpsSet: true,
+					DiskBps:    1,
+				}),
+		)
 
 		It("should handle vcpu metrics", func() {
 			ch := make(chan prometheus.Metric, 1)
@@ -316,7 +385,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Vcpu: []stats.DomainStatsVcpu{
@@ -330,7 +399,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -343,7 +412,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Vcpu: []stats.DomainStatsVcpu{
@@ -356,7 +425,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			// metrics about invalid stats never get pushed into the channel
 			Eventually(ch).Should(BeEmpty())
@@ -368,7 +437,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Vcpu: []stats.DomainStatsVcpu{
@@ -383,7 +452,7 @@ var _ = Describe("Prometheus", func() {
 
 			metric := &io_prometheus_client.Metric{}
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			result.Write(metric)
@@ -395,7 +464,7 @@ var _ = Describe("Prometheus", func() {
 				}
 			}
 
-			vmStats = &stats.DomainStats{
+			domainStats = &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Vcpu: []stats.DomainStatsVcpu{
@@ -409,7 +478,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			metric = &io_prometheus_client.Metric{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result = <-ch
 			result.Write(metric)
@@ -421,7 +490,7 @@ var _ = Describe("Prometheus", func() {
 				}
 			}
 
-			vmStats = &stats.DomainStats{
+			domainStats = &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Vcpu: []stats.DomainStatsVcpu{
@@ -435,7 +504,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			metric = &io_prometheus_client.Metric{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result = <-ch
 			result.Write(metric)
@@ -454,7 +523,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -468,7 +537,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -481,7 +550,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -495,7 +564,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -508,7 +577,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -522,7 +591,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -535,7 +604,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -549,7 +618,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -562,7 +631,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -576,7 +645,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -589,7 +658,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -603,7 +672,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -616,7 +685,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -630,7 +699,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -643,7 +712,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -657,7 +726,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -670,7 +739,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -685,7 +754,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -702,7 +771,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -717,7 +786,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -734,7 +803,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Block: []stats.DomainStatsBlock{
@@ -746,7 +815,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			Eventually(ch).Should(BeEmpty())
 		})
@@ -757,7 +826,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -771,7 +840,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -788,7 +857,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -802,7 +871,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -819,7 +888,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -833,7 +902,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -846,7 +915,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -860,7 +929,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -873,7 +942,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -887,7 +956,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -900,7 +969,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -914,7 +983,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -927,7 +996,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -941,7 +1010,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -954,7 +1023,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -968,7 +1037,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -981,7 +1050,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net: []stats.DomainStatsNet{
@@ -993,7 +1062,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			Eventually(ch).Should(BeEmpty())
 		})
@@ -1004,7 +1073,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu: &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{
 					RSS:    1024,
@@ -1019,7 +1088,7 @@ var _ = Describe("Prometheus", func() {
 					},
 				},
 			}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -1032,7 +1101,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:    &stats.DomainStatsCPU{},
 				Memory: &stats.DomainStatsMemory{},
 				Net:    []stats.DomainStatsNet{},
@@ -1045,7 +1114,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			Expect(result).ToNot(BeNil())
@@ -1058,7 +1127,7 @@ var _ = Describe("Prometheus", func() {
 
 			ps := prometheusScraper{ch: ch}
 
-			vmStats := &stats.DomainStats{
+			domainStats := &stats.DomainStats{
 				Cpu:       &stats.DomainStatsCPU{},
 				Memory:    &stats.DomainStatsMemory{},
 				Net:       []stats.DomainStatsNet{},
@@ -1068,7 +1137,7 @@ var _ = Describe("Prometheus", func() {
 			}
 
 			vmi := k6tv1.VirtualMachineInstance{}
-			ps.Report("test", &vmi, vmStats)
+			ps.Report("test", &vmi, newVmStats(domainStats, nil))
 
 			result := <-ch
 			dto := &io_prometheus_client.Metric{}
@@ -1083,6 +1152,40 @@ var _ = Describe("Prometheus", func() {
 			Expect(s).To(ContainSubstring("vcpu_0_cpu_0=true"))
 			Expect(s).To(ContainSubstring("vcpu_0_cpu_1=false"))
 			Expect(s).To(ContainSubstring("vcpu_0_cpu_2=true"))
+		})
+
+		It("should expose filesystem metrics", func() {
+			ch := make(chan prometheus.Metric, 2)
+			defer close(ch)
+
+			ps := prometheusScraper{ch: ch}
+
+			domainStats := &stats.DomainStats{
+				Cpu:                  &stats.DomainStatsCPU{},
+				Memory:               &stats.DomainStatsMemory{},
+				Net:                  []stats.DomainStatsNet{},
+				MigrateDomainJobInfo: &stats.DomainJobInfo{},
+			}
+
+			fsStats := &k6tv1.VirtualMachineInstanceFileSystemList{
+				Items: []k6tv1.VirtualMachineInstanceFileSystem{
+					{
+						DiskName:   "disk1",
+						TotalBytes: 1000,
+						UsedBytes:  10,
+					},
+				},
+			}
+
+			vmi := k6tv1.VirtualMachineInstance{}
+			ps.Report("test", &vmi, newVmStats(domainStats, fsStats))
+			result := <-ch
+			Expect(result).ToNot(BeNil())
+			Expect(result.Desc().String()).To(ContainSubstring("kubevirt_vmi_filesystem_capacity_bytes_total"))
+			result = <-ch
+			Expect(result).ToNot(BeNil())
+			Expect(result.Desc().String()).To(ContainSubstring("kubevirt_vmi_filesystem_used_bytes"))
+			Expect(ch).To(BeEmpty())
 		})
 	})
 

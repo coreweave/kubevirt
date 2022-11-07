@@ -8,6 +8,7 @@ import (
 	"kubevirt.io/client-go/log"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -237,45 +238,6 @@ func parseAgent(agentReply string) (AgentInfo, error) {
 	log.Log.V(3).Infof("guest agent info: %v", gaInfo)
 
 	return gaInfo, nil
-}
-
-// MergeAgentStatusesWithDomainData merge QEMU interfaces with agent interfaces
-func MergeAgentStatusesWithDomainData(domInterfaces []api.Interface, interfaceStatuses []api.InterfaceStatus) []api.InterfaceStatus {
-	aliasByMac := map[string]string{}
-	for _, ifc := range domInterfaces {
-		mac := ifc.MAC.MAC
-		alias := ifc.Alias.GetName()
-		aliasByMac[mac] = alias
-	}
-
-	aliasesCoveredByAgent := []string{}
-	// Add alias from domain to interfaceStatus
-	for i, interfaceStatus := range interfaceStatuses {
-		if alias, exists := aliasByMac[interfaceStatus.Mac]; exists {
-			interfaceStatuses[i].Name = alias
-			aliasesCoveredByAgent = append(aliasesCoveredByAgent, alias)
-		}
-	}
-
-	// If interface present in domain was not found in interfaceStatuses, add it
-	for mac, alias := range aliasByMac {
-		isCoveredByAgentData := false
-		for _, coveredAlias := range aliasesCoveredByAgent {
-			if alias == coveredAlias {
-				isCoveredByAgentData = true
-				break
-			}
-		}
-		if !isCoveredByAgentData {
-			interfaceStatuses = append(interfaceStatuses,
-				api.InterfaceStatus{
-					Mac:  mac,
-					Name: alias,
-				},
-			)
-		}
-	}
-	return interfaceStatuses
 }
 
 // convertInterfaceStatusesFromAgentJSON does the conversion from agent info to api domain interfaces

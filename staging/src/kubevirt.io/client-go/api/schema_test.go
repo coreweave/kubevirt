@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"text/template"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/pointer"
@@ -171,13 +171,6 @@ var exampleJSONFmt = `{
             }
           },
           {
-            "name": "floppy0",
-            "floppy": {
-              "readonly": true,
-              "tray": "open"
-            }
-          },
-          {
             "name": "lun0",
             "lun": {
               "bus": "virtio",
@@ -228,12 +221,6 @@ var exampleJSONFmt = `{
             "name": "testnetworksecret"
           }
         }
-      },
-      {
-        "name": "floppy0",
-        "persistentVolumeClaim": {
-          "claimName": "testclaim"
-        }
       }
     ],
     "networks": [
@@ -244,7 +231,8 @@ var exampleJSONFmt = `{
     ]
   },
   "status": {
-    "guestOSInfo": {}
+    "guestOSInfo": {},
+    "runtimeUser": 0
   }
 }`
 
@@ -263,7 +251,7 @@ var _ = Describe("Schema", func() {
 				Name: "disk0",
 				DiskDevice: v12.DiskDevice{
 					Disk: &v12.DiskTarget{
-						Bus:      "virtio",
+						Bus:      v12.VirtIO,
 						ReadOnly: false,
 					},
 				},
@@ -273,17 +261,8 @@ var _ = Describe("Schema", func() {
 				Name: "cdrom0",
 				DiskDevice: v12.DiskDevice{
 					CDRom: &v12.CDRomTarget{
-						Bus:      "virtio",
+						Bus:      v12.VirtIO,
 						ReadOnly: pointer.BoolPtr(true),
-						Tray:     "open",
-					},
-				},
-			},
-			{
-				Name: "floppy0",
-				DiskDevice: v12.DiskDevice{
-					Floppy: &v12.FloppyTarget{
-						ReadOnly: true,
 						Tray:     "open",
 					},
 				},
@@ -292,7 +271,7 @@ var _ = Describe("Schema", func() {
 				Name: "lun0",
 				DiskDevice: v12.DiskDevice{
 					LUN: &v12.LunTarget{
-						Bus:      "virtio",
+						Bus:      v12.VirtIO,
 						ReadOnly: true,
 					},
 				},
@@ -302,7 +281,7 @@ var _ = Describe("Schema", func() {
 				Serial: "sn-11223344",
 				DiskDevice: v12.DiskDevice{
 					Disk: &v12.DiskTarget{
-						Bus:      "virtio",
+						Bus:      v12.VirtIO,
 						ReadOnly: false,
 					},
 				},
@@ -312,7 +291,7 @@ var _ = Describe("Schema", func() {
 		exampleVMI.Spec.Domain.Devices.Rng = &v12.Rng{}
 		exampleVMI.Spec.Domain.Devices.Inputs = []v12.Input{
 			{
-				Bus:  "virtio",
+				Bus:  v12.VirtIO,
 				Type: "tablet",
 				Name: "tablet0",
 			},
@@ -338,16 +317,6 @@ var _ = Describe("Schema", func() {
 						},
 						NetworkDataSecretRef: &v1.LocalObjectReference{
 							Name: "testnetworksecret",
-						},
-					},
-				},
-			},
-			{
-				Name: "floppy0",
-				VolumeSource: v12.VolumeSource{
-					PersistentVolumeClaim: &v12.PersistentVolumeClaimVolumeSource{
-						PersistentVolumeClaimVolumeSource: v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "testclaim",
 						},
 					},
 				},
@@ -432,13 +401,13 @@ var _ = Describe("Schema", func() {
 			}
 			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"bridge": {}`}
 			tmpl, err := template.New("vmexample").Parse(exampleJSON)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			var tpl bytes.Buffer
 			err = tmpl.Execute(&tpl, networkTemplateData)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			newVMI := &v12.VirtualMachineInstance{}
 			err = json.Unmarshal(tpl.Bytes(), newVMI)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(newVMI).To(Equal(exampleVMI))
 		})
 		It("Marshal struct into json", func() {
@@ -453,13 +422,13 @@ var _ = Describe("Schema", func() {
 
 			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"bridge": {}`}
 			tmpl, err := template.New("vmexample").Parse(exampleJSON)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			var tpl bytes.Buffer
 			err = tmpl.Execute(&tpl, networkTemplateData)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			exampleJSONParsed := tpl.String()
 			buf, err := json.MarshalIndent(*exampleVMI, "", "  ")
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(string(buf)).To(Equal(exampleJSONParsed))
 		})
 	})
@@ -475,13 +444,13 @@ var _ = Describe("Schema", func() {
 			}
 			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"slirp": {}`}
 			tmpl, err := template.New("vmexample").Parse(exampleJSON)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			var tpl bytes.Buffer
 			err = tmpl.Execute(&tpl, networkTemplateData)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			newVMI := &v12.VirtualMachineInstance{}
 			err = json.Unmarshal(tpl.Bytes(), newVMI)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(newVMI).To(Equal(exampleVMI))
 		})
 		It("Marshal struct into json", func() {
@@ -496,13 +465,13 @@ var _ = Describe("Schema", func() {
 
 			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"slirp": {}`}
 			tmpl, err := template.New("vmexample").Parse(exampleJSON)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			var tpl bytes.Buffer
 			err = tmpl.Execute(&tpl, networkTemplateData)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			exampleJSONParsed := tpl.String()
 			buf, err := json.MarshalIndent(*exampleVMI, "", "  ")
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(string(buf)).To(Equal(exampleJSONParsed))
 		})
 		It("Marshal struct into json with port configure", func() {
@@ -522,13 +491,13 @@ var _ = Describe("Schema", func() {
             ]`}
 
 			tmpl, err := template.New("vmexample").Parse(exampleJSON)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			var tpl bytes.Buffer
 			err = tmpl.Execute(&tpl, networkTemplateData)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			exampleJSONParsed := tpl.String()
 			buf, err := json.MarshalIndent(*exampleVMI, "", "  ")
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(string(buf)).To(Equal(exampleJSONParsed))
 		})
 	})

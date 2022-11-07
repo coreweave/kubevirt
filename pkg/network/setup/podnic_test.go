@@ -2,23 +2,23 @@ package network
 
 import (
 	"fmt"
-	"io/ioutil"
-	"os"
 	"runtime"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/golang/mock/gomock"
 
 	v1 "kubevirt.io/api/core/v1"
+	api2 "kubevirt.io/client-go/api"
+
 	dutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	"kubevirt.io/kubevirt/pkg/network/cache"
 	"kubevirt.io/kubevirt/pkg/network/dhcp"
 	netdriver "kubevirt.io/kubevirt/pkg/network/driver"
 	neterrors "kubevirt.io/kubevirt/pkg/network/errors"
 	"kubevirt.io/kubevirt/pkg/network/infraconfigurators"
+	"kubevirt.io/kubevirt/pkg/network/namescheme"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -29,16 +29,15 @@ var _ = Describe("podNIC", func() {
 	)
 	var (
 		mockNetwork                *netdriver.MockNetworkHandler
-		cacheFactory               cache.InterfaceCacheFactory
+		baseCacheCreator           tempCacheCreator
 		mockPodNetworkConfigurator *infraconfigurators.MockPodNetworkInfraConfigurator
 		mockDHCPConfigurator       *dhcp.MockConfigurator
 		ctrl                       *gomock.Controller
-		tmpDir                     string
 	)
 
 	newPhase1PodNICWithMocks := func(vmi *v1.VirtualMachineInstance) (*podNIC, error) {
 		launcherPID := 1
-		podnic, err := newPodNIC(vmi, &vmi.Spec.Networks[0], mockNetwork, cacheFactory, &launcherPID)
+		podnic, err := newPodNIC(vmi, &vmi.Spec.Networks[0], mockNetwork, &baseCacheCreator, &launcherPID)
 		if err != nil {
 			return nil, err
 		}
@@ -46,7 +45,7 @@ var _ = Describe("podNIC", func() {
 		return podnic, nil
 	}
 	newPhase2PodNICWithMocks := func(vmi *v1.VirtualMachineInstance) (*podNIC, error) {
-		podnic, err := newPodNIC(vmi, &vmi.Spec.Networks[0], mockNetwork, cacheFactory, nil)
+		podnic, err := newPodNIC(vmi, &vmi.Spec.Networks[0], mockNetwork, &baseCacheCreator, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -55,10 +54,6 @@ var _ = Describe("podNIC", func() {
 	}
 	BeforeEach(func() {
 		dutils.MockDefaultOwnershipManager()
-		var err error
-		tmpDir, err = ioutil.TempDir("/tmp", "interface-cache")
-		Expect(err).ToNot(HaveOccurred())
-		cacheFactory = cache.NewInterfaceCacheFactoryWithBasePath(tmpDir)
 
 		ctrl = gomock.NewController(GinkgoT())
 		mockNetwork = netdriver.NewMockNetworkHandler(ctrl)
@@ -66,8 +61,7 @@ var _ = Describe("podNIC", func() {
 		mockDHCPConfigurator = dhcp.NewMockConfigurator(ctrl)
 	})
 	AfterEach(func() {
-		os.RemoveAll(tmpDir)
-		ctrl.Finish()
+		Expect(baseCacheCreator.New("").Delete()).To(Succeed())
 	})
 	When("reading networking configuration succeed", func() {
 		var (
@@ -75,12 +69,12 @@ var _ = Describe("podNIC", func() {
 			vmi    *v1.VirtualMachineInstance
 		)
 		BeforeEach(func() {
-			mockNetwork.EXPECT().ReadIPAddressesFromLink(primaryPodInterfaceName).Return("1.2.3.4", "169.254.0.0", nil)
+			mockNetwork.EXPECT().ReadIPAddressesFromLink(namescheme.PrimaryPodInterfaceName).Return("1.2.3.4", "169.254.0.0", nil)
 			mockNetwork.EXPECT().IsIpv4Primary().Return(true, nil)
 		})
 
 		BeforeEach(func() {
-			mockPodNetworkConfigurator.EXPECT().DiscoverPodNetworkInterface(primaryPodInterfaceName)
+			mockPodNetworkConfigurator.EXPECT().DiscoverPodNetworkInterface(namescheme.PrimaryPodInterfaceName)
 			mockPodNetworkConfigurator.EXPECT().GenerateNonRecoverableDHCPConfig().Return(&cache.DHCPConfig{})
 			mockPodNetworkConfigurator.EXPECT().GenerateNonRecoverableDomainIfaceSpec()
 		})
@@ -114,7 +108,8 @@ var _ = Describe("podNIC", func() {
 			})
 			It("should return no error at phase1 and store pod interface", func() {
 				Expect(podnic.PlugPhase1()).To(Succeed())
-				podData, err := podnic.cacheFactory.CacheForVMI(vmi).Read("default")
+				var podData *cache.PodIfaceCacheData
+				podData, err := cache.ReadPodInterfaceCache(podnic.cacheCreator, string(vmi.UID), "default")
 				Expect(err).ToNot(HaveOccurred())
 				Expect(podData.PodIP).To(Equal("1.2.3.4"))
 				Expect(podData.PodIPs).To(ConsistOf("1.2.3.4", "169.254.0.0"))
@@ -134,8 +129,22 @@ var _ = Describe("podNIC", func() {
 			api.NewDefaulter(runtime.GOARCH).SetObjectDefaults_Domain(domain)
 			podnic, err = newPhase2PodNICWithMocks(vmi)
 			Expect(err).ToNot(HaveOccurred())
-			podnic.cacheFactory.CacheDHCPConfigForPid(getPIDString(podnic.launcherPID)).Write(podnic.podInterfaceName, &cache.DHCPConfig{Name: podnic.podInterfaceName})
-			podnic.cacheFactory.CacheDomainInterfaceForPID(getPIDString(podnic.launcherPID)).Write(podnic.vmiSpecIface.Name, &domain.Spec.Devices.Interfaces[0])
+			Expect(
+				cache.WriteDHCPInterfaceCache(
+					podnic.cacheCreator,
+					getPIDString(podnic.launcherPID),
+					podnic.podInterfaceName,
+					&cache.DHCPConfig{Name: podnic.podInterfaceName},
+				),
+			).To(Succeed())
+			Expect(
+				cache.WriteDomainInterfaceCache(
+					podnic.cacheCreator,
+					getPIDString(podnic.launcherPID),
+					podnic.vmiSpecIface.Name,
+					&domain.Spec.Devices.Interfaces[0],
+				),
+			).To(Succeed())
 		})
 		Context("and starting the DHCP server fails", func() {
 			BeforeEach(func() {
@@ -146,14 +155,14 @@ var _ = Describe("podNIC", func() {
 				}
 			})
 			It("phase2 should panic", func() {
-				Expect(func() { podnic.PlugPhase2(domain) }).To(Panic())
+				Expect(func() { _ = podnic.PlugPhase2(domain) }).To(Panic())
 			})
 		})
 		Context("and starting the DHCP server succeed", func() {
 			BeforeEach(func() {
 				dhcpConfig := &cache.DHCPConfig{}
 				mockDHCPConfigurator.EXPECT().Generate().Return(dhcpConfig, nil)
-				mockDHCPConfigurator.EXPECT().EnsureDHCPServerStarted(primaryPodInterfaceName, *dhcpConfig, vmi.Spec.Domain.Devices.Interfaces[0].DHCPOptions).Return(nil)
+				mockDHCPConfigurator.EXPECT().EnsureDHCPServerStarted(namescheme.PrimaryPodInterfaceName, *dhcpConfig, vmi.Spec.Domain.Devices.Interfaces[0].DHCPOptions).Return(nil)
 				podnic.domainGenerator = &fakeLibvirtSpecGenerator{
 					shouldGenerateFail: false,
 				}
@@ -170,7 +179,8 @@ var _ = Describe("podNIC", func() {
 		)
 		BeforeEach(func() {
 
-			vmi = newVMI("testnamespace", "testVmName")
+			vmi = api2.NewMinimalVMIWithNS("testnamespace", "testVmName")
+			vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
 			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{
 				Name: "default",
 				InterfaceBindingMethod: v1.InterfaceBindingMethod{
@@ -242,11 +252,11 @@ var _ = Describe("podNIC", func() {
 				Expect(err).ToNot(HaveOccurred())
 				pid := 1
 				podnic.launcherPID = &pid
-				podnic.setState(cache.PodIfaceNetworkPreparationPending)
+				Expect(podnic.setState(cache.PodIfaceNetworkPreparationPending)).To(Succeed())
 			})
 
 			BeforeEach(func() {
-				mockNetwork.EXPECT().ReadIPAddressesFromLink(primaryPodInterfaceName).Return("1.2.3.4", "169.254.0.0", nil)
+				mockNetwork.EXPECT().ReadIPAddressesFromLink(namescheme.PrimaryPodInterfaceName).Return("1.2.3.4", "169.254.0.0", nil)
 				mockNetwork.EXPECT().IsIpv4Primary().Return(true, nil)
 			})
 
@@ -281,7 +291,7 @@ var _ = Describe("podNIC", func() {
 				vmi := newVMIMasqueradeInterface("testnamespace", "testVmName", masqueradeCidr, masqueradeIpv6Cidr)
 				podnic, err = newPhase1PodNICWithMocks(vmi)
 				Expect(err).ToNot(HaveOccurred())
-				podnic.setState(cache.PodIfaceNetworkPreparationStarted)
+				Expect(podnic.setState(cache.PodIfaceNetworkPreparationStarted)).To(Succeed())
 			})
 			Context("and phase1 is called", func() {
 				It("should fail with CriticalNetworkError", func() {
@@ -300,7 +310,7 @@ var _ = Describe("podNIC", func() {
 				vmi := newVMIMasqueradeInterface("testnamespace", "testVmName", masqueradeCidr, masqueradeIpv6Cidr)
 				podnic, err = newPhase1PodNICWithMocks(vmi)
 				Expect(err).ToNot(HaveOccurred())
-				podnic.setState(cache.PodIfaceNetworkPreparationFinished)
+				Expect(podnic.setState(cache.PodIfaceNetworkPreparationFinished)).To(Succeed())
 			})
 			Context("and phase1 is called", func() {
 				It("should successfully return without calling infra configurator", func() {

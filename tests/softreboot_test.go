@@ -23,22 +23,24 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	expect "github.com/google/goexpect"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	virtctlpause "kubevirt.io/kubevirt/pkg/virtctl/pause"
 	virtctlsoftreboot "kubevirt.io/kubevirt/pkg/virtctl/softreboot"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/clientcmd"
 	"kubevirt.io/kubevirt/tests/console"
-	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/util"
 )
 
-func WaitForVMIRebooted(vmi *v1.VirtualMachineInstance, login func(vmi *v1.VirtualMachineInstance) error) {
+func waitForVMIRebooted(vmi *v1.VirtualMachineInstance, login func(vmi *v1.VirtualMachineInstance) error) {
 	By(fmt.Sprintf("Waiting for vmi %s rebooted", vmi.Name))
 	if vmi.Namespace == "" {
 		vmi.Namespace = util.NamespaceTestDefault
@@ -51,6 +53,17 @@ func WaitForVMIRebooted(vmi *v1.VirtualMachineInstance, login func(vmi *v1.Virtu
 	}, 300)).To(Succeed(), "expected reboot record")
 }
 
+func withoutACPI() libvmi.Option {
+	return func(vmi *v1.VirtualMachineInstance) {
+		acpiEnabled := false
+		vmi.Spec.Domain.Features = &v1.Features{
+			ACPI: v1.FeatureState{Enabled: &acpiEnabled},
+		}
+	}
+}
+
+const vmiLaunchTimeout = 360
+
 var _ = Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-compute]Soft reboot", func() {
 
 	var err error
@@ -59,45 +72,28 @@ var _ = Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-c
 	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
-
-		tests.BeforeTestCleanup()
 	})
 
 	Context("Soft reboot VMI", func() {
 
 		var vmi *v1.VirtualMachineInstance
 
-		runVMI := func(withGuestAgent bool, ACPIEnabled bool) {
-			if withGuestAgent {
-				vmi = tests.NewRandomFedoraVMIWithGuestAgent()
-			} else {
-				vmi = tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
-				tests.AddUserData(vmi, "cloud-init", "#!/bin/bash\necho 'hello'\n")
-			}
-			if !ACPIEnabled {
-				vmi.Spec.Domain.Features = &v1.Features{
-					ACPI: v1.FeatureState{Enabled: &ACPIEnabled},
-				}
-			}
-			tests.RunVMIAndExpectLaunch(vmi, 360)
-		}
-
 		When("soft reboot vmi with agent connected via API", func() {
 			It("should succeed", func() {
-				runVMI(true, false)
+				vmi = tests.RunVMIAndExpectLaunch(libvmi.NewFedora(withoutACPI()), vmiLaunchTimeout)
 
 				tests.WaitAgentConnected(virtClient, vmi)
 
 				err := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).SoftReboot(vmi.Name)
 				Expect(err).ToNot(HaveOccurred())
 
-				WaitForVMIRebooted(vmi, console.LoginToFedora)
+				waitForVMIRebooted(vmi, console.LoginToFedora)
 			})
 		})
 
 		When("soft reboot vmi with ACPI feature enabled via API", func() {
 			It("should succeed", func() {
-				runVMI(false, true)
+				vmi = tests.RunVMIAndExpectLaunch(libvmi.NewCirros(), vmiLaunchTimeout)
 
 				Expect(console.LoginToCirros(vmi)).To(Succeed())
 				tests.WaitAgentDisconnected(virtClient, vmi)
@@ -105,73 +101,75 @@ var _ = Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-c
 				err := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).SoftReboot(vmi.Name)
 				Expect(err).ToNot(HaveOccurred())
 
-				WaitForVMIRebooted(vmi, console.LoginToCirros)
+				waitForVMIRebooted(vmi, console.LoginToCirros)
 			})
 		})
 
 		When("soft reboot vmi with agent connected via virtctl", func() {
 			It("should succeed", func() {
-				runVMI(true, false)
+				vmi = tests.RunVMIAndExpectLaunch(libvmi.NewFedora(withoutACPI()), vmiLaunchTimeout)
 
 				tests.WaitAgentConnected(virtClient, vmi)
 
-				command := tests.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
+				command := clientcmd.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
 				Expect(command()).To(Succeed())
 
-				WaitForVMIRebooted(vmi, console.LoginToFedora)
+				waitForVMIRebooted(vmi, console.LoginToFedora)
 			})
 		})
 
 		When("soft reboot vmi with ACPI feature enabled via virtctl", func() {
 			It("should succeed", func() {
-				runVMI(false, true)
+				vmi = tests.RunVMIAndExpectLaunch(libvmi.NewCirros(), vmiLaunchTimeout)
 
 				Expect(console.LoginToCirros(vmi)).To(Succeed())
 				tests.WaitAgentDisconnected(virtClient, vmi)
 
-				command := tests.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
+				command := clientcmd.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
 				Expect(command()).To(Succeed())
 
-				WaitForVMIRebooted(vmi, console.LoginToCirros)
+				waitForVMIRebooted(vmi, console.LoginToCirros)
 			})
 		})
 
 		When("soft reboot vmi neither have the agent connected nor the ACPI feature enabled via virtctl", func() {
 			It("should failed", func() {
-				runVMI(false, false)
+				vmi = tests.RunVMIAndExpectLaunch(libvmi.NewCirros(withoutACPI()), vmiLaunchTimeout)
 
 				Expect(console.LoginToCirros(vmi)).To(Succeed())
 				tests.WaitAgentDisconnected(virtClient, vmi)
 
-				command := tests.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
+				command := clientcmd.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
 				err := command()
+				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("VMI neither have the agent connected nor the ACPI feature enabled"))
 			})
 		})
 
 		When("soft reboot vmi after paused and unpaused via virtctl", func() {
 			It("should failed to soft reboot a paused vmi", func() {
-				runVMI(true, true)
+				vmi = tests.RunVMIAndExpectLaunch(libvmi.NewFedora(), vmiLaunchTimeout)
 				tests.WaitAgentConnected(virtClient, vmi)
 
-				command := tests.NewRepeatableVirtctlCommand(virtctlpause.COMMAND_PAUSE, "vmi", "--namespace", util.NamespaceTestDefault, vmi.Name)
+				command := clientcmd.NewRepeatableVirtctlCommand(virtctlpause.COMMAND_PAUSE, "vmi", "--namespace", util.NamespaceTestDefault, vmi.Name)
 				Expect(command()).To(Succeed())
 				tests.WaitForVMICondition(virtClient, vmi, v1.VirtualMachineInstancePaused, 30)
 
-				command = tests.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
+				command = clientcmd.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
 				err := command()
+				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("VMI is paused"))
 
-				command = tests.NewRepeatableVirtctlCommand(virtctlpause.COMMAND_UNPAUSE, "vmi", "--namespace", util.NamespaceTestDefault, vmi.Name)
+				command = clientcmd.NewRepeatableVirtctlCommand(virtctlpause.COMMAND_UNPAUSE, "vmi", "--namespace", util.NamespaceTestDefault, vmi.Name)
 				Expect(command()).To(Succeed())
 				tests.WaitForVMIConditionRemovedOrFalse(virtClient, vmi, v1.VirtualMachineInstancePaused, 30)
 
 				tests.WaitAgentConnected(virtClient, vmi)
 
-				command = tests.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
+				command = clientcmd.NewRepeatableVirtctlCommand(virtctlsoftreboot.COMMAND_SOFT_REBOOT, "--namespace", util.NamespaceTestDefault, vmi.Name)
 				Expect(command()).To(Succeed())
 
-				WaitForVMIRebooted(vmi, console.LoginToFedora)
+				waitForVMIRebooted(vmi, console.LoginToFedora)
 			})
 		})
 	})

@@ -21,6 +21,8 @@ package libvmi
 
 import (
 	kvirtv1 "kubevirt.io/api/core/v1"
+
+	"kubevirt.io/kubevirt/tests/libnet"
 )
 
 const DefaultInterfaceName = "default"
@@ -41,10 +43,19 @@ func WithNetwork(network *kvirtv1.Network) Option {
 	}
 }
 
+func WithMasqueradeNetworking(ports ...kvirtv1.Port) []Option {
+	networkData := libnet.CreateDefaultCloudInitNetworkData()
+	return []Option{
+		WithInterface(InterfaceDeviceWithMasqueradeBinding(ports...)),
+		WithNetwork(kvirtv1.DefaultPodNetwork()),
+		WithCloudInitNoCloudNetworkData(networkData),
+	}
+}
+
 // InterfaceDeviceWithMasqueradeBinding returns an Interface named "default" with masquerade binding.
 func InterfaceDeviceWithMasqueradeBinding(ports ...kvirtv1.Port) kvirtv1.Interface {
 	return kvirtv1.Interface{
-		Name: "default",
+		Name: DefaultInterfaceName,
 		InterfaceBindingMethod: kvirtv1.InterfaceBindingMethod{
 			Masquerade: &kvirtv1.InterfaceMasquerade{},
 		},
@@ -62,6 +73,17 @@ func InterfaceDeviceWithBridgeBinding(name string) kvirtv1.Interface {
 	}
 }
 
+// InterfaceDeviceWithSlirpBinding returns an Interface with SLIRP binding.
+func InterfaceDeviceWithSlirpBinding(name string, ports ...kvirtv1.Port) kvirtv1.Interface {
+	return kvirtv1.Interface{
+		Name: name,
+		InterfaceBindingMethod: kvirtv1.InterfaceBindingMethod{
+			Slirp: &kvirtv1.InterfaceSlirp{},
+		},
+		Ports: ports,
+	}
+}
+
 // InterfaceDeviceWithSRIOVBinding returns an Interface with SRIOV binding.
 func InterfaceDeviceWithSRIOVBinding(name string) kvirtv1.Interface {
 	return kvirtv1.Interface{
@@ -72,19 +94,30 @@ func InterfaceDeviceWithSRIOVBinding(name string) kvirtv1.Interface {
 	}
 }
 
+// InterfaceDeviceWithPasstBinding returns an Interface named "default" with passt binding.
+func InterfaceDeviceWithPasstBinding(ports ...kvirtv1.Port) kvirtv1.Interface {
+	return kvirtv1.Interface{
+		Name: DefaultInterfaceName,
+		InterfaceBindingMethod: kvirtv1.InterfaceBindingMethod{
+			Passt: &kvirtv1.InterfacePasst{},
+		},
+		Ports: ports,
+	}
+}
+
 // InterfaceWithMac decorates an existing Interface with a MAC address.
 func InterfaceWithMac(iface *kvirtv1.Interface, macAddress string) *kvirtv1.Interface {
 	iface.MacAddress = macAddress
 	return iface
 }
 
-// MultusNetwork returns a Network with the given name
-func MultusNetwork(networkName string) *kvirtv1.Network {
+// MultusNetwork returns a Network with the given name, associated to the given nad
+func MultusNetwork(name, nadName string) *kvirtv1.Network {
 	return &kvirtv1.Network{
-		Name: networkName,
+		Name: name,
 		NetworkSource: kvirtv1.NetworkSource{
 			Multus: &kvirtv1.MultusNetwork{
-				NetworkName: networkName,
+				NetworkName: nadName,
 			},
 		},
 	}

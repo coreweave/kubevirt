@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	virtv1 "kubevirt.io/api/core/v1"
+
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 	operatorutil "kubevirt.io/kubevirt/pkg/virt-operator/util"
@@ -18,16 +19,25 @@ import (
 
 const (
 	VirtHandlerName = "virt-handler"
+	kubeletPodsPath = "/var/lib/kubelet/pods"
 )
 
-func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string, version string, launcherVersion string, productName string, productVersion string, productComponent string, pullPolicy corev1.PullPolicy, verbosity string, extraEnv map[string]string) (*appsv1.DaemonSet, error) {
+func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVersion, productName, productVersion, productComponent, image, launcherImage string, pullPolicy corev1.PullPolicy, migrationNetwork *string, verbosity string, extraEnv map[string]string) (*appsv1.DaemonSet, error) {
 
 	deploymentName := VirtHandlerName
 	imageName := fmt.Sprintf("%s%s", imagePrefix, deploymentName)
 	env := operatorutil.NewEnvVarMap(extraEnv)
-	podTemplateSpec, err := newPodTemplateSpec(deploymentName, imageName, repository, version, productName, productVersion, productComponent, pullPolicy, nil, env)
+	podTemplateSpec, err := newPodTemplateSpec(deploymentName, imageName, repository, version, productName, productVersion, productComponent, image, pullPolicy, nil, env)
 	if err != nil {
 		return nil, err
+	}
+
+	if migrationNetwork != nil {
+		if podTemplateSpec.ObjectMeta.Annotations == nil {
+			podTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
+		}
+		// Join the pod to the migration network and name the corresponding interface "migration0"
+		podTemplateSpec.ObjectMeta.Annotations["k8s.v1.cni.cncf.io/networks"] = *migrationNetwork + "@migration0"
 	}
 
 	daemonset := &appsv1.DaemonSet{
@@ -73,13 +83,16 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 	// nodelabeller currently only support x86
 	if virtconfig.IsAMD64(runtime.GOARCH) {
 		launcherVersion = AddVersionSeparatorPrefix(launcherVersion)
+		if launcherImage == "" {
+			launcherImage = fmt.Sprintf("%s/%s%s%s", repository, imagePrefix, "virt-launcher", launcherVersion)
+		}
 		pod.InitContainers = []corev1.Container{
 			{
 				Command: []string{
 					"/bin/sh",
 					"-c",
 				},
-				Image: fmt.Sprintf("%s/%s%s%s", repository, imagePrefix, "virt-launcher", launcherVersion),
+				Image: launcherImage,
 				Name:  "virt-launcher",
 				Args: []string{
 					"node-labeller.sh",
@@ -107,6 +120,8 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 	container := &pod.Containers[0]
 	container.Command = []string{
 		VirtHandlerName,
+	}
+	container.Args = []string{
 		"--port",
 		"8443",
 		"--hostname-override",
@@ -156,11 +171,9 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 
 	container.Env = append(container.Env, containerEnv...)
 
-	container.VolumeMounts = []corev1.VolumeMount{}
-
 	container.LivenessProbe = &corev1.Probe{
 		FailureThreshold: 3,
-		Handler: corev1.Handler{
+		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
 				Scheme: corev1.URISchemeHTTPS,
 				Port: intstr.IntOrString{
@@ -175,7 +188,7 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 		PeriodSeconds:       45,
 	}
 	container.ReadinessProbe = &corev1.Probe{
-		Handler: corev1.Handler{
+		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
 				Scheme: corev1.URISchemeHTTPS,
 				Port: intstr.IntOrString{
@@ -189,8 +202,6 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 		TimeoutSeconds:      10,
 		PeriodSeconds:       20,
 	}
-
-	pod.Volumes = []corev1.Volume{}
 
 	type volume struct {
 		name             string
@@ -213,8 +224,8 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 		{"virt-lib-dir", "/var/lib/kubevirt", "/var/lib/kubevirt", nil},
 		{"virt-private-dir", "/var/run/kubevirt-private", "/var/run/kubevirt-private", nil},
 		{"device-plugin", "/var/lib/kubelet/device-plugins", "/var/lib/kubelet/device-plugins", nil},
-		{"kubelet-pods-shortened", "/var/lib/kubelet/pods", "/pods", nil},
-		{"kubelet-pods", "/var/lib/kubelet/pods", "/var/lib/kubelet/pods", &bidi},
+		{"kubelet-pods-shortened", kubeletPodsPath, "/pods", nil},
+		{"kubelet-pods", kubeletPodsPath, kubeletPodsPath, &bidi},
 		{"node-labeller", "/var/lib/kubevirt-node-labeller", "/var/lib/kubevirt-node-labeller", nil},
 	}
 
@@ -234,10 +245,31 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 		})
 	}
 
+	// Use the downward API to access the network status annotations
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name:      "podinfo",
+		MountPath: "/etc/podinfo",
+	})
+	pod.Volumes = append(pod.Volumes, corev1.Volume{
+		Name: "podinfo",
+		VolumeSource: corev1.VolumeSource{
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: []corev1.DownwardAPIVolumeFile{
+					{
+						Path: "network-status",
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: `metadata.annotations['k8s.v1.cni.cncf.io/network-status']`,
+						},
+					},
+				},
+			},
+		},
+	})
+
 	container.Resources = corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10m"),
-			corev1.ResourceMemory: resource.MustParse("230Mi"),
+			corev1.ResourceMemory: resource.MustParse("300Mi"),
 		},
 	}
 

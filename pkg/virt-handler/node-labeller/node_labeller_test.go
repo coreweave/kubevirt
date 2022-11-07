@@ -1,4 +1,4 @@
-// +build amd64
+//go:build amd64
 
 /*
  * This file is part of the KubeVirt project
@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -37,6 +37,7 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/testutils"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	util "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
@@ -133,6 +134,12 @@ var _ = Describe("Node-labeller ", func() {
 	})
 	It("should add host cpu required features", func() {
 		expectNodePatch(kubevirtv1.HostModelRequiredFeaturesLabel)
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+	})
+
+	It("should add SEV label", func() {
+		expectNodePatch(kubevirtv1.SEVLabel)
 		res := nlController.execute()
 		Expect(res).To(BeTrue())
 	})

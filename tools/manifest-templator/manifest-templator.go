@@ -64,10 +64,14 @@ type templateData struct {
 	VirtControllerSha      string
 	VirtHandlerSha         string
 	VirtLauncherSha        string
+	VirtExportProxySha     string
+	VirtExportServerSha    string
 	GsSha                  string
 	PriorityClassSpec      string
 	FeatureGates           []string
+	InfraReplicas          uint8
 	GeneratedManifests     map[string]string
+	VirtOperatorImage      string
 }
 
 func main() {
@@ -93,8 +97,12 @@ func main() {
 	virtControllerSha := flag.String("virt-controller-sha", "", "")
 	virtHandlerSha := flag.String("virt-handler-sha", "", "")
 	virtLauncherSha := flag.String("virt-launcher-sha", "", "")
+	virtExportProxySha := flag.String("virt-exportproxy-sha", "", "")
+	virtExportServerSha := flag.String("virt-exportserver-sha", "", "")
 	gsSha := flag.String("gs-sha", "", "")
 	featureGates := flag.String("feature-gates", "", "")
+	infraReplicas := flag.Uint("infra-replicas", 0, "")
+	virtOperatorImage := flag.String("virt-operator-image", "", "custom image for virt-operator")
 
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.CommandLine.ParseErrorsWhitelist.UnknownFlags = true
@@ -114,8 +122,9 @@ func main() {
 		GeneratedManifests: make(map[string]string),
 	}
 
-	if featureGates != nil && strings.Contains(*featureGates, "NonRoot") && !strings.Contains(*featureGates, "NonRootExperimental") {
-		*featureGates = *featureGates + ",NonRootExperimental"
+	if featureGates != nil {
+
+		*featureGates = strings.Replace(*featureGates, "NonRootExperimental", "NonRoot", 1)
 	}
 
 	if *processVars {
@@ -134,6 +143,8 @@ func main() {
 		data.VirtControllerSha = *virtControllerSha
 		data.VirtHandlerSha = *virtHandlerSha
 		data.VirtLauncherSha = *virtLauncherSha
+		data.VirtExportProxySha = *virtExportProxySha
+		data.VirtExportServerSha = *virtExportServerSha
 		data.GsSha = *gsSha
 		data.OperatorRules = getOperatorRules()
 		data.KubeVirtLogo = getKubeVirtLogo(*kubeVirtLogoPath)
@@ -142,8 +153,12 @@ func main() {
 		data.ReplacesCsvVersion = ""
 		data.OperatorDeploymentSpec = getOperatorDeploymentSpec(data, 2)
 		data.PriorityClassSpec = getPriorityClassSpec(2)
+		data.VirtOperatorImage = *virtOperatorImage
 		if *featureGates != "" {
 			data.FeatureGates = strings.Split(*featureGates, ",")
+		}
+		if *infraReplicas != 0 {
+			data.InfraReplicas = uint8(*infraReplicas)
 		}
 
 		// operator deployment differs a bit in normal manifest and CSV
@@ -183,6 +198,8 @@ func main() {
 		data.VirtControllerSha = "{{.VirtControllerSha}}"
 		data.VirtHandlerSha = "{{.VirtHandlerSha}}"
 		data.VirtLauncherSha = "{{.VirtLauncherSha}}"
+		data.VirtExportProxySha = "{{.VirtExportProxySha}}"
+		data.VirtExportServerSha = "{{.VirtExportServerSha}}"
 		data.ReplacesCsvVersion = "{{.ReplacesCsvVersion}}"
 		data.OperatorDeploymentSpec = "{{.OperatorDeploymentSpec}}"
 		data.OperatorCsv = "{{.OperatorCsv}}"
@@ -250,14 +267,17 @@ func getOperatorDeploymentSpec(data templateData, indentation int) string {
 		data.DockerPrefix,
 		data.ImagePrefix,
 		version,
-		v1.PullPolicy(data.ImagePullPolicy),
 		data.Verbosity,
 		data.DockerTag,
 		data.VirtApiSha,
 		data.VirtControllerSha,
 		data.VirtHandlerSha,
 		data.VirtLauncherSha,
-		data.GsSha)
+		data.VirtExportProxySha,
+		data.VirtExportServerSha,
+		data.GsSha,
+		data.VirtOperatorImage,
+		v1.PullPolicy(data.ImagePullPolicy))
 	if err != nil {
 		panic(err)
 	}

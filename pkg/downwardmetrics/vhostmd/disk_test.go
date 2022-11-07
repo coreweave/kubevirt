@@ -1,11 +1,10 @@
 package vhostmd
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"kubevirt.io/kubevirt/pkg/downwardmetrics/vhostmd/api"
@@ -41,7 +40,7 @@ var _ = Describe("vhostmd", func() {
 		var err error
 
 		BeforeEach(func() {
-			targetDir, err = ioutil.TempDir("", "vhostmd")
+			targetDir, err = os.MkdirTemp("", "vhostmd")
 			Expect(err).ToNot(HaveOccurred())
 		})
 

@@ -20,6 +20,7 @@
 package rest
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -36,8 +37,11 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 )
+
+//const failedRetrieveVMI = "Failed to retrieve VMI"
 
 type ConsoleHandler struct {
 	podIsolationDetector isolation.PodIsolationDetector
@@ -70,7 +74,7 @@ func NewConsoleHandler(podIsolationDetector isolation.PodIsolationDetector, vmiI
 func (t *ConsoleHandler) USBRedirHandler(request *restful.Request, response *restful.Response) {
 	vmi, code, err := getVMI(request, t.vmiInformer)
 	if err != nil {
-		log.Log.Object(vmi).Reason(err).Error("Failed to retrieve VMI")
+		log.Log.Object(vmi).Reason(err).Error(failedRetrieveVMI)
 		response.WriteError(code, err)
 		return
 	}
@@ -133,7 +137,7 @@ func (t *ConsoleHandler) USBRedirHandler(request *restful.Request, response *res
 func (t *ConsoleHandler) VNCHandler(request *restful.Request, response *restful.Response) {
 	vmi, code, err := getVMI(request, t.vmiInformer)
 	if err != nil {
-		log.Log.Object(vmi).Reason(err).Error("Failed to retrieve VMI")
+		log.Log.Object(vmi).Reason(err).Error(failedRetrieveVMI)
 		response.WriteError(code, err)
 		return
 	}
@@ -152,7 +156,7 @@ func (t *ConsoleHandler) VNCHandler(request *restful.Request, response *restful.
 func (t *ConsoleHandler) SerialHandler(request *restful.Request, response *restful.Response) {
 	vmi, code, err := getVMI(request, t.vmiInformer)
 	if err != nil {
-		log.Log.Object(vmi).Reason(err).Error("Failed to retrieve VMI")
+		log.Log.Object(vmi).Reason(err).Error(failedRetrieveVMI)
 		response.WriteError(code, err)
 		return
 	}
@@ -196,9 +200,9 @@ func (t *ConsoleHandler) getUnixSocketPath(vmi *v1.VirtualMachineInstance, socke
 	if err != nil {
 		return "", err
 	}
-	socketDir := path.Join("proc", strconv.Itoa(result.Pid()), "root", "var", "run", "kubevirt-private", string(vmi.GetUID()))
+	socketDir := path.Join("/proc", strconv.Itoa(result.Pid()), "root", "var", "run", "kubevirt-private", string(vmi.GetUID()))
 	socketPath := path.Join(socketDir, socketName)
-	if _, err = os.Stat(socketPath); os.IsNotExist(err) {
+	if _, err = os.Stat(socketPath); errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 

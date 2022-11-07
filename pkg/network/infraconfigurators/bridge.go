@@ -9,11 +9,13 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/network/cache"
 	netdriver "kubevirt.io/kubevirt/pkg/network/driver"
 	virtnetlink "kubevirt.io/kubevirt/pkg/network/link"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
 )
 
 type BridgePodNetworkConfigurator struct {
@@ -125,10 +127,6 @@ func (b *BridgePodNetworkConfigurator) PreparePodNetworkInterface() error {
 		}
 	}
 
-	if _, err := b.handler.SetRandomMac(b.podNicLink.Attrs().Name); err != nil {
-		return err
-	}
-
 	if err := b.createBridge(); err != nil {
 		return err
 	}
@@ -137,7 +135,9 @@ func (b *BridgePodNetworkConfigurator) PreparePodNetworkInterface() error {
 	if util.IsNonRootVMI(b.vmi) {
 		tapOwner = strconv.Itoa(util.NonRootUID)
 	}
-	err := createAndBindTapToBridge(b.handler, b.tapDeviceName, b.bridgeInterfaceName, b.launcherPID, b.podNicLink.Attrs().MTU, tapOwner, b.vmi)
+
+	queues := converter.CalculateNetworkQueues(b.vmi, converter.GetInterfaceType(b.vmiSpecIface))
+	err := createAndBindTapToBridge(b.handler, b.tapDeviceName, b.bridgeInterfaceName, b.launcherPID, b.podNicLink.Attrs().MTU, tapOwner, queues)
 	if err != nil {
 		log.Log.Reason(err).Errorf("failed to create tap device named %s", b.tapDeviceName)
 		return err
@@ -194,6 +194,17 @@ func (b *BridgePodNetworkConfigurator) createBridge() error {
 	err := b.handler.LinkAdd(bridge)
 	if err != nil {
 		log.Log.Reason(err).Errorf("failed to create a bridge")
+		return err
+	}
+
+	brLink, err := b.handler.LinkByName(b.bridgeInterfaceName)
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to fetch bridge %s link", bridge.Name)
+		return err
+	}
+
+	if err := b.handler.LinkSetHardwareAddr(b.podNicLink, brLink.Attrs().HardwareAddr); err != nil {
+		log.Log.Reason(err).Errorf("failed to set on pod interface (%s) the mac (%s)", b.podNicLink.Attrs().Name, brLink.Attrs().HardwareAddr.String())
 		return err
 	}
 

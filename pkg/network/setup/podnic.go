@@ -23,16 +23,20 @@ import (
 	"fmt"
 	"os"
 
-	"kubevirt.io/kubevirt/pkg/network/domainspec"
-
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/client-go/precond"
+
+	goerrors "errors"
+
 	"kubevirt.io/kubevirt/pkg/network/cache"
 	dhcpconfigurator "kubevirt.io/kubevirt/pkg/network/dhcp"
+	"kubevirt.io/kubevirt/pkg/network/domainspec"
 	netdriver "kubevirt.io/kubevirt/pkg/network/driver"
 	"kubevirt.io/kubevirt/pkg/network/errors"
 	"kubevirt.io/kubevirt/pkg/network/infraconfigurators"
+	"kubevirt.io/kubevirt/pkg/network/namescheme"
+	"kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -45,14 +49,14 @@ type podNIC struct {
 	vmiSpecIface      *v1.Interface
 	vmiSpecNetwork    *v1.Network
 	handler           netdriver.NetworkHandler
-	cacheFactory      cache.InterfaceCacheFactory
+	cacheCreator      cacheCreator
 	dhcpConfigurator  dhcpconfigurator.Configurator
 	infraConfigurator infraconfigurators.PodNetworkInfraConfigurator
 	domainGenerator   domainspec.LibvirtSpecGenerator
 }
 
-func newPhase1PodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handler netdriver.NetworkHandler, cacheFactory cache.InterfaceCacheFactory, launcherPID *int) (*podNIC, error) {
-	podnic, err := newPodNIC(vmi, network, handler, cacheFactory, launcherPID)
+func newPhase1PodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handler netdriver.NetworkHandler, cacheCreator cacheCreator, launcherPID *int) (*podNIC, error) {
+	podnic, err := newPodNIC(vmi, network, handler, cacheCreator, launcherPID)
 	if err != nil {
 		return nil, err
 	}
@@ -76,12 +80,15 @@ func newPhase1PodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handle
 			podnic.vmiSpecNetwork,
 			*podnic.launcherPID,
 			podnic.handler)
+	} else if podnic.vmiSpecIface.Passt != nil {
+		podnic.infraConfigurator = infraconfigurators.NewPasstPodNetworkConfigurator(
+			podnic.handler)
 	}
 	return podnic, nil
 }
 
-func newPhase2PodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handler netdriver.NetworkHandler, cacheFactory cache.InterfaceCacheFactory, domain *api.Domain) (*podNIC, error) {
-	podnic, err := newPodNIC(vmi, network, handler, cacheFactory, nil)
+func newPhase2PodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handler netdriver.NetworkHandler, cacheCreator cacheCreator, domain *api.Domain) (*podNIC, error) {
+	podnic, err := newPodNIC(vmi, network, handler, cacheCreator, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -92,23 +99,24 @@ func newPhase2PodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handle
 	return podnic, nil
 }
 
-func newPodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handler netdriver.NetworkHandler, cacheFactory cache.InterfaceCacheFactory, launcherPID *int) (*podNIC, error) {
+func newPodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handler netdriver.NetworkHandler, cacheCreator cacheCreator, launcherPID *int) (*podNIC, error) {
 	if network.Pod == nil && network.Multus == nil {
 		return nil, fmt.Errorf("Network not implemented")
 	}
 
-	correspondingNetworkIface := findInterfaceByNetworkName(vmi, network)
+	correspondingNetworkIface := vmispec.LookupInterfaceByNetwork(vmi.Spec.Domain.Devices.Interfaces, network)
 	if correspondingNetworkIface == nil {
 		return nil, fmt.Errorf("no iface matching with network %s", network.Name)
 	}
 
-	podInterfaceName, err := composePodInterfaceName(vmi, network)
-	if err != nil {
-		return nil, err
+	networkNameScheme := namescheme.CreateNetworkNameScheme(vmi.Spec.Networks)
+	podInterfaceName, exists := networkNameScheme[network.Name]
+	if !exists {
+		return nil, fmt.Errorf("pod interface name not found for network %s", network.Name)
 	}
 
 	return &podNIC{
-		cacheFactory:     cacheFactory,
+		cacheCreator:     cacheCreator,
 		handler:          handler,
 		vmi:              vmi,
 		vmiSpecNetwork:   network,
@@ -119,7 +127,7 @@ func newPodNIC(vmi *v1.VirtualMachineInstance, network *v1.Network, handler netd
 }
 
 func (l *podNIC) setPodInterfaceCache() error {
-	ifCache := &cache.PodCacheInterface{Iface: l.vmiSpecIface}
+	ifCache := &cache.PodIfaceCacheData{Iface: l.vmiSpecIface}
 
 	ipv4, ipv6, err := l.handler.ReadIPAddressesFromLink(l.podInterfaceName)
 	if err != nil {
@@ -141,12 +149,10 @@ func (l *podNIC) setPodInterfaceCache() error {
 	}
 
 	ifCache.PodIP = ifCache.PodIPs[0]
-	err = l.cacheFactory.CacheForVMI(l.vmi).Write(l.vmiSpecIface.Name, ifCache)
-	if err != nil {
+	if err := cache.WritePodInterfaceCache(l.cacheCreator, string(l.vmi.UID), l.vmiSpecIface.Name, ifCache); err != nil {
 		log.Log.Reason(err).Errorf("failed to write pod Interface to ifCache, %s", err.Error())
 		return err
 	}
-
 	return nil
 }
 
@@ -199,7 +205,8 @@ func (l *podNIC) PlugPhase1() error {
 	dhcpConfig := l.infraConfigurator.GenerateNonRecoverableDHCPConfig()
 	if dhcpConfig != nil {
 		log.Log.V(4).Infof("The generated dhcpConfig: %s", dhcpConfig.String())
-		if err := l.cacheFactory.CacheDHCPConfigForPid(getPIDString(l.launcherPID)).Write(l.podInterfaceName, dhcpConfig); err != nil {
+		err = cache.WriteDHCPInterfaceCache(l.cacheCreator, getPIDString(l.launcherPID), l.podInterfaceName, dhcpConfig)
+		if err != nil {
 			return fmt.Errorf("failed to save DHCP configuration: %w", err)
 		}
 	}
@@ -264,7 +271,7 @@ func (l *podNIC) newDHCPConfigurator() dhcpconfigurator.Configurator {
 	var dhcpConfigurator dhcpconfigurator.Configurator
 	if l.vmiSpecIface.Bridge != nil {
 		dhcpConfigurator = dhcpconfigurator.NewBridgeConfigurator(
-			l.cacheFactory,
+			l.cacheCreator,
 			getPIDString(l.launcherPID),
 			generateInPodBridgeInterfaceName(l.podInterfaceName),
 			l.handler,
@@ -304,13 +311,16 @@ func (l *podNIC) newLibvirtSpecGenerator(domain *api.Domain) domainspec.LibvirtS
 	if l.vmiSpecIface.Macvtap != nil {
 		return domainspec.NewMacvtapLibvirtSpecGenerator(l.vmiSpecIface, domain, l.podInterfaceName, l.handler)
 	}
+	if l.vmiSpecIface.Passt != nil {
+		return domainspec.NewPasstLibvirtSpecGenerator(l.vmiSpecIface, domain, l.vmi)
+	}
 	return nil
 }
 
 func (l *podNIC) cachedDomainInterface() (*api.Interface, error) {
-	ifaceConfig, err := l.cacheFactory.CacheDomainInterfaceForPID(getPIDString(l.launcherPID)).Read(l.vmiSpecIface.Name)
-
-	if os.IsNotExist(err) {
+	var ifaceConfig *api.Interface
+	ifaceConfig, err := cache.ReadDomainInterfaceCache(l.cacheCreator, getPIDString(l.launcherPID), l.vmiSpecIface.Name)
+	if goerrors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 
@@ -322,21 +332,21 @@ func (l *podNIC) cachedDomainInterface() (*api.Interface, error) {
 }
 
 func (l *podNIC) storeCachedDomainIface(domainIface api.Interface) error {
-	return l.cacheFactory.CacheDomainInterfaceForPID(getPIDString(l.launcherPID)).Write(l.vmiSpecIface.Name, &domainIface)
+	return cache.WriteDomainInterfaceCache(l.cacheCreator, getPIDString(l.launcherPID), l.vmiSpecIface.Name, &domainIface)
 }
 
 func (l *podNIC) setState(state cache.PodIfaceState) error {
-	podIfaceCaches := l.cacheFactory.CacheForVMI(l.vmi)
-	podIfaceCache, err := podIfaceCaches.Read(l.vmiSpecIface.Name)
-	if err != nil && !os.IsNotExist(err) {
+	var podIfaceCacheData *cache.PodIfaceCacheData
+	podIfaceCacheData, err := cache.ReadPodInterfaceCache(l.cacheCreator, string(l.vmi.UID), l.vmiSpecIface.Name)
+	if err != nil && !goerrors.Is(err, os.ErrNotExist) {
 		log.Log.Reason(err).Errorf("failed to read pod interface network state from cache, %s", err.Error())
 		return err
 	}
-	if os.IsNotExist(err) {
-		podIfaceCache = &cache.PodCacheInterface{}
+	if goerrors.Is(err, os.ErrNotExist) {
+		podIfaceCacheData = &cache.PodIfaceCacheData{}
 	}
-	podIfaceCache.State = state
-	err = podIfaceCaches.Write(l.vmiSpecIface.Name, podIfaceCache)
+	podIfaceCacheData.State = state
+	err = cache.WritePodInterfaceCache(l.cacheCreator, string(l.vmi.UID), l.vmiSpecIface.Name, podIfaceCacheData)
 	if err != nil {
 		log.Log.Reason(err).Errorf("failed to write pod interface network state to cache, %s", err.Error())
 		return err
@@ -345,58 +355,20 @@ func (l *podNIC) setState(state cache.PodIfaceState) error {
 }
 
 func (l *podNIC) state() (cache.PodIfaceState, error) {
-	podIfaceCaches := l.cacheFactory.CacheForVMI(l.vmi)
-	podIfaceCache, err := podIfaceCaches.Read(l.vmiSpecIface.Name)
+	var podIfaceCacheData *cache.PodIfaceCacheData
+	podIfaceCacheData, err := cache.ReadPodInterfaceCache(l.cacheCreator, string(l.vmi.UID), l.vmiSpecIface.Name)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if goerrors.Is(err, os.ErrNotExist) {
 			return defaultState, nil
 		}
 		log.Log.Reason(err).Errorf("failed to read pod interface network state from cache %s", err.Error())
 		return defaultState, err
 	}
-	return podIfaceCache.State, nil
+	return podIfaceCacheData.State, nil
 }
 
 func generateInPodBridgeInterfaceName(podInterfaceName string) string {
 	return fmt.Sprintf("k6t-%s", podInterfaceName)
-}
-
-func composePodInterfaceName(vmi *v1.VirtualMachineInstance, network *v1.Network) (string, error) {
-	if isSecondaryMultusNetwork(*network) {
-		multusIndex := findMultusIndex(vmi, network)
-		if multusIndex == -1 {
-			return "", fmt.Errorf("Network name %s not found", network.Name)
-		}
-		return fmt.Sprintf("net%d", multusIndex), nil
-	}
-	return primaryPodInterfaceName, nil
-}
-
-func findInterfaceByNetworkName(vmi *v1.VirtualMachineInstance, network *v1.Network) *v1.Interface {
-	for i, iface := range vmi.Spec.Domain.Devices.Interfaces {
-		if iface.Name == network.Name {
-			return &vmi.Spec.Domain.Devices.Interfaces[i]
-		}
-	}
-	return nil
-}
-
-func findMultusIndex(vmi *v1.VirtualMachineInstance, networkToFind *v1.Network) int {
-	idxMultus := 0
-	for _, network := range vmi.Spec.Networks {
-		if isSecondaryMultusNetwork(network) {
-			// multus pod interfaces start from 1
-			idxMultus++
-			if network.Name == networkToFind.Name {
-				return idxMultus
-			}
-		}
-	}
-	return -1
-}
-
-func isSecondaryMultusNetwork(net v1.Network) bool {
-	return net.Multus != nil && !net.Multus.Default
 }
 
 func getPIDString(pid *int) string {

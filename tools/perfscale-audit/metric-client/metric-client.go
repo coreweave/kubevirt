@@ -35,16 +35,27 @@ import (
 	"github.com/prometheus/common/model"
 )
 
+// The range vector, `[%ds]`, will vary based on the PrometheusScrapeInterval and the length of a test.
+// This is because the `increase` and `rate` metrics rely on interpolation.
+// For more detail see: https://github.com/kubevirt/kubevirt/pull/7075#issuecomment-1020242919
 const (
-	vmiCreationTimePercentileQuery   = `histogram_quantile(0.%d, rate(kubevirt_vmi_phase_transition_time_from_creation_seconds_bucket{phase="Running"}[%ds]))`
-	resourceRequestCountsByOperation = `increase(rest_client_requests_total{pod=~"virt-controller.*|virt-handler.*|virt-operator.*|virt-api.*"}[%ds])`
+	vmiCreationTimePercentileQuery            = `histogram_quantile(0.%d, rate(kubevirt_vmi_phase_transition_time_from_creation_seconds_bucket{phase="Running"}[%ds] offset %ds))`
+	vmiDeletionToSucceededTimePercentileQuery = `histogram_quantile(0.%d, rate(kubevirt_vmi_phase_transition_time_from_deletion_seconds_bucket{phase="Succeeded"}[%ds] offset %ds))`
+	vmiDeletionToFailedTimePercentileQuery    = `histogram_quantile(0.%d, rate(kubevirt_vmi_phase_transition_time_from_deletion_seconds_bucket{phase="Failed"}[%ds] offset %ds))`
+	resourceRequestCountsByOperation          = `increase(rest_client_requests_total{pod=~"virt-controller.*|virt-handler.*|virt-operator.*|virt-api.*"}[%ds] offset %ds)`
 )
 
 // Gauge - Using a Gauge doesn't require using an offset because it holds the accurate count
-//         at all times.
+//
+//	at all times.
 const (
 	vmiPhaseCount = `sum by (phase) (kubevirt_vmi_phase_count{})`
 )
+
+type percentile struct {
+	p int
+	t audit_api.ResultType
+}
 
 type transport struct {
 	transport http.RoundTripper
@@ -113,6 +124,50 @@ type metric struct {
 	timestamp time.Time
 }
 
+func calculateOffset(endTime time.Time, waitTime time.Duration, scrapeInterval time.Duration) int {
+	// Always ensure we get at least to last Prometheus scrape by adding
+	// the PrometheusScrapeInterval to the offset
+	testEnd := endTime.Add(waitTime)
+	lookBack := int(time.Now().Sub(testEnd).Seconds()) + int(scrapeInterval.Seconds())
+
+	if lookBack < 1 {
+		lookBack = int(scrapeInterval.Seconds())
+	}
+	return lookBack
+}
+
+func calculateRangeVector(scrapeInterval time.Duration, testDuration time.Duration) time.Duration {
+	var rv time.Duration
+
+	// We're going to use a range vector that's 10x as long as the scrape interval.
+	// E.g. 30s scrapeInterval means [5m] range vector.  This will give the most
+	// reasonable results from interpolation.
+	rv = time.Duration(10 * scrapeInterval)
+
+	// When the range vector is shorter than the testDuration, use the testDuration
+	// for the range vector to improve test accuracy.
+	if rv.Seconds() <= testDuration.Seconds() {
+		log.Printf("rv %v duration %v\n", rv, testDuration)
+		return testDuration
+	} else {
+		// When the testDuration is less than the rangeVector, there's risk
+		// for the current test data will get mixed into future test data.
+		// So Sleep() until testDuration is equal to the range vector.  This
+		// means with the default scape interval, tests will be 5 minutes
+		// in length
+		waitTime := rv.Seconds() - testDuration.Seconds()
+		log.Printf("Sleeping for %vs so range vector is at least greater than or equal to the testDuration", waitTime)
+		wt, err := time.ParseDuration(fmt.Sprintf("%vs", waitTime))
+		if err != nil {
+			// Sleep for the default range vector if we have a problem
+			time.Sleep(time.Duration(360 * time.Second))
+		}
+		time.Sleep(wt)
+	}
+
+	return rv
+}
+
 func parseVector(value model.Value) ([]metric, error) {
 	var metrics []metric
 
@@ -138,12 +193,7 @@ func parseVector(value model.Value) ([]metric, error) {
 	return metrics, nil
 }
 
-func (m *MetricClient) getCreationToRunningTimePercentiles(r *audit_api.Result) error {
-
-	type percentile struct {
-		p int
-		t audit_api.ResultType
-	}
+func (m *MetricClient) getCreationToRunningTimePercentiles(r *audit_api.Result, rangeVector time.Duration) error {
 	percentiles := []percentile{
 		{
 			p: 99,
@@ -158,9 +208,50 @@ func (m *MetricClient) getCreationToRunningTimePercentiles(r *audit_api.Result) 
 			t: audit_api.ResultTypeVMICreationToRunningP50,
 		},
 	}
+	return m.getTimePercentilesFromQuery(r, rangeVector, vmiCreationTimePercentileQuery, percentiles)
+}
 
+func (m *MetricClient) getDeletionToSucceededTimePercentiles(r *audit_api.Result, rangeVector time.Duration) error {
+	percentiles := []percentile{
+		{
+			p: 99,
+			t: audit_api.ResultTypeVMIDeletionToSucceededP99,
+		},
+		{
+			p: 95,
+			t: audit_api.ResultTypeVMIDeletionToSucceededP95,
+		},
+		{
+			p: 50,
+			t: audit_api.ResultTypeVMIDeletionToSucceededP50,
+		},
+	}
+	return m.getTimePercentilesFromQuery(r, rangeVector, vmiDeletionToSucceededTimePercentileQuery, percentiles)
+}
+
+func (m *MetricClient) getDeletionToFailedTimePercentiles(r *audit_api.Result, rangeVector time.Duration) error {
+	percentiles := []percentile{
+		{
+			p: 99,
+			t: audit_api.ResultTypeVMIDeletionToFailedP99,
+		},
+		{
+			p: 95,
+			t: audit_api.ResultTypeVMIDeletionToFailedP95,
+		},
+		{
+			p: 50,
+			t: audit_api.ResultTypeVMIDeletionToFailedP50,
+		},
+	}
+	return m.getTimePercentilesFromQuery(r, rangeVector, vmiDeletionToFailedTimePercentileQuery, percentiles)
+}
+
+func (m *MetricClient) getTimePercentilesFromQuery(r *audit_api.Result, rangeVector time.Duration, query string, percentiles []percentile) error {
 	for _, percentile := range percentiles {
-		query := fmt.Sprintf(vmiCreationTimePercentileQuery, percentile.p, int(m.cfg.GetDuration().Seconds()))
+		lookBack := calculateOffset(*m.cfg.EndTime, rangeVector, m.cfg.PrometheusScrapeInterval)
+		query := fmt.Sprintf(query, percentile.p, int(rangeVector.Seconds()), lookBack)
+		log.Printf(query)
 
 		val, err := m.query(query)
 		if err != nil {
@@ -223,9 +314,10 @@ func (m *MetricClient) getPhaseBreakdown(r *audit_api.Result) error {
 	return nil
 }
 
-func (m *MetricClient) getResourceRequestCountsByOperation(r *audit_api.Result) error {
-	query := fmt.Sprintf(resourceRequestCountsByOperation, int(m.cfg.GetDuration().Seconds()))
-
+func (m *MetricClient) getResourceRequestCountsByOperation(r *audit_api.Result, rangeVector time.Duration) error {
+	lookBack := calculateOffset(*m.cfg.EndTime, rangeVector, m.cfg.PrometheusScrapeInterval)
+	query := fmt.Sprintf(resourceRequestCountsByOperation, int(rangeVector.Seconds()), lookBack)
+	log.Printf(query)
 	val, err := m.query(query)
 	if err != nil {
 		return err
@@ -270,12 +362,23 @@ func (m *MetricClient) gatherMetrics() (*audit_api.Result, error) {
 		Values: make(map[audit_api.ResultType]audit_api.ResultValue),
 	}
 
-	err := m.getCreationToRunningTimePercentiles(r)
+	rangeVector := calculateRangeVector(m.cfg.PrometheusScrapeInterval, m.cfg.GetDuration())
+	err := m.getCreationToRunningTimePercentiles(r, rangeVector)
 	if err != nil {
 		return nil, err
 	}
 
-	err = m.getResourceRequestCountsByOperation(r)
+	err = m.getDeletionToSucceededTimePercentiles(r, rangeVector)
+	if err != nil {
+		return nil, err
+	}
+
+	err = m.getDeletionToFailedTimePercentiles(r, rangeVector)
+	if err != nil {
+		return nil, err
+	}
+
+	err = m.getResourceRequestCountsByOperation(r, rangeVector)
 	if err != nil {
 		return nil, err
 	}
@@ -307,11 +410,29 @@ func (m *MetricClient) calculateThresholds(r *audit_api.Result) error {
 			ThresholdValue:    v.Value,
 			ThresholdExceeded: false,
 		}
-		if result.Value > v.Value {
-			thresholdResult.ThresholdExceeded = true
+
+		if v.Metric != "" && v.Ratio > 0 {
+			metricResult, ok := r.Values[v.Metric]
+			if !ok {
+				log.Printf("Encountered input threshold Metric [%s] with no matching results. Double check Metric key is accurate. If accurate, then results are likely 0.", v.Metric)
+				continue
+			}
+			thresholdResult.ThresholdMetric = v.Metric
+			thresholdResult.ThresholdRatio = result.Value / metricResult.Value
+			thresholdResult.ThresholdValue = metricResult.Value * v.Ratio
+			if (result.Value * v.Ratio) < metricResult.Value {
+				thresholdResult.ThresholdExceeded = true
+			}
+			result.ThresholdResult = &thresholdResult
+			r.Values[key] = result
+
+		} else {
+			if result.Value > v.Value {
+				thresholdResult.ThresholdExceeded = true
+			}
+			result.ThresholdResult = &thresholdResult
+			r.Values[key] = result
 		}
-		result.ThresholdResult = &thresholdResult
-		r.Values[key] = result
 	}
 
 	return nil

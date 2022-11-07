@@ -20,41 +20,76 @@
 package performance
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	kvv1 "kubevirt.io/api/core/v1"
-	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests"
+	audit_api "kubevirt.io/kubevirt/tools/perfscale-audit/api"
+	metric_client "kubevirt.io/kubevirt/tools/perfscale-audit/metric-client"
 
-	"k8s.io/apimachinery/pkg/api/resource"
+	kvv1 "kubevirt.io/api/core/v1"
+	instancetypeapi "kubevirt.io/api/instancetype"
+	instancetypev1alpha2 "kubevirt.io/api/instancetype/v1alpha2"
 
 	"kubevirt.io/client-go/kubecli"
-	"kubevirt.io/kubevirt/tests"
+
+	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/util"
+)
+
+var PrometheusScrapeInterval = time.Duration(30 * time.Second)
+
+const (
+	patchVMICountToPodCreateCountThreshold  = 2
+	updateVMICountToPodCreateCountThreshold = 10
+	vmiCreationToRunningSecondsP50Threshold = 45
+	vmiCreationToRunningSecondsP95Threshold = 60
 )
 
 var _ = SIGDescribe("Control Plane Performance Density Testing", func() {
 	var (
 		err        error
 		virtClient kubecli.KubevirtClient
+		startTime  time.Time
+		endTime    time.Time
+		primed     bool
 	)
-
 	BeforeEach(func() {
 		skipIfNoPerformanceTests()
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
-		tests.BeforeTestCleanup()
+
+		if !primed {
+			By("Create primer VMI")
+			createBatchVMIWithRateControl(virtClient, 1)
+
+			By("Waiting for primer VMI to be Running")
+			waitRunningVMI(virtClient, 1, 1*time.Minute)
+
+			// Leave a two scrape buffer between tests
+			time.Sleep(2 * PrometheusScrapeInterval)
+
+			primed = true
+		}
+
+		startTime = time.Now()
 	})
 
 	AfterEach(func() {
 		// ensure the metrics get scraped by Prometheus till the end, since the default Prometheus scrape interval is 30s
-		time.Sleep(30 * time.Second)
+		time.Sleep(PrometheusScrapeInterval)
+		endTime = time.Now()
+		runAudit(startTime, endTime)
+
+		// Leave two Prometheus scrapes of time between tests.
+		time.Sleep(2 * PrometheusScrapeInterval)
 	})
 
 	Describe("Density test", func() {
@@ -67,17 +102,87 @@ var _ = SIGDescribe("Control Plane Performance Density Testing", func() {
 				createBatchVMIWithRateControl(virtClient, vmCount)
 
 				By("Waiting a batch of VMIs")
+				waitRunningVMI(virtClient, vmCount+1, vmBatchStartupLimit)
+			})
+		})
+
+		Context(fmt.Sprintf("[small] create a batch of %d running VMs", vmCount), func() {
+			It("should sucessfully create all VMS", func() {
+				By("Creating a batch of VMs")
+				createBatchRunningVMWithResourcesWithRateControl(virtClient, vmCount)
+
+				By("Waiting a batch of VMs")
+				waitRunningVMI(virtClient, vmCount, vmBatchStartupLimit)
+			})
+		})
+
+		Context(fmt.Sprintf("[small] create a batch of %d running VMs using a single instancetype and preference", vmCount), func() {
+			It("should sucessfully create all VMS with instancetype and preference", func() {
+				By("Creating an instancetype and preference for the test")
+				instancetype := createInstancetype(virtClient)
+				preference := createPreference(virtClient)
+
+				By("Creating a batch of VMs")
+				createBatchRunningVMWithInstancetypeWithRateControl(virtClient, vmCount, instancetype.Name, preference.Name)
+
+				By("Waiting a batch of VMs")
 				waitRunningVMI(virtClient, vmCount, vmBatchStartupLimit)
 			})
 		})
 	})
 })
 
+func defineThresholds() map[audit_api.ResultType]audit_api.InputThreshold {
+	thresholds := map[audit_api.ResultType]audit_api.InputThreshold{}
+	thresholds[audit_api.ResultTypePatchVMICount] = audit_api.InputThreshold{
+		Metric: audit_api.ResultTypeCreatePodsCount,
+		Ratio:  patchVMICountToPodCreateCountThreshold,
+	}
+
+	thresholds[audit_api.ResultTypeUpdateVMICount] = audit_api.InputThreshold{
+		Metric: audit_api.ResultTypeCreatePodsCount,
+		Ratio:  updateVMICountToPodCreateCountThreshold,
+	}
+
+	thresholds[audit_api.ResultTypeVMICreationToRunningP50] = audit_api.InputThreshold{
+		Value: vmiCreationToRunningSecondsP50Threshold,
+	}
+
+	thresholds[audit_api.ResultTypeVMICreationToRunningP95] = audit_api.InputThreshold{
+		Value: vmiCreationToRunningSecondsP95Threshold,
+	}
+	return thresholds
+}
+
+func runAudit(startTime time.Time, endTime time.Time) {
+	prometheusPort := 30007
+	duration := audit_api.Duration(endTime.Sub(startTime))
+
+	inputCfg := &audit_api.InputConfig{
+
+		PrometheusURL:            fmt.Sprintf("http://127.0.0.1:%v", prometheusPort),
+		StartTime:                &startTime,
+		EndTime:                  &endTime,
+		Duration:                 &duration,
+		PrometheusScrapeInterval: PrometheusScrapeInterval,
+		ThresholdExpectations:    defineThresholds(),
+	}
+
+	metricClient, err := metric_client.NewMetricClient(inputCfg)
+	Expect(err).ToNot(HaveOccurred())
+
+	result, err := metricClient.GenerateResults()
+	Expect(err).ToNot(HaveOccurred())
+
+	err = result.DumpToStdout()
+	Expect(err).ToNot(HaveOccurred())
+}
+
 // createBatchVMIWithRateControl creates a batch of vms concurrently, uses one goroutine for each creation.
 // between creations there is an interval for throughput control
 func createBatchVMIWithRateControl(virtClient kubecli.KubevirtClient, vmCount int) {
 	for i := 1; i <= vmCount; i++ {
-		vmi := createVMISpecWithResources(virtClient)
+		vmi := createVMISpecWithResources()
 		By(fmt.Sprintf("Creating VMI %s", vmi.ObjectMeta.Name))
 		_, err := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(vmi)
 		Expect(err).ToNot(HaveOccurred())
@@ -87,20 +192,87 @@ func createBatchVMIWithRateControl(virtClient kubecli.KubevirtClient, vmCount in
 	}
 }
 
-func createVMISpecWithResources(virtClient kubecli.KubevirtClient) *kvv1.VirtualMachineInstance {
-	vmImage := cd.ContainerDiskFor("cirros")
+func createBatchRunningVMWithInstancetypeWithRateControl(virtClient kubecli.KubevirtClient, vmCount int, instancetypeName, preferenceName string) {
+	createBatchRunningVMWithRateControl(virtClient, vmCount, func() *kvv1.VirtualMachine {
+		vm := tests.NewRandomVirtualMachine(libvmi.NewCirros(), true)
+		vm.Spec.Template.Spec.Domain.Resources = kvv1.ResourceRequirements{}
+		vm.Spec.Instancetype = &kvv1.InstancetypeMatcher{
+			Name: instancetypeName,
+			Kind: instancetypeapi.SingularResourceName,
+		}
+		vm.Spec.Preference = &kvv1.PreferenceMatcher{
+			Name: preferenceName,
+			Kind: instancetypeapi.SingularPreferenceResourceName,
+		}
+		return vm
+	})
+}
+
+func createBatchRunningVMWithResourcesWithRateControl(virtClient kubecli.KubevirtClient, vmCount int) {
+	createBatchRunningVMWithRateControl(virtClient, vmCount, func() *kvv1.VirtualMachine {
+		return tests.NewRandomVirtualMachine(createVMISpecWithResources(), true)
+	})
+}
+
+func createBatchRunningVMWithRateControl(virtClient kubecli.KubevirtClient, vmCount int, vmCreateFunc func() *kvv1.VirtualMachine) {
+	for i := 1; i <= vmCount; i++ {
+		vm := vmCreateFunc()
+		By(fmt.Sprintf("Creating VM %s", vm.ObjectMeta.Name))
+		_, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+		Expect(err).ToNot(HaveOccurred())
+
+		// interval for throughput control
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func createInstancetype(virtClient kubecli.KubevirtClient) *instancetypev1alpha2.VirtualMachineInstancetype {
+	instancetype := &instancetypev1alpha2.VirtualMachineInstancetype{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "instancetype",
+		},
+		Spec: instancetypev1alpha2.VirtualMachineInstancetypeSpec{
+			// FIXME - We don't have a way of expressing resources via instancetypes yet, replace this when we do.
+			CPU: instancetypev1alpha2.CPUInstancetype{
+				Guest: 1,
+			},
+			Memory: instancetypev1alpha2.MemoryInstancetype{
+				Guest: resource.MustParse("90Mi"),
+			},
+		},
+	}
+	instancetype, err := virtClient.VirtualMachineInstancetype(util.NamespaceTestDefault).Create(context.Background(), instancetype, metav1.CreateOptions{})
+	Expect(err).ToNot(HaveOccurred())
+	return instancetype
+}
+
+func createPreference(virtClient kubecli.KubevirtClient) *instancetypev1alpha2.VirtualMachinePreference {
+	preference := &instancetypev1alpha2.VirtualMachinePreference{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "preference",
+		},
+		Spec: instancetypev1alpha2.VirtualMachinePreferenceSpec{
+			Devices: &instancetypev1alpha2.DevicePreferences{
+				PreferredDiskBus: kvv1.DiskBusVirtio,
+			},
+		},
+	}
+	preference, err := virtClient.VirtualMachinePreference(util.NamespaceTestDefault).Create(context.Background(), preference, metav1.CreateOptions{})
+	Expect(err).ToNot(HaveOccurred())
+	return preference
+}
+
+func createVMISpecWithResources() *kvv1.VirtualMachineInstance {
 	cpuLimit := "100m"
 	memLimit := "90Mi"
-	cloudInitUserData := "#!/bin/bash\necho 'hello'\n"
-	vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(vmImage, cloudInitUserData)
-	vmi.Spec.Domain.Resources.Limits = k8sv1.ResourceList{
-		k8sv1.ResourceMemory: resource.MustParse(memLimit),
-		k8sv1.ResourceCPU:    resource.MustParse(cpuLimit),
-	}
-	vmi.Spec.Domain.Resources.Requests = k8sv1.ResourceList{
-		k8sv1.ResourceMemory: resource.MustParse(memLimit),
-		k8sv1.ResourceCPU:    resource.MustParse(cpuLimit),
-	}
+	vmi := libvmi.NewCirros(
+		libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+		libvmi.WithNetwork(kvv1.DefaultPodNetwork()),
+		libvmi.WithResourceMemory(memLimit),
+		libvmi.WithLimitMemory(memLimit),
+		libvmi.WithResourceCPU(cpuLimit),
+		libvmi.WithLimitCPU(cpuLimit),
+	)
 	return vmi
 }
 

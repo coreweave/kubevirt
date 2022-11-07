@@ -20,15 +20,19 @@
 package hotplugdisk
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/types"
 
-	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	"kubevirt.io/kubevirt/pkg/safepath"
+
 	"kubevirt.io/kubevirt/pkg/util"
 )
+
+var mountBaseDir = filepath.Join(util.VirtShareDir, "/hotplug-disks")
 
 const (
 	hotplugDisksKubeletVolumePath = "volumes/kubernetes.io~empty-dir/hotplug-disks"
@@ -42,13 +46,14 @@ var (
 )
 
 type HotplugDiskManagerInterface interface {
-	GetHotplugTargetPodPathOnHost(virtlauncherPodUID types.UID) (string, error)
-	GetFileSystemDiskTargetPathFromHostView(virtlauncherPodUID types.UID, volumeName string, create bool) (string, error)
+	GetHotplugTargetPodPathOnHost(virtlauncherPodUID types.UID) (*safepath.Path, error)
+	GetFileSystemDiskTargetPathFromHostView(virtlauncherPodUID types.UID, volumeName string, create bool) (*safepath.Path, error)
+	GetFileSystemDirectoryTargetPathFromHostView(virtlauncherPodUID types.UID, volumeName string, create bool) (*safepath.Path, error)
 }
 
-func NewHotplugDiskManager() *hotplugDiskManager {
+func NewHotplugDiskManager(kubeletPodsDir string) *hotplugDiskManager {
 	return &hotplugDiskManager{
-		podsBaseDir:       filepath.Join(util.HostRootMount, util.KubeletPodsDir),
+		podsBaseDir:       filepath.Join(util.HostRootMount, kubeletPodsDir),
 		targetPodBasePath: TargetPodBasePath,
 	}
 }
@@ -66,36 +71,48 @@ type hotplugDiskManager struct {
 }
 
 // GetHotplugTargetPodPathOnHost retrieves the target pod (virt-launcher) path on the host.
-func (h *hotplugDiskManager) GetHotplugTargetPodPathOnHost(virtlauncherPodUID types.UID) (string, error) {
+func (h *hotplugDiskManager) GetHotplugTargetPodPathOnHost(virtlauncherPodUID types.UID) (*safepath.Path, error) {
 	podpath := TargetPodBasePath(h.podsBaseDir, virtlauncherPodUID)
-	exists, _ := diskutils.FileExists(podpath)
-	if exists {
-		return podpath, nil
-	}
+	return safepath.JoinAndResolveWithRelativeRoot("/", podpath)
+}
 
-	return "", fmt.Errorf("Unable to locate target path: %s", podpath)
+// GetFileSystemDirectoryTargetPathFromHostView gets the directory path in the target pod (virt-launcher) on the host.
+func (h *hotplugDiskManager) GetFileSystemDirectoryTargetPathFromHostView(virtlauncherPodUID types.UID, volumeName string, create bool) (*safepath.Path, error) {
+	targetPath, err := h.GetHotplugTargetPodPathOnHost(virtlauncherPodUID)
+	if err != nil {
+		return nil, err
+	}
+	_, err = safepath.JoinNoFollow(targetPath, volumeName)
+	if errors.Is(err, os.ErrNotExist) && create {
+		if err := safepath.MkdirAtNoFollow(targetPath, volumeName, 0750); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	return safepath.JoinNoFollow(targetPath, volumeName)
 }
 
 // GetFileSystemDiskTargetPathFromHostView gets the disk image file in the target pod (virt-launcher) on the host.
-func (h *hotplugDiskManager) GetFileSystemDiskTargetPathFromHostView(virtlauncherPodUID types.UID, volumeName string, create bool) (string, error) {
+func (h *hotplugDiskManager) GetFileSystemDiskTargetPathFromHostView(virtlauncherPodUID types.UID, volumeName string, create bool) (*safepath.Path, error) {
 	targetPath, err := h.GetHotplugTargetPodPathOnHost(virtlauncherPodUID)
 	if err != nil {
 		return targetPath, err
 	}
-	diskFile := filepath.Join(targetPath, fmt.Sprintf("%s.img", volumeName))
-	exists, _ := diskutils.FileExists(diskFile)
-	if !exists && create {
-		file, err := os.Create(diskFile)
-		if err != nil {
-			return diskFile, err
-		}
-		defer file.Close()
+	diskName := fmt.Sprintf("%s.img", volumeName)
+	if err := safepath.TouchAtNoFollow(targetPath, diskName, 0666); err != nil && !os.IsExist(err) {
+		return nil, err
 	}
-	return diskFile, err
+	return safepath.JoinNoFollow(targetPath, diskName)
 }
 
-// CreateLocalDirectory creates the base directory where disk images will be mounted when hotplugged. File system volumes will be in
+// SetLocalDirectory creates the base directory where disk images will be mounted when hotplugged. File system volumes will be in
 // a directory under this, that contains the volume name. block volumes will be in this directory as a block device.
-func CreateLocalDirectory(dir string) error {
+func SetLocalDirectory(dir string) error {
+	mountBaseDir = dir
 	return os.MkdirAll(dir, 0755)
+}
+
+func GetVolumeMountDir(volumeName string) string {
+	return filepath.Join(mountBaseDir, volumeName)
 }

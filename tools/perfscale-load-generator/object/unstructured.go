@@ -25,9 +25,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/kubernetes/scheme"
 
 	"kubevirt.io/client-go/kubecli"
-	"kubevirt.io/kubevirt/tools/perfscale-load-generator/config"
+	"kubevirt.io/client-go/log"
 )
 
 func CreateObject(virtCli kubecli.KubevirtClient, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
@@ -41,28 +42,50 @@ func CreateObject(virtCli kubecli.KubevirtClient, obj *unstructured.Unstructured
 	return result, err
 }
 
-// DeleteAllObjectsInNamespaces deletes a collection of objects in a set of namespace with a given selector
-func DeleteAllObjectsInNamespaces(virtCli kubecli.KubevirtClient, resourceKind string, listOpts *metav1.ListOptions) error {
-	gracePeriod := int64(0)
-	ns, _ := virtCli.CoreV1().Namespaces().List(context.TODO(), *listOpts)
-	if len(ns.Items) > 0 {
-		for _, ns := range ns.Items {
-			err := virtCli.RestClient().Delete().
-				Namespace(ns.Name).
-				Resource(resourceKind).
-				Body(&metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod}).
-				Do(context.Background()).Error()
-			if !errors.IsNotFound(err) {
-				return err
-			}
-		}
+func DeleteObject(virtCli kubecli.KubevirtClient, obj unstructured.Unstructured, resourceKind string, gracePeriod int64) {
+	err := virtCli.RestClient().Delete().
+		Namespace(obj.GetNamespace()).
+		Name(obj.GetName()).
+		Resource(resourceKind).
+		Body(&metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod}).
+		Do(context.Background()).Error()
+	if err != nil && !errors.IsNotFound(err) {
+		log.Log.V(2).Errorf("Error deleting obj %s %s: %v", resourceKind, obj.GetName(), err)
 	}
-	return nil
+	return
 }
 
-func AddLabels(obj *unstructured.Unstructured, uuid string) {
-	labels := map[string]string{
-		config.WorkloadLabel: uuid,
+func ListObjects(virtCli kubecli.KubevirtClient, resourceKind string, listOpts *metav1.ListOptions, namespace string) (*unstructured.UnstructuredList, error) {
+	result := &unstructured.UnstructuredList{}
+	err := virtCli.RestClient().Get().
+		Resource(resourceKind).
+		Namespace(namespace).
+		VersionedParams(listOpts, scheme.ParameterCodec).
+		Do(context.Background()).
+		Into(result)
+	if err != nil {
+		log.Log.V(3).Infof("error listing obj(s) %s, err: %v", resourceKind, err)
+		return nil, err
 	}
-	obj.SetLabels(labels)
+	return result, err
+}
+
+// DeleteNObjectsInNamespaces deletes n objects in a set of namespace with a given selector.
+// This is used to create churn in the steady state test
+func DeleteNObjectsInNamespaces(virtCli kubecli.KubevirtClient, resourceKind string, listOpts *metav1.ListOptions, n int) {
+	gracePeriod := int64(0)
+
+	result, err := ListObjects(virtCli, resourceKind, listOpts, "")
+	if err != nil {
+		return
+	}
+
+	log.Log.V(3).Infof("Number of %s to delete: %d", resourceKind, len(result.Items))
+	for i, item := range result.Items {
+		if i > n {
+			return
+		}
+		log.Log.V(3).Infof("Deleting obj %s", item.GetName())
+		DeleteObject(virtCli, item, resourceKind, gracePeriod)
+	}
 }

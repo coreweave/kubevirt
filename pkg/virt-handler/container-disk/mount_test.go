@@ -21,15 +21,15 @@ package container_disk
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
 
 	"kubevirt.io/client-go/api"
+
 	"kubevirt.io/kubevirt/pkg/testutils"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 )
 
@@ -47,7 +48,7 @@ var _ = Describe("ContainerDisk", func() {
 	var vmi *v1.VirtualMachineInstance
 
 	BeforeEach(func() {
-		tmpDir, err = ioutil.TempDir("", "containerdisktest")
+		tmpDir, err = os.MkdirTemp("", "containerdisktest")
 		Expect(err).ToNot(HaveOccurred())
 		vmi = api.NewMinimalVMI("fake-vmi")
 		vmi.UID = "1234"
@@ -137,7 +138,7 @@ var _ = Describe("ContainerDisk", func() {
 			// verify we can read a result
 			record, err = m.getMountTargetRecord(vmi)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(len(record.MountTargetEntries)).To(Equal(1))
+			Expect(record.MountTargetEntries).To(HaveLen(1))
 			Expect(record.MountTargetEntries[0].TargetFile).To(Equal("sometargetfile"))
 			Expect(record.MountTargetEntries[0].SocketFile).To(Equal("somesocketfile"))
 
@@ -146,7 +147,7 @@ var _ = Describe("ContainerDisk", func() {
 			delete(m.mountRecords, vmi.UID)
 			record, err = m.getMountTargetRecord(vmi)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(len(record.MountTargetEntries)).To(Equal(1))
+			Expect(record.MountTargetEntries).To(HaveLen(1))
 			Expect(record.MountTargetEntries[0].TargetFile).To(Equal("sometargetfile"))
 			Expect(record.MountTargetEntries[0].SocketFile).To(Equal("somesocketfile"))
 

@@ -24,29 +24,31 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	expect "github.com/google/goexpect"
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/pborman/uuid"
 	kubev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"kubevirt.io/kubevirt/tests/exec"
+	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/util"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
 	"kubevirt.io/kubevirt/pkg/util/net/dns"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
-	"kubevirt.io/kubevirt/tests/libnet"
 )
 
 const (
@@ -71,61 +73,57 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 		CheckCloudInitIsoSize     func(vmi *v1.VirtualMachineInstance, source cloudinit.DataSourceType)
 	)
 
-	tests.BeforeAll(func() {
+	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
 
 		// from default virt-launcher flag: do we need to make this configurable in some cases?
 		cloudinit.SetLocalDirectoryOnly("/var/run/kubevirt-ephemeral-disks/cloud-init-data")
-
-		LaunchVMI = func(vmi *v1.VirtualMachineInstance) *v1.VirtualMachineInstance {
-			By("Starting a VirtualMachineInstance")
-			obj, err := virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(util.NamespaceTestDefault).Body(vmi).Do(context.Background()).Get()
-			Expect(err).To(BeNil())
-
-			By("Waiting the VirtualMachineInstance start")
-			vmi, ok := obj.(*v1.VirtualMachineInstance)
-			Expect(ok).To(BeTrue(), "Object is not of type *v1.VirtualMachineInstance")
-			Expect(tests.WaitForSuccessfulVMIStart(obj)).ToNot(BeEmpty())
-			return vmi
-		}
-
-		VerifyUserDataVMI = func(vmi *v1.VirtualMachineInstance, commands []expect.Batcher, timeout time.Duration) {
-			By("Checking that the VirtualMachineInstance serial console output equals to expected one")
-			Expect(console.SafeExpectBatch(vmi, commands, int(timeout.Seconds()))).To(Succeed())
-		}
-
 		MountCloudInitNoCloud = tests.MountCloudInitFunc("cidata")
 		MountCloudInitConfigDrive = tests.MountCloudInitFunc("config-2")
-
-		CheckCloudInitFile = func(vmi *v1.VirtualMachineInstance, testFile, testData string) {
-			cmdCheck := "cat /mnt/" + testFile + "\n"
-			err := console.SafeExpectBatch(vmi, []expect.Batcher{
-				&expect.BSnd{S: "sudo su -\n"},
-				&expect.BExp{R: console.PromptExpression},
-				&expect.BSnd{S: cmdCheck},
-				&expect.BExp{R: testData},
-			}, 15)
-			Expect(err).ToNot(HaveOccurred())
-		}
-		CheckCloudInitIsoSize = func(vmi *v1.VirtualMachineInstance, source cloudinit.DataSourceType) {
-			pod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
-			path := cloudinit.GetIsoFilePath(source, vmi.Name, vmi.Namespace)
-
-			By(fmt.Sprintf("Checking cloud init ISO at '%s' is 4k-block fs compatible", path))
-			cmdCheck := []string{"stat", "--printf='%s'", path}
-
-			out, err := tests.ExecuteCommandOnPod(virtClient, pod, "compute", cmdCheck)
-			Expect(err).NotTo(HaveOccurred())
-			size, err := strconv.Atoi(strings.Trim(out, "'"))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(size % 4096).To(Equal(0))
-		}
 	})
 
-	BeforeEach(func() {
-		tests.BeforeTestCleanup()
-	})
+	LaunchVMI = func(vmi *v1.VirtualMachineInstance) *v1.VirtualMachineInstance {
+		By("Starting a VirtualMachineInstance")
+		obj, err := virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(util.NamespaceTestDefault).Body(vmi).Do(context.Background()).Get()
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Waiting the VirtualMachineInstance start")
+		vmi, ok := obj.(*v1.VirtualMachineInstance)
+		Expect(ok).To(BeTrue(), "Object is not of type *v1.VirtualMachineInstance")
+		Expect(tests.WaitForSuccessfulVMIStart(obj).Status.NodeName).ToNot(BeEmpty())
+		return vmi
+	}
+
+	VerifyUserDataVMI = func(vmi *v1.VirtualMachineInstance, commands []expect.Batcher, timeout time.Duration) {
+		By("Checking that the VirtualMachineInstance serial console output equals to expected one")
+		Expect(console.SafeExpectBatch(vmi, commands, int(timeout.Seconds()))).To(Succeed())
+	}
+
+	CheckCloudInitFile = func(vmi *v1.VirtualMachineInstance, testFile, testData string) {
+		cmdCheck := "cat " + filepath.Join("/mnt", testFile) + "\n"
+		err := console.SafeExpectBatch(vmi, []expect.Batcher{
+			&expect.BSnd{S: "sudo su -\n"},
+			&expect.BExp{R: console.PromptExpression},
+			&expect.BSnd{S: cmdCheck},
+			&expect.BExp{R: testData},
+		}, 15)
+		Expect(err).ToNot(HaveOccurred())
+	}
+
+	CheckCloudInitIsoSize = func(vmi *v1.VirtualMachineInstance, source cloudinit.DataSourceType) {
+		pod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
+		path := cloudinit.GetIsoFilePath(source, vmi.Name, vmi.Namespace)
+
+		By(fmt.Sprintf("Checking cloud init ISO at '%s' is 4k-block fs compatible", path))
+		cmdCheck := []string{"stat", "--printf='%s'", path}
+
+		out, err := exec.ExecuteCommandOnPod(virtClient, pod, "compute", cmdCheck)
+		Expect(err).NotTo(HaveOccurred())
+		size, err := strconv.Atoi(strings.Trim(out, "'"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(size % 4096).To(Equal(0))
+	}
 
 	Describe("[rfe_id:151][crit:medium][vendor:cnv-qe@redhat.com][level:component]A new VirtualMachineInstance", func() {
 		Context("with cloudInitNoCloud userDataBase64 source", func() {
@@ -202,6 +200,58 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 					}, time.Second*300)
 				})
 			})
+
+			It("cloud-init instance-id should be stable", func() {
+				getInstanceId := func(vmi *v1.VirtualMachineInstance) (string, error) {
+					cmd := "cat /var/lib/cloud/data/instance-id"
+					instanceId, err := console.RunCommandAndStoreOutput(vmi, cmd, time.Second*30)
+					return instanceId, err
+				}
+
+				userData := fmt.Sprintf(
+					"#cloud-config\npassword: %s\nchpasswd: { expire: False }",
+					fedoraPassword,
+				)
+				vmi := libvmi.NewFedora(libvmi.WithCloudInitConfigDriveData(userData, false))
+				// runStrategy := v1.RunStrategyManual
+				vm := &v1.VirtualMachine{
+					ObjectMeta: vmi.ObjectMeta,
+					Spec: v1.VirtualMachineSpec{
+						Running: tests.NewBool(false),
+						Template: &v1.VirtualMachineInstanceTemplateSpec{
+							Spec: vmi.Spec,
+						},
+					},
+				}
+
+				By("Start VM")
+				vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Create(vm)
+				Expect(vm.Namespace).ToNot(BeEmpty())
+				Expect(err).ToNot(HaveOccurred())
+				vm = tests.StartVirtualMachine(vm)
+				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				vmi = tests.WaitUntilVMIReady(vmi, console.LoginToFedora)
+
+				By("Get VM cloud-init instance-id")
+				instanceId, err := getInstanceId(vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(instanceId).ToNot(BeEmpty())
+
+				By("Restart VM")
+				vm = tests.StopVirtualMachine(vm)
+				tests.StartVirtualMachine(vm)
+				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				vmi = tests.WaitUntilVMIReady(vmi, console.LoginToFedora)
+
+				By("Get VM cloud-init instance-id after restart")
+				newInstanceId, err := getInstanceId(vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				By("Make sure the instance-ids match")
+				Expect(instanceId).To(Equal(newInstanceId))
+			})
 		})
 
 		Context("with cloudInitNoCloud userData source", func() {
@@ -218,7 +268,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				}, time.Second*120)
 
 				By("applying the hostname from meta-data")
-				Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
+				Expect(console.LoginToCirros(vmi)).To(Succeed())
 
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "hostname\n"},
@@ -241,7 +291,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				}, time.Second*120)
 
 				By("applying the hostname from meta-data")
-				Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
+				Expect(console.LoginToCirros(vmi)).To(Succeed())
 
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "hostname\n"},
@@ -272,7 +322,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 						Name:      secretID,
 						Namespace: vmi.Namespace,
 						Labels: map[string]string{
-							tests.SecretLabel: secretID,
+							util.SecretLabel: secretID,
 						},
 					},
 					Type: "Opaque",
@@ -281,7 +331,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 					},
 				}
 				_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				break
 			}
 			LaunchVMI(vmi)
@@ -303,7 +353,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdataNetworkData(
 					cd.ContainerDiskFor(cd.ContainerDiskCirros), "", testNetworkData, false)
 				LaunchVMI(vmi)
-				tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
+				tests.WaitUntilVMIReady(vmi, console.LoginToCirros)
 
 				CheckCloudInitIsoSize(vmi, cloudinit.DataSourceNoCloud)
 
@@ -318,7 +368,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdataNetworkData(
 					cd.ContainerDiskFor(cd.ContainerDiskCirros), "", testNetworkData, true)
 				LaunchVMI(vmi)
-				tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
+				tests.WaitUntilVMIReady(vmi, console.LoginToCirros)
 
 				CheckCloudInitIsoSize(vmi, cloudinit.DataSourceNoCloud)
 
@@ -351,7 +401,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 							Name:      secretID,
 							Namespace: vmi.Namespace,
 							Labels: map[string]string{
-								tests.SecretLabel: secretID,
+								util.SecretLabel: secretID,
 							},
 						},
 						Type: "Opaque",
@@ -361,13 +411,13 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 						},
 					}
 					_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
-					Expect(err).To(BeNil())
+					Expect(err).ToNot(HaveOccurred())
 
 					break
 				}
 
 				LaunchVMI(vmi)
-				tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
+				tests.WaitUntilVMIReady(vmi, console.LoginToCirros)
 
 				CheckCloudInitIsoSize(vmi, cloudinit.DataSourceNoCloud)
 
@@ -394,7 +444,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 					cd.ContainerDiskFor(cd.ContainerDiskCirros), "", testNetworkData, false)
 
 				LaunchVMI(vmi)
-				tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
+				tests.WaitUntilVMIReady(vmi, console.LoginToCirros)
 
 				CheckCloudInitIsoSize(vmi, cloudinit.DataSourceConfigDrive)
 
@@ -405,12 +455,17 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				CheckCloudInitFile(vmi, "openstack/latest/network_data.json", testNetworkData)
 			})
 			It("[test_id:4622]should have cloud-init meta_data with tagged devices", func() {
+				testInstancetype := "testInstancetype"
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndConfigDriveUserdataNetworkData(
 					cd.ContainerDiskFor(cd.ContainerDiskCirros), "", testNetworkData, false)
 				vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{Name: "default", Tag: "specialNet", InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}}}
 				vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
-				LaunchVMI(vmi)
-				tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
+				if vmi.Annotations == nil {
+					vmi.Annotations = make(map[string]string)
+				}
+				vmi.Annotations[v1.InstancetypeAnnotation] = testInstancetype
+				vmi = LaunchVMI(vmi)
+				tests.WaitUntilVMIReady(vmi, console.LoginToCirros)
 				CheckCloudInitIsoSize(vmi, cloudinit.DataSourceConfigDrive)
 
 				domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
@@ -420,7 +475,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				Expect(xml.Unmarshal([]byte(domXml), domSpec)).To(Succeed())
 				nic := domSpec.Devices.Interfaces[0]
 				address := nic.Address
-				pciAddrStr := fmt.Sprintf("%s:%s:%s:%s", address.Domain[2:], address.Bus[2:], address.Slot[2:], address.Function[2:])
+				pciAddrStr := fmt.Sprintf("%s:%s:%s.%s", address.Domain[2:], address.Bus[2:], address.Slot[2:], address.Function[2:])
 				deviceData := []cloudinit.DeviceData{
 					{
 						Type:    cloudinit.NICMetadataType,
@@ -434,14 +489,15 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				Expect(err).ToNot(HaveOccurred())
 
 				metadataStruct := cloudinit.ConfigDriveMetadata{
-					InstanceID: fmt.Sprintf("%s.%s", vmi.Name, vmi.Namespace),
-					Hostname:   dns.SanitizeHostname(vmi),
-					UUID:       string(vmi.UID),
-					Devices:    &deviceData,
+					InstanceID:   fmt.Sprintf("%s.%s", vmi.Name, vmi.Namespace),
+					InstanceType: testInstancetype,
+					Hostname:     dns.SanitizeHostname(vmi),
+					UUID:         string(vmi.Spec.Domain.Firmware.UUID),
+					Devices:      &deviceData,
 				}
 
 				buf, err := json.Marshal(metadataStruct)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				By("mouting cloudinit iso")
 				MountCloudInitConfigDrive(vmi)
 
@@ -455,7 +511,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndConfigDriveUserdataNetworkData(
 					cd.ContainerDiskFor(cd.ContainerDiskCirros), "", testNetworkData, true)
 				LaunchVMI(vmi)
-				tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
+				tests.WaitUntilVMIReady(vmi, console.LoginToCirros)
 
 				CheckCloudInitIsoSize(vmi, cloudinit.DataSourceConfigDrive)
 				By("mouting cloudinit iso")
@@ -488,7 +544,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 							Name:      secretID,
 							Namespace: vmi.Namespace,
 							Labels: map[string]string{
-								tests.SecretLabel: secretID,
+								util.SecretLabel: secretID,
 							},
 						},
 						Type: "Opaque",
@@ -498,13 +554,13 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 						},
 					}
 					_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
-					Expect(err).To(BeNil())
+					Expect(err).ToNot(HaveOccurred())
 
 					break
 				}
 
 				LaunchVMI(vmi)
-				tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
+				tests.WaitUntilVMIReady(vmi, console.LoginToCirros)
 
 				CheckCloudInitIsoSize(vmi, cloudinit.DataSourceConfigDrive)
 
@@ -521,7 +577,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				Expect(vmi.Spec.Volumes[idx].CloudInitConfigDrive.NetworkDataBase64).To(BeEmpty())
 			})
 
-			table.DescribeTable("[test_id:3187]should have cloud-init userdata and network-config from separate k8s secrets", func(userDataLabel string, networkDataLabel string) {
+			DescribeTable("[test_id:3187]should have cloud-init userdata and network-config from separate k8s secrets", func(userDataLabel string, networkDataLabel string) {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndConfigDriveUserdataNetworkData(
 					cd.ContainerDiskFor(cd.ContainerDiskCirros), "", "", false)
 
@@ -546,7 +602,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 							Name:      uSecretID,
 							Namespace: vmi.Namespace,
 							Labels: map[string]string{
-								tests.SecretLabel: uSecretID,
+								util.SecretLabel: uSecretID,
 							},
 						},
 						Type: "Opaque",
@@ -561,7 +617,7 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 							Name:      nSecretID,
 							Namespace: vmi.Namespace,
 							Labels: map[string]string{
-								tests.SecretLabel: nSecretID,
+								util.SecretLabel: nSecretID,
 							},
 						},
 						Type: "Opaque",
@@ -571,16 +627,16 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 						},
 					}
 					_, err := virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &uSecret, metav1.CreateOptions{})
-					Expect(err).To(BeNil())
+					Expect(err).ToNot(HaveOccurred())
 
 					_, err = virtClient.CoreV1().Secrets(vmi.Namespace).Create(context.Background(), &nSecret, metav1.CreateOptions{})
-					Expect(err).To(BeNil())
+					Expect(err).ToNot(HaveOccurred())
 
 					break
 				}
 
 				LaunchVMI(vmi)
-				tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
+				tests.WaitUntilVMIReady(vmi, console.LoginToCirros)
 
 				CheckCloudInitIsoSize(vmi, cloudinit.DataSourceConfigDrive)
 
@@ -601,8 +657,8 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				Expect(vmi.Spec.Volumes[idx].CloudInitConfigDrive.NetworkData).To(BeEmpty())
 				Expect(vmi.Spec.Volumes[idx].CloudInitConfigDrive.NetworkDataBase64).To(BeEmpty())
 			},
-				table.Entry("with lowercase labels", "userdata", "networkdata"),
-				table.Entry("with camelCase labels", "userData", "networkData"),
+				Entry("with lowercase labels", "userdata", "networkdata"),
+				Entry("with camelCase labels", "userData", "networkData"),
 			)
 		})
 

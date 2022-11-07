@@ -2,18 +2,20 @@
 // source: api_v1alpha2.proto
 
 /*
-Package kubevirt_hooks_v1alpha2 is a generated protocol buffer package.
+Package v1alpha2 is a generated protocol buffer package.
 
 It is generated from these files:
+
 	api_v1alpha2.proto
 
 It has these top-level messages:
+
 	OnDefineDomainParams
 	OnDefineDomainResult
 	PreCloudInitIsoParams
 	PreCloudInitIsoResult
 */
-package kubevirt_hooks_v1alpha2
+package v1alpha2
 
 import (
 	fmt "fmt"

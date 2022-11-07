@@ -28,7 +28,7 @@ import (
 	"syscall"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/google/uuid"
@@ -45,17 +45,17 @@ var _ = Describe("VirtLauncher", func() {
 	var cmd *exec.Cmd
 	var cmdLock sync.Mutex
 	var gracefulShutdownChannel chan struct{}
-
-	uuid := uuid.New().String()
-
-	processStarted := false
+	var fakeUuid string
+	var pidDir string
+	var processStarted bool
+	var err error
 
 	StartProcess := func() {
 		cmdLock.Lock()
 		defer cmdLock.Unlock()
 
-		cmd = exec.Command(fakeQEMUBinary, "--uuid", uuid)
-		err := cmd.Start()
+		cmd = exec.Command(fakeQEMUBinary, "--uuid", fakeUuid, "--pidfile", filepath.Join(pidDir, "fakens_fakevmi.pid"))
+		err = cmd.Start()
 		Expect(err).ToNot(HaveOccurred())
 
 		currentPid := cmd.Process.Pid
@@ -69,6 +69,7 @@ var _ = Describe("VirtLauncher", func() {
 		defer cmdLock.Unlock()
 
 		cmd.Process.Kill()
+
 		processStarted = false
 	}
 
@@ -106,18 +107,27 @@ var _ = Describe("VirtLauncher", func() {
 	}
 
 	BeforeEach(func() {
+		fakeUuid = uuid.New().String()
+		pidDir = GinkgoT().TempDir()
+
+		processStarted = false
 		if !strings.Contains(fakeQEMUBinary, "../../") {
 			fakeQEMUBinary = filepath.Join("../../", fakeQEMUBinary)
 		}
 		gracefulShutdownChannel = make(chan struct{})
 		shutdownCallback := func(pid int) {
-			syscall.Kill(pid, syscall.SIGTERM)
+			// Don't send SIGTERM to the current process group (i.e. to PID 0). That will interrupt
+			// the test run.
+			Expect(pid).ToNot(BeZero())
+			err := syscall.Kill(pid, syscall.SIGTERM)
+			Expect(err).ToNot(HaveOccurred())
 		}
 		gracefulShutdownCallback := func() {
 			close(gracefulShutdownChannel)
 		}
 		mon = &monitor{
-			cmdlineMatchStr:          uuid,
+			domainName:               "fakens_fakevmi",
+			pidDir:                   pidDir,
 			gracePeriod:              30,
 			finalShutdownCallback:    shutdownCallback,
 			gracefulShutdownCallback: gracefulShutdownCallback,
@@ -126,12 +136,11 @@ var _ = Describe("VirtLauncher", func() {
 
 	AfterEach(func() {
 		if processStarted == true {
-			cmdLock.Lock()
-			defer cmdLock.Unlock()
-			cmd.Process.Kill()
+			StopProcess()
+			CleanupProcess()
 		}
-		processStarted = false
 	})
+
 	Describe("VirtLauncher", func() {
 		Context("process monitor", func() {
 			It("verify pid detection works", func() {

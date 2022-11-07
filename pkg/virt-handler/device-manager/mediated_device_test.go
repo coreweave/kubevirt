@@ -2,20 +2,19 @@ package device_manager
 
 import (
 	"bufio"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -35,18 +34,20 @@ var _ = Describe("Mediated Device", func() {
 	var fakePermittedHostDevices v1.PermittedHostDevices
 	var ctrl *gomock.Controller
 	var fakeSupportedTypesPath string
+	var clientTest *fake.Clientset
 	resourceNameToTypeName := func(rawName string) string {
 		typeNameStr := strings.Replace(string(rawName), " ", "_", -1)
 		typeNameStr = strings.TrimSpace(typeNameStr)
 		return typeNameStr
 	}
 	BeforeEach(func() {
+		clientTest = fake.NewSimpleClientset()
 		By("creating a temporary fake mdev directory tree")
 		// create base mdev dir instead of /sys/bus/mdev/devices
-		fakeMdevBasePath, err := ioutil.TempDir("/tmp", "mdevs")
+		fakeMdevBasePath, err := os.MkdirTemp("/tmp", "mdevs")
 		Expect(err).ToNot(HaveOccurred())
 		// create an alternative mdev_supported_types dir instead of /sys/class/mdev_bus/[pciAddress]/
-		fakeSupportedTypesPath, err = ioutil.TempDir("/tmp", "mdev_supported_types")
+		fakeSupportedTypesPath, err = os.MkdirTemp("/tmp", "mdev_supported_types")
 		Expect(err).ToNot(HaveOccurred())
 		// create a fake path to nvidia mdev type
 		fakeNvidiaTypePath := filepath.Join(fakeSupportedTypesPath, "nvidia-222")
@@ -85,7 +86,7 @@ var _ = Describe("Mediated Device", func() {
 		os.RemoveAll(mdevBasePath)
 		os.RemoveAll(fakeSupportedTypesPath)
 	})
-	table.DescribeTable("should get correct file type name", func(namePathExist bool) {
+	DescribeTable("should get correct file type name", func(namePathExist bool) {
 		if namePathExist {
 			mdevName, err := getMdevTypeName(fakeMdevUUID)
 			Expect(err).ToNot(HaveOccurred())
@@ -96,8 +97,8 @@ var _ = Describe("Mediated Device", func() {
 			Expect(mdevName).To(Equal(resourceNameToTypeName(fakeIntelMdevNameSelector)))
 		}
 	},
-		table.Entry("Nvidia name file exist", true),
-		table.Entry("Intel name file doesn't exist", false),
+		Entry("Nvidia name file exist", true),
+		Entry("Intel name file doesn't exist", false),
 	)
 	Context("discover devices", func() {
 		BeforeEach(func() {
@@ -118,13 +119,11 @@ var _ = Describe("Mediated Device", func() {
     `
 			err := yaml.NewYAMLOrJSONDecoder(strings.NewReader(fakePermittedHostDevicesConfig), 1024).Decode(&fakePermittedHostDevices)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(len(fakePermittedHostDevices.MediatedDevices)).To(Equal(1))
+			Expect(fakePermittedHostDevices.MediatedDevices).To(HaveLen(1))
 			Expect(fakePermittedHostDevices.MediatedDevices[0].MDEVNameSelector).To(Equal(fakeMdevNameSelector))
 			Expect(fakePermittedHostDevices.MediatedDevices[0].ResourceName).To(Equal(fakeMdevResourceName))
 		})
-		AfterEach(func() {
-			ctrl.Finish()
-		})
+
 		It("Should parse the permitted devices and find 1 matching mediated device", func() {
 			supportedMdevsMap := make(map[string]string)
 			for _, supportedMdev := range fakePermittedHostDevices.MediatedDevices {
@@ -136,9 +135,9 @@ var _ = Describe("Mediated Device", func() {
 			}
 			// discoverPermittedHostMediatedDevices() will walk real mdev devices wherever the tests are running
 			devices := discoverPermittedHostMediatedDevices(supportedMdevsMap)
-			Expect(len(devices)).To(Equal(1))
+			Expect(devices).To(HaveLen(1))
 			selector := removeSelectorSpaces(fakeMdevNameSelector)
-			Expect(len(devices[selector])).To(Equal(1))
+			Expect(devices[selector]).To(HaveLen(1))
 			Expect(devices[selector][0].UUID).To(Equal(fakeMdevUUID))
 			Expect(devices[selector][0].typeName).To(Equal(selector))
 			Expect(devices[selector][0].parentPciAddress).To(Equal(fakeAddress))
@@ -183,8 +182,8 @@ var _ = Describe("Mediated Device", func() {
 			fakeClusterConfig, _, kvInformer := testutils.NewFakeClusterConfigUsingKV(kv)
 
 			By("creating an empty device controller")
-			deviceController := NewDeviceController("master", 10, "rw", fakeClusterConfig)
-			deviceController.devicePlugins = make(map[string]ControlledDevice)
+			var noDevices []Device
+			deviceController := NewDeviceController("master", 100, "rw", noDevices, fakeClusterConfig, clientTest.CoreV1())
 
 			By("adding a host device to the cluster config")
 			kvConfig := kv.DeepCopy()
@@ -200,27 +199,33 @@ var _ = Describe("Mediated Device", func() {
 			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
 			permittedDevices := fakeClusterConfig.GetPermittedHostDevices()
 			Expect(permittedDevices).ToNot(BeNil(), "something went wrong while parsing the configmap(s)")
-			Expect(len(permittedDevices.MediatedDevices)).To(Equal(1), "the fake device was not found")
+			Expect(permittedDevices.MediatedDevices).To(HaveLen(1), "the fake device was not found")
 
 			By("ensuring a device plugin gets created for our fake device")
-			enabledDevicePlugins, disabledDevicePlugins := deviceController.updatePermittedHostDevicePlugins()
-			Expect(len(enabledDevicePlugins)).To(Equal(1), "a device plugin wasn't created for the fake device")
-			Expect(len(disabledDevicePlugins)).To(Equal(0))
+			enabledDevicePlugins, disabledDevicePlugins := deviceController.splitPermittedDevices(
+				deviceController.updatePermittedHostDevicePlugins(),
+			)
+			Expect(enabledDevicePlugins).To(HaveLen(1), "a device plugin wasn't created for the fake device")
+			Expect(disabledDevicePlugins).To(BeEmpty())
 			Ω(enabledDevicePlugins).Should(HaveKey(fakeMdevResourceName))
 			// Manually adding the enabled plugin, since the device controller is not actually running
-			deviceController.devicePlugins[fakeMdevResourceName] = enabledDevicePlugins[fakeMdevResourceName]
+			deviceController.startedPlugins[fakeMdevResourceName] = controlledDevice{
+				devicePlugin: enabledDevicePlugins[fakeMdevResourceName],
+			}
 
 			By("deletting the device from the configmap")
 			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{}
 			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
 			permittedDevices = fakeClusterConfig.GetPermittedHostDevices()
 			Expect(permittedDevices).ToNot(BeNil(), "something went wrong while parsing the configmap(s)")
-			Expect(len(permittedDevices.MediatedDevices)).To(Equal(0), "the fake device was not deleted")
+			Expect(permittedDevices.MediatedDevices).To(BeEmpty(), "the fake device was not deleted")
 
 			By("ensuring the device plugin gets stopped")
-			enabledDevicePlugins, disabledDevicePlugins = deviceController.updatePermittedHostDevicePlugins()
-			Expect(len(enabledDevicePlugins)).To(Equal(0))
-			Expect(len(disabledDevicePlugins)).To(Equal(1), "the fake device plugin did not get disabled")
+			enabledDevicePlugins, disabledDevicePlugins = deviceController.splitPermittedDevices(
+				deviceController.updatePermittedHostDevicePlugins(),
+			)
+			Expect(enabledDevicePlugins).To(BeEmpty())
+			Expect(disabledDevicePlugins).To(HaveLen(1), "the fake device plugin did not get disabled")
 			Ω(disabledDevicePlugins).Should(HaveKey(fakeMdevResourceName))
 		})
 	})

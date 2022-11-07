@@ -4,29 +4,48 @@ import (
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 
 	v1 "kubevirt.io/api/core/v1"
-	flavorv1alpha1 "kubevirt.io/api/flavor/v1alpha1"
-	"kubevirt.io/kubevirt/pkg/flavor"
+	instancetypev1alpha2 "kubevirt.io/api/instancetype/v1alpha2"
+
+	"kubevirt.io/kubevirt/pkg/instancetype"
 )
 
-type MockFlavorMethods struct {
-	FindFlavorFunc func(vm *v1.VirtualMachine) (*flavorv1alpha1.VirtualMachineFlavorProfile, error)
-	ApplyToVmiFunc func(field *k8sfield.Path, profile *flavorv1alpha1.VirtualMachineFlavorProfile, vmiSpec *v1.VirtualMachineInstanceSpec) flavor.Conflicts
+type MockInstancetypeMethods struct {
+	FindInstancetypeSpecFunc     func(vm *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachineInstancetypeSpec, error)
+	ApplyToVmiFunc               func(field *k8sfield.Path, instancetypespec *instancetypev1alpha2.VirtualMachineInstancetypeSpec, preferenceSpec *instancetypev1alpha2.VirtualMachinePreferenceSpec, vmiSpec *v1.VirtualMachineInstanceSpec) instancetype.Conflicts
+	FindPreferenceSpecFunc       func(vm *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachinePreferenceSpec, error)
+	StoreControllerRevisionsFunc func(vm *v1.VirtualMachine) error
 }
 
-func (m *MockFlavorMethods) FindProfile(vm *v1.VirtualMachine) (*flavorv1alpha1.VirtualMachineFlavorProfile, error) {
-	return m.FindFlavorFunc(vm)
+var _ instancetype.Methods = &MockInstancetypeMethods{}
+
+func (m *MockInstancetypeMethods) FindInstancetypeSpec(vm *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachineInstancetypeSpec, error) {
+	return m.FindInstancetypeSpecFunc(vm)
 }
 
-func (m *MockFlavorMethods) ApplyToVmi(field *k8sfield.Path, profile *flavorv1alpha1.VirtualMachineFlavorProfile, vmiSpec *v1.VirtualMachineInstanceSpec) flavor.Conflicts {
-	return m.ApplyToVmiFunc(field, profile, vmiSpec)
+func (m *MockInstancetypeMethods) ApplyToVmi(field *k8sfield.Path, instancetypespec *instancetypev1alpha2.VirtualMachineInstancetypeSpec, preferenceSpec *instancetypev1alpha2.VirtualMachinePreferenceSpec, vmiSpec *v1.VirtualMachineInstanceSpec) instancetype.Conflicts {
+	return m.ApplyToVmiFunc(field, instancetypespec, preferenceSpec, vmiSpec)
 }
 
-func NewMockFlavorMethods() *MockFlavorMethods {
-	return &MockFlavorMethods{
-		FindFlavorFunc: func(_ *v1.VirtualMachine) (*flavorv1alpha1.VirtualMachineFlavorProfile, error) {
+func (m *MockInstancetypeMethods) FindPreferenceSpec(vm *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachinePreferenceSpec, error) {
+	return m.FindPreferenceSpecFunc(vm)
+}
+
+func (m *MockInstancetypeMethods) StoreControllerRevisions(vm *v1.VirtualMachine) error {
+	return m.StoreControllerRevisionsFunc(vm)
+}
+
+func NewMockInstancetypeMethods() *MockInstancetypeMethods {
+	return &MockInstancetypeMethods{
+		FindInstancetypeSpecFunc: func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachineInstancetypeSpec, error) {
 			return nil, nil
 		},
-		ApplyToVmiFunc: func(_ *k8sfield.Path, _ *flavorv1alpha1.VirtualMachineFlavorProfile, _ *v1.VirtualMachineInstanceSpec) flavor.Conflicts {
+		ApplyToVmiFunc: func(_ *k8sfield.Path, _ *instancetypev1alpha2.VirtualMachineInstancetypeSpec, _ *instancetypev1alpha2.VirtualMachinePreferenceSpec, _ *v1.VirtualMachineInstanceSpec) instancetype.Conflicts {
+			return nil
+		},
+		FindPreferenceSpecFunc: func(_ *v1.VirtualMachine) (*instancetypev1alpha2.VirtualMachinePreferenceSpec, error) {
+			return nil, nil
+		},
+		StoreControllerRevisionsFunc: func(_ *v1.VirtualMachine) error {
 			return nil
 		},
 	}

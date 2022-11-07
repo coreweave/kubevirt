@@ -13,5 +13,7 @@ spec:
       - {{.}}
       {{- end}}{{else}} []{{end}}
   customizeComponents: {}
-  imagePullPolicy: {{.ImagePullPolicy}}
+  imagePullPolicy: {{.ImagePullPolicy}}{{if .InfraReplicas}}
+  infra:
+    replicas: {{.InfraReplicas}}{{end}}
   workloadUpdateStrategy: {}

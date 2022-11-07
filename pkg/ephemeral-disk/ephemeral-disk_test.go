@@ -20,32 +20,37 @@
 package ephemeraldisk
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 
 	api2 "kubevirt.io/client-go/api"
 
 	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
 var _ = Describe("ContainerDisk", func() {
 	var imageTempDirPath string
-	var backingTempDirPath string
 	var pvcBaseTempDirPath string
 	var blockDevBaseDir string
 	var creator *ephemeralDiskCreator
 
-	createBackingImageForPVC := func(volumeName string, isBlock bool) {
-		os.Mkdir(filepath.Join(pvcBaseTempDirPath, volumeName), 0755)
-		f, _ := os.Create(creator.getBackingFilePath(volumeName, isBlock))
-		f.Close()
+	createBackingImageForPVC := func(volumeName string, isBlock bool) error {
+		if err := os.Mkdir(filepath.Join(pvcBaseTempDirPath, volumeName), 0755); err != nil {
+			return err
+		}
+		f, err := os.Create(creator.getBackingFilePath(volumeName, isBlock))
+		if err != nil {
+			return err
+		}
+		return f.Close()
 	}
 
 	AppendEphemeralPVC := func(vmi *v1.VirtualMachineInstance, diskName string, claimName string, backingDiskIsblock bool) {
@@ -67,7 +72,7 @@ var _ = Describe("ContainerDisk", func() {
 		})
 
 		By("Creating a backing image for the PVC")
-		createBackingImageForPVC(diskName, backingDiskIsblock)
+		Expect(createBackingImageForPVC(diskName, backingDiskIsblock)).To(Succeed())
 
 		// Test the test infra itself: make sure that the backing file has been created.
 		var err error
@@ -80,19 +85,9 @@ var _ = Describe("ContainerDisk", func() {
 	}
 
 	BeforeEach(func() {
-		var err error
-
-		backingTempDirPath, err = ioutil.TempDir("", "ephemeraldisk-backing")
-		Expect(err).NotTo(HaveOccurred())
-
-		imageTempDirPath, err = ioutil.TempDir("", "ephemeraldisk-image")
-		Expect(err).NotTo(HaveOccurred())
-
-		pvcBaseTempDirPath, err = ioutil.TempDir("", "pvc-base-dir-path")
-		Expect(err).NotTo(HaveOccurred())
-
-		blockDevBaseDir, err = ioutil.TempDir("", "block-dev-base-dir-path")
-		Expect(err).NotTo(HaveOccurred())
+		imageTempDirPath = GinkgoT().TempDir()
+		pvcBaseTempDirPath = GinkgoT().TempDir()
+		blockDevBaseDir = GinkgoT().TempDir()
 
 		creator = &ephemeralDiskCreator{
 			mountBaseDir:    imageTempDirPath,
@@ -100,12 +95,6 @@ var _ = Describe("ContainerDisk", func() {
 			blockDevBaseDir: blockDevBaseDir,
 			discCreateFunc:  fakeCreateBackingDisk,
 		}
-	})
-
-	AfterEach(func() {
-		os.RemoveAll(imageTempDirPath)
-		os.RemoveAll(backingTempDirPath)
-		os.RemoveAll(pvcBaseTempDirPath)
 	})
 
 	Describe("ephemeral-backed PVC", func() {
@@ -200,10 +189,13 @@ func fakeCreateBackingDisk(backingFile string, backingFormat string, imagePath s
 		return nil, fmt.Errorf("wrong backing format")
 	}
 	_, err := os.Stat(backingFile)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	f, _ := os.Create(imagePath)
-	f.Close()
-	return nil, nil
+	f, err := os.Create(imagePath)
+	if err != nil {
+		return nil, err
+	}
+	err = f.Close()
+	return nil, err
 }

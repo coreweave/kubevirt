@@ -46,6 +46,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	com "kubevirt.io/kubevirt/pkg/handler-launcher-com"
 	"kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/info"
@@ -90,6 +91,7 @@ type LauncherClient interface {
 	MigrateVirtualMachine(vmi *v1.VirtualMachineInstance, options *MigrationOptions) error
 	CancelVirtualMachineMigration(vmi *v1.VirtualMachineInstance) error
 	FinalizeVirtualMachineMigration(vmi *v1.VirtualMachineInstance) error
+	HotplugHostDevices(vmi *v1.VirtualMachineInstance) error
 	DeleteDomain(vmi *v1.VirtualMachineInstance) error
 	GetDomain() (*api.Domain, bool, error)
 	GetDomainStats() (*stats.DomainStats, bool, error)
@@ -100,6 +102,7 @@ type LauncherClient interface {
 	Ping() error
 	GuestPing(string, int32) error
 	Close()
+	VirtualMachineMemoryDump(vmi *v1.VirtualMachineInstance, dumpPath string) error
 }
 
 type VirtLauncherClient struct {
@@ -444,6 +447,26 @@ func (c *VirtLauncherClient) UnfreezeVirtualMachine(vmi *v1.VirtualMachineInstan
 	return c.genericSendVMICmd("Unfreeze", c.v1client.UnfreezeVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
+func (c *VirtLauncherClient) VirtualMachineMemoryDump(vmi *v1.VirtualMachineInstance, dumpPath string) error {
+	vmiJson, err := json.Marshal(vmi)
+	if err != nil {
+		return err
+	}
+
+	request := &cmdv1.MemoryDumpRequest{
+		Vmi: &cmdv1.VMI{
+			VmiJson: vmiJson,
+		},
+		DumpPath: dumpPath,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), longTimeout)
+	defer cancel()
+	response, err := c.v1client.VirtualMachineMemoryDump(ctx, request)
+	err = handleError(err, "Memorydump", response)
+	return err
+}
+
 func (c *VirtLauncherClient) SoftRebootVirtualMachine(vmi *v1.VirtualMachineInstance) error {
 	return c.genericSendVMICmd("SoftReboot", c.v1client.SoftRebootVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
@@ -504,6 +527,10 @@ func (c *VirtLauncherClient) FinalizeVirtualMachineMigration(vmi *v1.VirtualMach
 	return c.genericSendVMICmd("FinalizeVirtualMachineMigration", c.v1client.FinalizeVirtualMachineMigration, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
+func (c *VirtLauncherClient) HotplugHostDevices(vmi *v1.VirtualMachineInstance) error {
+	return c.genericSendVMICmd("HotplugHostDevices", c.v1client.HotplugHostDevices, vmi, &cmdv1.VirtualMachineOptions{})
+}
+
 func (c *VirtLauncherClient) GetDomain() (*api.Domain, bool, error) {
 
 	domain := &api.Domain{}
@@ -541,18 +568,18 @@ func (c *VirtLauncherClient) GetDomainStats() (*stats.DomainStats, bool, error) 
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
 
-	domainStatsRespose, err := c.v1client.GetDomainStats(ctx, request)
+	domainStatsResponse, err := c.v1client.GetDomainStats(ctx, request)
 	var response *cmdv1.Response
-	if domainStatsRespose != nil {
-		response = domainStatsRespose.Response
+	if domainStatsResponse != nil {
+		response = domainStatsResponse.Response
 	}
 
 	if err = handleError(err, "GetDomainStats", response); err != nil {
 		return stats, exists, err
 	}
 
-	if domainStatsRespose.DomainStats != "" {
-		if err := json.Unmarshal([]byte(domainStatsRespose.DomainStats), stats); err != nil {
+	if domainStatsResponse.DomainStats != "" {
+		if err := json.Unmarshal([]byte(domainStatsResponse.DomainStats), stats); err != nil {
 			log.Log.Reason(err).Error("error unmarshalling domain")
 			return stats, exists, err
 		}

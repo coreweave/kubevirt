@@ -3,17 +3,17 @@ package tests_test
 import (
 	"encoding/xml"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"kubevirt.io/kubevirt/tests/util"
 
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 
 	"kubevirt.io/kubevirt/tests"
-	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
 var _ = Describe("[sig-compute]Controller devices", func() {
@@ -26,12 +26,10 @@ var _ = Describe("[sig-compute]Controller devices", func() {
 	})
 
 	Context("with ephemeral disk", func() {
-		table.DescribeTable("a scsi controller", func(enabled bool) {
-			randomVMI := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
-			randomVMI.Spec.Domain.Devices.DisableHotplug = !enabled
-			vmi, apiErr := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(randomVMI)
-			Expect(apiErr).ToNot(HaveOccurred())
-			tests.WaitForSuccessfulVMIStart(vmi)
+		DescribeTable("a scsi controller", func(enabled bool) {
+			vmi := libvmi.NewCirros()
+			vmi.Spec.Domain.Devices.DisableHotplug = !enabled
+			vmi = tests.RunVMIAndExpectLaunch(vmi, 30)
 			domain, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
 			Expect(err).ToNot(HaveOccurred())
 			domSpec := &api.DomainSpec{}
@@ -46,8 +44,8 @@ var _ = Describe("[sig-compute]Controller devices", func() {
 			}
 			Expect(found).To(Equal(enabled))
 		},
-			table.Entry("should appear if enabled", true),
-			table.Entry("should NOT appear if disabled", false),
+			Entry("should appear if enabled", true),
+			Entry("should NOT appear if disabled", false),
 		)
 	})
 })

@@ -23,12 +23,14 @@ import (
 	"io"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/util"
 )
 
@@ -50,24 +52,22 @@ var helloMessageRemote = []byte{
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
 }
 
-var _ = Describe("[Serial][crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-compute] USB Redirection", func() {
+var _ = Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-compute] USB Redirection", func() {
 
 	var err error
 	var virtClient kubecli.KubevirtClient
-	var vmi *v1.VirtualMachineInstance
-
-	tests.BeforeAll(func() {
+	const enoughMemForSafeBiosEmulation = "32Mi"
+	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
-
-		tests.BeforeTestCleanup()
 	})
 
 	Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component] A VirtualMachineInstance without usbredir support", func() {
-		tests.BeforeAll(func() {
-			vmi, err = createVMI(virtClient, false)
-			Expect(err).To(BeNil())
-			tests.WaitForSuccessfulVMIStart(vmi)
+
+		var vmi *v1.VirtualMachineInstance
+		BeforeEach(func() {
+			vmi = libvmi.New(libvmi.WithResourceMemory(enoughMemForSafeBiosEmulation))
+			vmi = tests.RunVMIAndExpectLaunch(vmi, 90)
 		})
 
 		It("should fail to connect to VMI's usbredir socket", func() {
@@ -78,10 +78,11 @@ var _ = Describe("[Serial][crit:medium][vendor:cnv-qe@redhat.com][level:componen
 	})
 
 	Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component] A VirtualMachineInstance with usbredir support", func() {
-		tests.BeforeAll(func() {
-			vmi, err = createVMI(virtClient, true)
-			Expect(err).To(BeNil())
-			tests.WaitForSuccessfulVMIStart(vmi)
+
+		var vmi *v1.VirtualMachineInstance
+		BeforeEach(func() {
+			vmi = libvmi.New(libvmi.WithResourceMemory(enoughMemForSafeBiosEmulation), withClientPassthrough())
+			vmi = tests.RunVMIAndExpectLaunch(vmi, 90)
 		})
 
 		Context("with an usbredir connection", func() {
@@ -141,7 +142,7 @@ var _ = Describe("[Serial][crit:medium][vendor:cnv-qe@redhat.com][level:componen
 					// 2. Capabilities can change over time which means the message would be different then the one hardcoded, correct nonetheless.
 					// I'm keeping the helloMessageRemote to have a proof of working example that could also be used if needed.
 					Expect(response).ToNot(BeEmpty(), "response should not be empty")
-					Expect(len(response)).To(Equal(len(helloMessageRemote)))
+					Expect(response).To(HaveLen(len(helloMessageRemote)))
 				case err = <-k8ResChan:
 					Expect(err).ToNot(HaveOccurred())
 				case <-time.After(45 * time.Second):
@@ -173,10 +174,8 @@ var _ = Describe("[Serial][crit:medium][vendor:cnv-qe@redhat.com][level:componen
 	})
 })
 
-func createVMI(virtClient kubecli.KubevirtClient, enableUsbredir bool) (*v1.VirtualMachineInstance, error) {
-	randomVmi := tests.NewRandomVMI()
-	if enableUsbredir {
-		randomVmi.Spec.Domain.Devices.ClientPassthrough = &v1.ClientPassthroughDevices{}
+func withClientPassthrough() libvmi.Option {
+	return func(vmi *v1.VirtualMachineInstance) {
+		vmi.Spec.Domain.Devices.ClientPassthrough = &v1.ClientPassthroughDevices{}
 	}
-	return virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(randomVmi)
 }

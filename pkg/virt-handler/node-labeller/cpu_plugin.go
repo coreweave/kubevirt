@@ -28,6 +28,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
 
 	util "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
@@ -49,10 +50,9 @@ func (n *NodeLabeller) getMinCpuFeature() cpuFeatures {
 	return n.cpuInfo.models[minCPUModel]
 }
 
-func (n *NodeLabeller) getSupportedCpuModels() []string {
+func (n *NodeLabeller) getSupportedCpuModels(obsoleteCPUsx86 map[string]bool) []string {
 	supportedCPUModels := make([]string, 0)
 
-	obsoleteCPUsx86 := n.clusterConfig.GetObsoleteCPUModels()
 	if obsoleteCPUsx86 == nil {
 		obsoleteCPUsx86 = util.DefaultObsoleteCPUModels
 	}
@@ -69,22 +69,19 @@ func (n *NodeLabeller) getSupportedCpuModels() []string {
 
 func (n *NodeLabeller) getSupportedCpuFeatures() cpuFeatures {
 	supportedCpuFeatures := make(cpuFeatures)
-	minCpuFeatures := n.getMinCpuFeature()
 
 	for _, feature := range n.supportedFeatures {
-		if _, exist := minCpuFeatures[feature]; !exist {
-			supportedCpuFeatures[feature] = true
-		}
+		supportedCpuFeatures[feature] = true
 	}
 
 	return supportedCpuFeatures
 }
 
-func (n *NodeLabeller) getHostCpuModel() hostCPUModel {
+func (n *NodeLabeller) GetHostCpuModel() hostCPUModel {
 	return n.hostCPUModel
 }
 
-//loadDomCapabilities loads info about cpu models, which can host emulate
+// loadDomCapabilities loads info about cpu models, which can host emulate
 func (n *NodeLabeller) loadDomCapabilities() error {
 	hostDomCapabilities, err := n.getDomCapabilities()
 	if err != nil {
@@ -92,8 +89,6 @@ func (n *NodeLabeller) loadDomCapabilities() error {
 	}
 
 	usableModels := make([]string, 0)
-	minCpuFeatures := n.getMinCpuFeature()
-	log.Log.Infof("CPU features of a minimum baseline CPU model: %+v", minCpuFeatures)
 	for _, mode := range hostDomCapabilities.CPU.Mode {
 		if mode.Name == v1.CPUModeHostModel {
 			n.cpuModelVendor = mode.Vendor.Name
@@ -103,11 +98,11 @@ func (n *NodeLabeller) loadDomCapabilities() error {
 				log.Log.Warning("host model mode is expected to contain only one model")
 			}
 
-			n.hostCPUModel.name = hostCpuModel.Name
+			n.hostCPUModel.Name = hostCpuModel.Name
 			n.hostCPUModel.fallback = hostCpuModel.Fallback
 
 			for _, feature := range mode.Feature {
-				if _, isMinCpuFeature := minCpuFeatures[feature.Name]; !isMinCpuFeature && feature.Policy == isRequired {
+				if feature.Policy == isRequired {
 					n.hostCPUModel.requiredFeatures[feature.Name] = true
 				}
 			}
@@ -122,11 +117,12 @@ func (n *NodeLabeller) loadDomCapabilities() error {
 	}
 
 	n.hostCapabilities.items = usableModels
+	n.SEV = hostDomCapabilities.SEV
 
 	return nil
 }
 
-//loadHostSupportedFeatures loads supported features
+// loadHostSupportedFeatures loads supported features
 func (n *NodeLabeller) loadHostSupportedFeatures() error {
 	featuresFile := filepath.Join(n.volumePath, supportedFeaturesXml)
 
@@ -159,7 +155,7 @@ func (n *NodeLabeller) loadHostCapabilities() error {
 	return nil
 }
 
-//loadCPUInfo load info about all cpu models
+// loadCPUInfo load info about all cpu models
 func (n *NodeLabeller) loadCPUInfo() error {
 	files, err := os.ReadDir(filepath.Join(n.volumePath, "cpu_map"))
 	if err != nil {
@@ -192,7 +188,7 @@ func (n *NodeLabeller) getDomCapabilities() (HostDomCapabilities, error) {
 	return hostDomCapabilities, err
 }
 
-//LoadFeatures loads features for given cpu name
+// LoadFeatures loads features for given cpu name
 func (n *NodeLabeller) loadFeatures(fileName string) (cpuFeatures, error) {
 	if fileName == "" {
 		return nil, fmt.Errorf("file name can't be empty")
@@ -212,13 +208,13 @@ func (n *NodeLabeller) loadFeatures(fileName string) (cpuFeatures, error) {
 	return modelFeatures, nil
 }
 
-//getPathCPUFeatures creates path where folder with cpu models is
+// getPathCPUFeatures creates path where folder with cpu models is
 func getPathCPUFeatures(volumePath string, name string) string {
 	return filepath.Join(volumePath, "cpu_map", name)
 }
 
-//GetStructureFromXMLFile load data from xml file and unmarshals them into given structure
-//Given structure has to be pointer
+// GetStructureFromXMLFile load data from xml file and unmarshals them into given structure
+// Given structure has to be pointer
 func (n *NodeLabeller) getStructureFromXMLFile(path string, structure interface{}) error {
 	rawFile, err := os.ReadFile(path)
 	if err != nil {

@@ -23,18 +23,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"reflect"
 	"strings"
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/util"
 	utiltypes "kubevirt.io/kubevirt/pkg/util/types"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
@@ -47,6 +48,8 @@ type VMIsMutator struct {
 	VMIPresetInformer       cache.SharedIndexInformer
 	NamespaceLimitsInformer cache.SharedIndexInformer
 }
+
+const presetDeprecationWarning = "kubevirt.io/v1 VirtualMachineInstancePresets is now deprecated and will be removed in v2."
 
 func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	if !webhookutils.ValidateRequestResource(ar.Request.Resource, webhooks.VirtualMachineInstanceGroupVersionResource.Group, webhooks.VirtualMachineInstanceGroupVersionResource.Resource) {
@@ -78,8 +81,10 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 			}
 		}
 
+		namespace := ar.Request.Namespace
+
 		// Apply namespace limits
-		applyNamespaceLimitRangeValues(newVMI, mutator.NamespaceLimitsInformer)
+		applyNamespaceLimitRangeValues(newVMI, mutator.NamespaceLimitsInformer, namespace)
 
 		// Set VMI defaults
 		log.Log.Object(newVMI).V(4).Info("Apply defaults")
@@ -87,10 +92,11 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 		mutator.setDefaultResourceRequests(newVMI)
 		mutator.setDefaultGuestCPUTopology(newVMI)
 		mutator.setDefaultPullPoliciesOnContainerDisks(newVMI)
-		err = mutator.setDefaultNetworkInterface(newVMI)
+		err = mutator.ClusterConfig.SetVMIDefaultNetworkInterface(newVMI)
 		if err != nil {
 			return webhookutils.ToAdmissionResponseError(err)
 		}
+		util.SetDefaultVolumeDisk(newVMI)
 		v1.SetObjectDefaults_VirtualMachineInstance(newVMI)
 
 		// In a future, yet undecided, release either libvirt or QEMU are going to check the hyperv dependencies, so we can get rid of this code.
@@ -106,20 +112,21 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 			log.Log.V(2).Infof("Failed to set HyperV dependencies: %s", err)
 		}
 
-		// Do some specific setting for Arm64 Arch. It should put before SetObjectDefaults_VirtualMachineInstance
+		// Do some CPU arch specific setting.
 		if webhooks.IsARM64() {
 			log.Log.V(4).Info("Apply Arm64 specific setting")
-			err = webhooks.SetVirtualMachineInstanceArm64Defaults(newVMI)
-			if err != nil {
-				// if SetVirtualMachineInstanceArm64Defaults fails, it's due to a validation error, which will get caught in the validation webhook after mutation finishes.
-				log.Log.V(2).Infof("Failed to setting for Arm64: %s", err)
-			}
+			webhooks.SetVirtualMachineInstanceArm64Defaults(newVMI)
 		} else {
+			webhooks.SetVirtualMachineInstanceAmd64Defaults(newVMI)
 			mutator.setDefaultCPUModel(newVMI)
 		}
 		if newVMI.IsRealtimeEnabled() {
 			log.Log.V(4).Info("Add realtime node label selector")
-			addRealtimeNodeSelector(newVMI)
+			addNodeSelector(newVMI, v1.RealtimeLabel)
+		}
+		if util.IsSEVVMI(newVMI) {
+			log.Log.V(4).Info("Add SEV node label selector")
+			addNodeSelector(newVMI, v1.SEVLabel)
 		}
 
 		// Add foreground finalizer
@@ -134,20 +141,8 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 			PhaseTransitionTimestamp: now,
 		})
 
-		if mutator.ClusterConfig.NonRootEnabled() {
-			if err := canBeNonRoot(newVMI); err != nil {
-				return &admissionv1.AdmissionResponse{
-					Result: &metav1.Status{
-						Message: err.Error(),
-						Code:    http.StatusUnprocessableEntity,
-					},
-				}
-			} else {
-				if newVMI.ObjectMeta.Annotations == nil {
-					newVMI.ObjectMeta.Annotations = make(map[string]string)
-				}
-				newVMI.ObjectMeta.Annotations[v1.NonRootVMIAnnotation] = ""
-			}
+		if !mutator.ClusterConfig.RootEnabled() {
+			util.MarkAsNonroot(newVMI)
 		}
 
 		var value interface{}
@@ -176,7 +171,7 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 		// Ignore status updates if they are not coming from our service accounts
 		// TODO: As soon as CRDs support field selectors we can remove this and just enable
 		// the status subresource. Until then we need to update Status and Metadata labels in parallel for e.g. Migrations.
-		if !reflect.DeepEqual(newVMI.Status, oldVMI.Status) {
+		if !equality.Semantic.DeepEqual(newVMI.Status, oldVMI.Status) {
 			if !webhooks.IsKubeVirtServiceAccount(ar.Request.UserInfo.Username) {
 				patch = append(patch, utiltypes.PatchOperation{
 					Op:    "replace",
@@ -194,41 +189,24 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 	}
 
 	jsonPatchType := admissionv1.PatchTypeJSONPatch
+
+	// If newVMI has been annotated with presets include a deprecation warning in the response
+	for annotation := range newVMI.Annotations {
+		if strings.Contains(annotation, "virtualmachinepreset") {
+			return &admissionv1.AdmissionResponse{
+				Allowed:   true,
+				Patch:     patchBytes,
+				PatchType: &jsonPatchType,
+				Warnings:  []string{presetDeprecationWarning},
+			}
+		}
+	}
+
 	return &admissionv1.AdmissionResponse{
 		Allowed:   true,
 		Patch:     patchBytes,
 		PatchType: &jsonPatchType,
 	}
-}
-
-func (mutator *VMIsMutator) setDefaultNetworkInterface(obj *v1.VirtualMachineInstance) error {
-	autoAttach := obj.Spec.Domain.Devices.AutoattachPodInterface
-	if autoAttach != nil && *autoAttach == false {
-		return nil
-	}
-
-	// Override only when nothing is specified
-	if len(obj.Spec.Networks) == 0 && len(obj.Spec.Domain.Devices.Interfaces) == 0 {
-		iface := v1.NetworkInterfaceType(mutator.ClusterConfig.GetDefaultNetworkInterface())
-		switch iface {
-		case v1.BridgeInterface:
-			if !mutator.ClusterConfig.IsBridgeInterfaceOnPodNetworkEnabled() {
-				return fmt.Errorf("Bridge interface is not enabled in kubevirt-config")
-			}
-			obj.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultBridgeNetworkInterface()}
-		case v1.MasqueradeInterface:
-			obj.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultMasqueradeNetworkInterface()}
-		case v1.SlirpInterface:
-			if !mutator.ClusterConfig.IsSlirpInterfaceEnabled() {
-				return fmt.Errorf("Slirp interface is not enabled in kubevirt-config")
-			}
-			defaultIface := v1.DefaultSlirpNetworkInterface()
-			obj.Spec.Domain.Devices.Interfaces = []v1.Interface{*defaultIface}
-		}
-
-		obj.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
-	}
-	return nil
 }
 
 func (mutator *VMIsMutator) setDefaultCPUModel(vmi *v1.VirtualMachineInstance) {
@@ -354,22 +332,9 @@ func (mutator *VMIsMutator) setDefaultResourceRequests(vmi *v1.VirtualMachineIns
 
 }
 
-func canBeNonRoot(vmi *v1.VirtualMachineInstance) error {
-	// VirtioFS doesn't work with session mode
-	if util.IsVMIVirtiofsEnabled(vmi) {
-		return fmt.Errorf("VirtioFS doesn't work with session mode(used by nonroot)")
-	}
-
-	if util.IsSRIOVVmi(vmi) {
-		return fmt.Errorf("SRIOV doesn't work with nonroot")
-	}
-	return nil
-}
-
-// AddRealtimeNodeSelector adds the realtime node selector
-func addRealtimeNodeSelector(vmi *v1.VirtualMachineInstance) {
+func addNodeSelector(vmi *v1.VirtualMachineInstance, label string) {
 	if vmi.Spec.NodeSelector == nil {
 		vmi.Spec.NodeSelector = map[string]string{}
 	}
-	vmi.Spec.NodeSelector[v1.RealtimeLabel] = ""
+	vmi.Spec.NodeSelector[label] = ""
 }

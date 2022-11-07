@@ -30,10 +30,13 @@ import (
 	"net"
 	"time"
 
+	routev1 "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
+
+	clonev1alpha1 "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/typed/clone/v1alpha1"
+
 	secv1 "github.com/openshift/client-go/security/clientset/versioned/typed/security/v1"
 	autov1 "k8s.io/api/autoscaling/v1"
 	extclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
@@ -46,25 +49,36 @@ import (
 	cdiclient "kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned"
 	k8ssnapshotclient "kubevirt.io/client-go/generated/external-snapshotter/clientset/versioned"
 	generatedclient "kubevirt.io/client-go/generated/kubevirt/clientset/versioned"
-	flavorv1alpha1 "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/typed/flavor/v1alpha1"
+	vmexportv1alpha1 "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/typed/export/v1alpha1"
+	instancetypev1alpha2 "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/typed/instancetype/v1alpha2"
+	migrationsv1 "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/typed/migrations/v1alpha1"
+	poolv1 "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/typed/pool/v1alpha1"
 	vmsnapshotv1alpha1 "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/typed/snapshot/v1alpha1"
 	networkclient "kubevirt.io/client-go/generated/network-attachment-definition-client/clientset/versioned"
 	promclient "kubevirt.io/client-go/generated/prometheus-operator/clientset/versioned"
+	"kubevirt.io/client-go/version"
 )
 
 type KubevirtClient interface {
 	VirtualMachineInstance(namespace string) VirtualMachineInstanceInterface
 	VirtualMachineInstanceMigration(namespace string) VirtualMachineInstanceMigrationInterface
 	ReplicaSet(namespace string) ReplicaSetInterface
+	VirtualMachinePool(namespace string) poolv1.VirtualMachinePoolInterface
 	VirtualMachine(namespace string) VirtualMachineInterface
 	KubeVirt(namespace string) KubeVirtInterface
 	VirtualMachineInstancePreset(namespace string) VirtualMachineInstancePresetInterface
 	VirtualMachineSnapshot(namespace string) vmsnapshotv1alpha1.VirtualMachineSnapshotInterface
 	VirtualMachineSnapshotContent(namespace string) vmsnapshotv1alpha1.VirtualMachineSnapshotContentInterface
 	VirtualMachineRestore(namespace string) vmsnapshotv1alpha1.VirtualMachineRestoreInterface
-	VirtualMachineFlavor(namespace string) flavorv1alpha1.VirtualMachineFlavorInterface
-	VirtualMachineClusterFlavor() flavorv1alpha1.VirtualMachineClusterFlavorInterface
-	ServerVersion() *ServerVersion
+	VirtualMachineExport(namespace string) vmexportv1alpha1.VirtualMachineExportInterface
+	VirtualMachineInstancetype(namespace string) instancetypev1alpha2.VirtualMachineInstancetypeInterface
+	VirtualMachineClusterInstancetype() instancetypev1alpha2.VirtualMachineClusterInstancetypeInterface
+	VirtualMachinePreference(namespace string) instancetypev1alpha2.VirtualMachinePreferenceInterface
+	VirtualMachineClusterPreference() instancetypev1alpha2.VirtualMachineClusterPreferenceInterface
+	MigrationPolicy() migrationsv1.MigrationPolicyInterface
+	ExpandSpec() *ExpandSpec
+	ServerVersion() ServerVersionInterface
+	VirtualMachineClone(namespace string) clonev1alpha1.VirtualMachineCloneInterface
 	ClusterProfiler() *ClusterProfiler
 	GuestfsVersion() *GuestfsVersion
 	RestClient() *rest.RESTClient
@@ -73,10 +87,12 @@ type KubevirtClient interface {
 	NetworkClient() networkclient.Interface
 	ExtensionsClient() extclient.Interface
 	SecClient() secv1.SecurityV1Interface
+	RouteClient() routev1.RouteV1Interface
 	DiscoveryClient() discovery.DiscoveryInterface
 	PrometheusClient() promclient.Interface
 	KubernetesSnapshotClient() k8ssnapshotclient.Interface
 	DynamicClient() dynamic.Interface
+	MigrationPolicyClient() *migrationsv1.MigrationsV1alpha1Client
 	kubernetes.Interface
 	Config() *rest.Config
 }
@@ -91,10 +107,13 @@ type kubevirt struct {
 	networkClient           *networkclient.Clientset
 	extensionsClient        *extclient.Clientset
 	secClient               *secv1.SecurityV1Client
+	routeClient             *routev1.RouteV1Client
 	discoveryClient         *discovery.DiscoveryClient
 	prometheusClient        *promclient.Clientset
 	snapshotClient          *k8ssnapshotclient.Clientset
 	dynamicClient           dynamic.Interface
+	migrationsClient        *migrationsv1.MigrationsV1alpha1Client
+	cloneClient             *clonev1alpha1.CloneV1alpha1Client
 	*kubernetes.Clientset
 }
 
@@ -118,6 +137,10 @@ func (k kubevirt) SecClient() secv1.SecurityV1Interface {
 	return k.secClient
 }
 
+func (k kubevirt) RouteClient() routev1.RouteV1Interface {
+	return k.routeClient
+}
+
 func (k kubevirt) DiscoveryClient() discovery.DiscoveryInterface {
 	return k.discoveryClient
 }
@@ -134,6 +157,10 @@ func (k kubevirt) GeneratedKubeVirtClient() generatedclient.Interface {
 	return k.generatedKubeVirtClient
 }
 
+func (k kubevirt) VirtualMachinePool(namespace string) poolv1.VirtualMachinePoolInterface {
+	return k.generatedKubeVirtClient.PoolV1alpha1().VirtualMachinePools(namespace)
+}
+
 func (k kubevirt) VirtualMachineSnapshot(namespace string) vmsnapshotv1alpha1.VirtualMachineSnapshotInterface {
 	return k.generatedKubeVirtClient.SnapshotV1alpha1().VirtualMachineSnapshots(namespace)
 }
@@ -146,12 +173,24 @@ func (k kubevirt) VirtualMachineRestore(namespace string) vmsnapshotv1alpha1.Vir
 	return k.generatedKubeVirtClient.SnapshotV1alpha1().VirtualMachineRestores(namespace)
 }
 
-func (k kubevirt) VirtualMachineFlavor(namespace string) flavorv1alpha1.VirtualMachineFlavorInterface {
-	return k.generatedKubeVirtClient.FlavorV1alpha1().VirtualMachineFlavors(namespace)
+func (k kubevirt) VirtualMachineExport(namespace string) vmexportv1alpha1.VirtualMachineExportInterface {
+	return k.generatedKubeVirtClient.ExportV1alpha1().VirtualMachineExports(namespace)
 }
 
-func (k kubevirt) VirtualMachineClusterFlavor() flavorv1alpha1.VirtualMachineClusterFlavorInterface {
-	return k.generatedKubeVirtClient.FlavorV1alpha1().VirtualMachineClusterFlavors()
+func (k kubevirt) VirtualMachineInstancetype(namespace string) instancetypev1alpha2.VirtualMachineInstancetypeInterface {
+	return k.generatedKubeVirtClient.InstancetypeV1alpha2().VirtualMachineInstancetypes(namespace)
+}
+
+func (k kubevirt) VirtualMachineClusterInstancetype() instancetypev1alpha2.VirtualMachineClusterInstancetypeInterface {
+	return k.generatedKubeVirtClient.InstancetypeV1alpha2().VirtualMachineClusterInstancetypes()
+}
+
+func (k kubevirt) VirtualMachinePreference(namespace string) instancetypev1alpha2.VirtualMachinePreferenceInterface {
+	return k.generatedKubeVirtClient.InstancetypeV1alpha2().VirtualMachinePreferences(namespace)
+}
+
+func (k kubevirt) VirtualMachineClusterPreference() instancetypev1alpha2.VirtualMachineClusterPreferenceInterface {
+	return k.generatedKubeVirtClient.InstancetypeV1alpha2().VirtualMachineClusterPreferences()
 }
 
 func (k kubevirt) KubernetesSnapshotClient() k8ssnapshotclient.Interface {
@@ -160,6 +199,22 @@ func (k kubevirt) KubernetesSnapshotClient() k8ssnapshotclient.Interface {
 
 func (k kubevirt) DynamicClient() dynamic.Interface {
 	return k.dynamicClient
+}
+
+func (k kubevirt) MigrationPolicy() migrationsv1.MigrationPolicyInterface {
+	return k.generatedKubeVirtClient.MigrationsV1alpha1().MigrationPolicies()
+}
+
+func (k kubevirt) MigrationPolicyClient() *migrationsv1.MigrationsV1alpha1Client {
+	return k.migrationsClient
+}
+
+func (k kubevirt) VirtualMachineClone(namespace string) clonev1alpha1.VirtualMachineCloneInterface {
+	return k.generatedKubeVirtClient.CloneV1alpha1().VirtualMachineClones(namespace)
+}
+
+func (k kubevirt) VirtualMachineCloneClient() *clonev1alpha1.CloneV1alpha1Client {
+	return k.cloneClient // TODO ihol3 delete function? who's using it?
 }
 
 type StreamOptions struct {
@@ -173,16 +228,17 @@ type StreamInterface interface {
 }
 
 type VirtualMachineInstanceInterface interface {
-	Get(name string, options *k8smetav1.GetOptions) (*v1.VirtualMachineInstance, error)
-	List(opts *k8smetav1.ListOptions) (*v1.VirtualMachineInstanceList, error)
+	Get(name string, options *metav1.GetOptions) (*v1.VirtualMachineInstance, error)
+	List(opts *metav1.ListOptions) (*v1.VirtualMachineInstanceList, error)
 	Create(instance *v1.VirtualMachineInstance) (*v1.VirtualMachineInstance, error)
 	Update(*v1.VirtualMachineInstance) (*v1.VirtualMachineInstance, error)
-	Delete(name string, options *k8smetav1.DeleteOptions) error
-	Patch(name string, pt types.PatchType, data []byte, patchOptions *k8smetav1.PatchOptions, subresources ...string) (result *v1.VirtualMachineInstance, err error)
+	Delete(name string, options *metav1.DeleteOptions) error
+	Patch(name string, pt types.PatchType, data []byte, patchOptions *metav1.PatchOptions, subresources ...string) (result *v1.VirtualMachineInstance, err error)
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	SerialConsole(name string, options *SerialConsoleOptions) (StreamInterface, error)
 	USBRedir(vmiName string) (StreamInterface, error)
 	VNC(name string) (StreamInterface, error)
+	Screenshot(name string, options *v1.ScreenshotOptions) ([]byte, error)
 	PortForward(name string, port int, protocol string) (StreamInterface, error)
 	Pause(name string, pauseOptions *v1.PauseOptions) error
 	Unpause(name string, unpauseOptions *v1.UnpauseOptions) error
@@ -197,12 +253,12 @@ type VirtualMachineInstanceInterface interface {
 }
 
 type ReplicaSetInterface interface {
-	Get(name string, options k8smetav1.GetOptions) (*v1.VirtualMachineInstanceReplicaSet, error)
-	List(opts k8smetav1.ListOptions) (*v1.VirtualMachineInstanceReplicaSetList, error)
+	Get(name string, options metav1.GetOptions) (*v1.VirtualMachineInstanceReplicaSet, error)
+	List(opts metav1.ListOptions) (*v1.VirtualMachineInstanceReplicaSetList, error)
 	Create(*v1.VirtualMachineInstanceReplicaSet) (*v1.VirtualMachineInstanceReplicaSet, error)
 	Update(*v1.VirtualMachineInstanceReplicaSet) (*v1.VirtualMachineInstanceReplicaSet, error)
-	Delete(name string, options *k8smetav1.DeleteOptions) error
-	GetScale(replicaSetName string, options k8smetav1.GetOptions) (*autov1.Scale, error)
+	Delete(name string, options *metav1.DeleteOptions) error
+	GetScale(replicaSetName string, options metav1.GetOptions) (*autov1.Scale, error)
 	UpdateScale(replicaSetName string, scale *autov1.Scale) (*autov1.Scale, error)
 	Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1.VirtualMachineInstanceReplicaSet, err error)
 	UpdateStatus(*v1.VirtualMachineInstanceReplicaSet) (*v1.VirtualMachineInstanceReplicaSet, error)
@@ -210,22 +266,23 @@ type ReplicaSetInterface interface {
 }
 
 type VirtualMachineInstancePresetInterface interface {
-	Get(name string, options k8smetav1.GetOptions) (*v1.VirtualMachineInstancePreset, error)
-	List(opts k8smetav1.ListOptions) (*v1.VirtualMachineInstancePresetList, error)
+	Get(name string, options metav1.GetOptions) (*v1.VirtualMachineInstancePreset, error)
+	List(opts metav1.ListOptions) (*v1.VirtualMachineInstancePresetList, error)
 	Create(*v1.VirtualMachineInstancePreset) (*v1.VirtualMachineInstancePreset, error)
 	Update(*v1.VirtualMachineInstancePreset) (*v1.VirtualMachineInstancePreset, error)
-	Delete(name string, options *k8smetav1.DeleteOptions) error
+	Delete(name string, options *metav1.DeleteOptions) error
 	Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1.VirtualMachineInstancePreset, err error)
 }
 
 // VirtualMachineInterface provides convenience methods to work with
 // virtual machines inside the cluster
 type VirtualMachineInterface interface {
-	Get(name string, options *k8smetav1.GetOptions) (*v1.VirtualMachine, error)
-	List(opts *k8smetav1.ListOptions) (*v1.VirtualMachineList, error)
+	Get(name string, options *metav1.GetOptions) (*v1.VirtualMachine, error)
+	GetWithExpandedSpec(name string) (*v1.VirtualMachine, error)
+	List(opts *metav1.ListOptions) (*v1.VirtualMachineList, error)
 	Create(*v1.VirtualMachine) (*v1.VirtualMachine, error)
 	Update(*v1.VirtualMachine) (*v1.VirtualMachine, error)
-	Delete(name string, options *k8smetav1.DeleteOptions) error
+	Delete(name string, options *metav1.DeleteOptions) error
 	Patch(name string, pt types.PatchType, data []byte, patchOptions *metav1.PatchOptions, subresources ...string) (result *v1.VirtualMachine, err error)
 	UpdateStatus(*v1.VirtualMachine) (*v1.VirtualMachine, error)
 	PatchStatus(name string, pt types.PatchType, data []byte, patchOptions *metav1.PatchOptions) (result *v1.VirtualMachine, err error)
@@ -234,30 +291,36 @@ type VirtualMachineInterface interface {
 	Start(name string, startOptions *v1.StartOptions) error
 	Stop(name string, stopOptions *v1.StopOptions) error
 	ForceStop(name string, stopOptions *v1.StopOptions) error
-	Migrate(name string) error
+	Migrate(name string, migrateOptions *v1.MigrateOptions) error
 	AddVolume(name string, addVolumeOptions *v1.AddVolumeOptions) error
 	RemoveVolume(name string, removeVolumeOptions *v1.RemoveVolumeOptions) error
 	PortForward(name string, port int, protocol string) (StreamInterface, error)
+	MemoryDump(name string, memoryDumpRequest *v1.VirtualMachineMemoryDumpRequest) error
+	RemoveMemoryDump(name string) error
 }
 
 type VirtualMachineInstanceMigrationInterface interface {
-	Get(name string, options *k8smetav1.GetOptions) (*v1.VirtualMachineInstanceMigration, error)
-	List(opts *k8smetav1.ListOptions) (*v1.VirtualMachineInstanceMigrationList, error)
-	Create(*v1.VirtualMachineInstanceMigration) (*v1.VirtualMachineInstanceMigration, error)
+	Get(name string, options *metav1.GetOptions) (*v1.VirtualMachineInstanceMigration, error)
+	List(opts *metav1.ListOptions) (*v1.VirtualMachineInstanceMigrationList, error)
+	Create(migration *v1.VirtualMachineInstanceMigration, options *metav1.CreateOptions) (*v1.VirtualMachineInstanceMigration, error)
 	Update(*v1.VirtualMachineInstanceMigration) (*v1.VirtualMachineInstanceMigration, error)
-	Delete(name string, options *k8smetav1.DeleteOptions) error
+	Delete(name string, options *metav1.DeleteOptions) error
 	Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1.VirtualMachineInstanceMigration, err error)
 	UpdateStatus(*v1.VirtualMachineInstanceMigration) (*v1.VirtualMachineInstanceMigration, error)
 	PatchStatus(name string, pt types.PatchType, data []byte) (result *v1.VirtualMachineInstanceMigration, err error)
 }
 
 type KubeVirtInterface interface {
-	Get(name string, options *k8smetav1.GetOptions) (*v1.KubeVirt, error)
-	List(opts *k8smetav1.ListOptions) (*v1.KubeVirtList, error)
+	Get(name string, options *metav1.GetOptions) (*v1.KubeVirt, error)
+	List(opts *metav1.ListOptions) (*v1.KubeVirtList, error)
 	Create(instance *v1.KubeVirt) (*v1.KubeVirt, error)
 	Update(*v1.KubeVirt) (*v1.KubeVirt, error)
-	Delete(name string, options *k8smetav1.DeleteOptions) error
+	Delete(name string, options *metav1.DeleteOptions) error
 	Patch(name string, pt types.PatchType, data []byte, patchOptions *metav1.PatchOptions, subresources ...string) (result *v1.KubeVirt, err error)
 	UpdateStatus(*v1.KubeVirt) (*v1.KubeVirt, error)
 	PatchStatus(name string, pt types.PatchType, data []byte, patchOptions *metav1.PatchOptions) (result *v1.KubeVirt, err error)
+}
+
+type ServerVersionInterface interface {
+	Get() (*version.Info, error)
 }

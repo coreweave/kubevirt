@@ -37,15 +37,18 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	apiregv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/certificates/triple"
 	"kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 	"kubevirt.io/kubevirt/pkg/controller"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/install"
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
@@ -67,7 +70,7 @@ func objectMatchesVersion(objectMeta *metav1.ObjectMeta, version, imageRegistry,
 
 	foundVersion, foundImageRegistry, foundID, _ := getInstallStrategyAnnotations(objectMeta)
 	foundGeneration, generationExists := objectMeta.Annotations[v1.KubeVirtGenerationAnnotation]
-	foundLabels := objectMeta.Labels[v1.ManagedByLabel] == v1.ManagedByLabelOperatorValue
+	foundLabels := util.IsManagedByOperator(objectMeta.Labels)
 	sGeneration := strconv.FormatInt(generation, 10)
 
 	if generationExists && foundGeneration != sGeneration {
@@ -112,7 +115,7 @@ func injectOperatorMetadata(kv *v1.KubeVirt, objectMeta *metav1.ObjectMeta, vers
 }
 
 const (
-	kubernetesOSLabel = "kubernetes.io/os"
+	kubernetesOSLabel = corev1.LabelOSStable
 	kubernetesOSLinux = "linux"
 )
 
@@ -310,6 +313,18 @@ func haveControllerDeploymentsRolledOver(targetStrategy *install.Strategy, kv *v
 	return true
 }
 
+func haveExportProxyDeploymentsRolledOver(targetStrategy *install.Strategy, kv *v1.KubeVirt, stores util.Stores) bool {
+	for _, deployment := range targetStrategy.ExportProxyDeployments() {
+		if !util.DeploymentIsReady(kv, deployment, stores) {
+			log.Log.V(2).Infof("Waiting on deployment %v to roll over to latest version", deployment.GetName())
+			// not rolled out yet
+			return false
+		}
+	}
+
+	return true
+}
+
 func haveDaemonSetsRolledOver(targetStrategy *install.Strategy, kv *v1.KubeVirt, stores util.Stores) bool {
 	for _, daemonSet := range targetStrategy.DaemonSets() {
 		if !util.DaemonsetIsReady(kv, daemonSet, stores) {
@@ -435,9 +450,10 @@ type Reconciler struct {
 	clientset        kubecli.KubevirtClient
 	aggregatorclient install.APIServiceInterface
 	expectations     *util.Expectations
+	recorder         record.EventRecorder
 }
 
-func NewReconciler(kv *v1.KubeVirt, targetStrategy *install.Strategy, stores util.Stores, clientset kubecli.KubevirtClient, aggregatorclient install.APIServiceInterface, expectations *util.Expectations) (*Reconciler, error) {
+func NewReconciler(kv *v1.KubeVirt, targetStrategy *install.Strategy, stores util.Stores, clientset kubecli.KubevirtClient, aggregatorclient install.APIServiceInterface, expectations *util.Expectations, recorder record.EventRecorder) (*Reconciler, error) {
 	kvKey, err := controller.KeyFunc(kv)
 	if err != nil {
 		return nil, err
@@ -454,13 +470,14 @@ func NewReconciler(kv *v1.KubeVirt, targetStrategy *install.Strategy, stores uti
 	}
 
 	return &Reconciler{
-		kv,
-		kvKey,
-		targetStrategy,
-		stores,
-		clientset,
-		aggregatorclient,
-		expectations,
+		kv:               kv,
+		kvKey:            kvKey,
+		targetStrategy:   targetStrategy,
+		stores:           stores,
+		clientset:        clientset,
+		aggregatorclient: aggregatorclient,
+		expectations:     expectations,
+		recorder:         recorder,
 	}, nil
 }
 
@@ -484,10 +501,14 @@ func (r *Reconciler) Sync(queue workqueue.RateLimitingInterface) (bool, error) {
 
 	apiDeploymentsRolledOver := haveApiDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
 	controllerDeploymentsRolledOver := haveControllerDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
+
+	exportProxyEnabled := r.exportProxyEnabled()
+	exportProxyDeploymentsRolledOver := !exportProxyEnabled || haveExportProxyDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
+
 	daemonSetsRolledOver := haveDaemonSetsRolledOver(r.targetStrategy, r.kv, r.stores)
 
 	infrastructureRolledOver := false
-	if apiDeploymentsRolledOver && controllerDeploymentsRolledOver && daemonSetsRolledOver {
+	if apiDeploymentsRolledOver && controllerDeploymentsRolledOver && exportProxyDeploymentsRolledOver && daemonSetsRolledOver {
 
 		// infrastructure has rolled over and is available
 		infrastructureRolledOver = true
@@ -577,7 +598,7 @@ func (r *Reconciler) Sync(queue workqueue.RateLimitingInterface) (bool, error) {
 	}
 
 	if shouldTakeUpdatePath(targetVersion, observedVersion) {
-		finished, err := r.updateKubeVirtSystem(daemonSetsRolledOver, controllerDeploymentsRolledOver)
+		finished, err := r.updateKubeVirtSystem(controllerDeploymentsRolledOver)
 		if !finished || err != nil {
 			return false, err
 		}
@@ -623,7 +644,6 @@ func (r *Reconciler) createOrRollBackSystem(apiDeploymentsRolledOver bool) (bool
 
 	// create/update API Deployments
 	for _, deployment := range r.targetStrategy.ApiDeployments() {
-		deployment := deployment.DeepCopy()
 		deployment, err := r.syncDeployment(deployment)
 		if err != nil {
 			return false, err
@@ -652,15 +672,54 @@ func (r *Reconciler) createOrRollBackSystem(apiDeploymentsRolledOver bool) (bool
 		}
 	}
 
+	// create/update ExportProxy Deployments
+	for _, deployment := range r.targetStrategy.ExportProxyDeployments() {
+		if r.exportProxyEnabled() {
+			deployment, err := r.syncDeployment(deployment)
+			if err != nil {
+				return false, err
+			}
+			err = r.syncPodDisruptionBudgetForDeployment(deployment)
+			if err != nil {
+				return false, err
+			}
+		} else if err := r.deleteDeployment(deployment); err != nil {
+			return false, err
+		}
+	}
+
 	// create/update Daemonsets
 	for _, daemonSet := range r.targetStrategy.DaemonSets() {
-		err := r.syncDaemonSet(daemonSet)
-		if err != nil {
+		finished, err := r.syncDaemonSet(daemonSet)
+		if !finished || err != nil {
 			return false, err
 		}
 	}
 
 	return true, nil
+}
+
+func (r *Reconciler) deleteDeployment(deployment *appsv1.Deployment) error {
+	obj, exists, err := r.stores.DeploymentCache.Get(deployment)
+	if err != nil {
+		return err
+	}
+
+	if !exists || obj.(*appsv1.Deployment).DeletionTimestamp != nil {
+		return nil
+	}
+
+	key, err := controller.KeyFunc(deployment)
+	if err != nil {
+		return err
+	}
+	r.expectations.Deployment.AddExpectedDeletion(r.kvKey, key)
+	if err := r.clientset.AppsV1().Deployments(deployment.Namespace).Delete(context.Background(), deployment.Name, metav1.DeleteOptions{}); err != nil {
+		r.expectations.Deployment.DeletionObserved(r.kvKey, key)
+		return err
+	}
+
+	return nil
 }
 
 func (r *Reconciler) deleteObjectsNotInInstallStrategy() error {
@@ -995,7 +1054,7 @@ func (r *Reconciler) deleteObjectsNotInInstallStrategy() error {
 			if !found {
 				if key, err := controller.KeyFunc(rb); err == nil {
 					r.expectations.RoleBinding.AddExpectedDeletion(r.kvKey, key)
-					err := r.clientset.RbacV1().RoleBindings(r.kv.Namespace).Delete(context.Background(), rb.Name, deleteOptions)
+					err := r.clientset.RbacV1().RoleBindings(rb.Namespace).Delete(context.Background(), rb.Name, deleteOptions)
 					if err != nil {
 						r.expectations.RoleBinding.DeletionObserved(r.kvKey, key)
 						log.Log.Errorf("Failed to delete rb %+v: %v", rb, err)
@@ -1020,7 +1079,7 @@ func (r *Reconciler) deleteObjectsNotInInstallStrategy() error {
 			if !found {
 				if key, err := controller.KeyFunc(role); err == nil {
 					r.expectations.Role.AddExpectedDeletion(r.kvKey, key)
-					err := r.clientset.RbacV1().Roles(r.kv.Namespace).Delete(context.Background(), role.Name, deleteOptions)
+					err := r.clientset.RbacV1().Roles(role.Namespace).Delete(context.Background(), role.Name, deleteOptions)
 					if err != nil {
 						r.expectations.Role.DeletionObserved(r.kvKey, key)
 						log.Log.Errorf("Failed to delete role %+v: %v", role, err)
@@ -1045,7 +1104,7 @@ func (r *Reconciler) deleteObjectsNotInInstallStrategy() error {
 			if !found {
 				if key, err := controller.KeyFunc(sa); err == nil {
 					r.expectations.ServiceAccount.AddExpectedDeletion(r.kvKey, key)
-					err := r.clientset.CoreV1().ServiceAccounts(r.kv.Namespace).Delete(context.Background(), sa.Name, deleteOptions)
+					err := r.clientset.CoreV1().ServiceAccounts(sa.Namespace).Delete(context.Background(), sa.Name, deleteOptions)
 					if err != nil {
 						r.expectations.ServiceAccount.DeletionObserved(r.kvKey, key)
 						log.Log.Errorf("Failed to delete serviceaccount %+v: %v", sa, err)
@@ -1103,7 +1162,7 @@ func (r *Reconciler) deleteObjectsNotInInstallStrategy() error {
 					r.expectations.PrometheusRule.AddExpectedDeletion(r.kvKey, key)
 					err := r.clientset.PrometheusClient().
 						MonitoringV1().
-						PrometheusRules(r.kv.Namespace).
+						PrometheusRules(cachePromRule.Namespace).
 						Delete(context.Background(), cachePromRule.Name, deleteOptions)
 					if err != nil {
 						r.expectations.PrometheusRule.DeletionObserved(r.kvKey, key)
@@ -1115,7 +1174,49 @@ func (r *Reconciler) deleteObjectsNotInInstallStrategy() error {
 		}
 	}
 
+	// remove unused prometheus serviceMonitor obejcts
+	objects = r.stores.ServiceMonitorCache.List()
+	for _, obj := range objects {
+		if cacheServiceMonitor, ok := obj.(*promv1.ServiceMonitor); ok && cacheServiceMonitor.DeletionTimestamp == nil {
+			found := false
+			for _, targetServiceMonitor := range r.targetStrategy.ServiceMonitors() {
+				if targetServiceMonitor.Name == cacheServiceMonitor.Name && targetServiceMonitor.Namespace == cacheServiceMonitor.Namespace {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if key, err := controller.KeyFunc(cacheServiceMonitor); err == nil {
+					r.expectations.ServiceMonitor.AddExpectedDeletion(r.kvKey, key)
+					err := r.clientset.PrometheusClient().
+						MonitoringV1().
+						ServiceMonitors(cacheServiceMonitor.Namespace).
+						Delete(context.Background(), cacheServiceMonitor.Name, deleteOptions)
+					if err != nil {
+						r.expectations.ServiceMonitor.DeletionObserved(r.kvKey, key)
+						log.Log.Errorf("Failed to delete prometheusServiceMonitor %+v: %v", cacheServiceMonitor, err)
+						return err
+					}
+				}
+			}
+		}
+	}
+
 	return nil
+}
+
+func (r *Reconciler) exportProxyEnabled() bool {
+	if r.kv.Spec.Configuration.DeveloperConfiguration == nil {
+		return false
+	}
+
+	for _, fg := range r.kv.Spec.Configuration.DeveloperConfiguration.FeatureGates {
+		if fg == virtconfig.VMExportGate {
+			return true
+		}
+	}
+
+	return false
 }
 
 func getInstallStrategyAnnotations(meta *metav1.ObjectMeta) (imageTag, imageRegistry, id string, ok bool) {

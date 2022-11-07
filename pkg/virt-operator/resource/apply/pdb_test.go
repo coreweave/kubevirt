@@ -3,13 +3,14 @@ package apply
 import (
 	"encoding/json"
 
+	"kubevirt.io/kubevirt/tests"
+
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v12 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/api/policy/v1beta1"
+	policyv1 "k8s.io/api/policy/v1"
 	_ "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -18,6 +19,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
@@ -32,18 +34,18 @@ var _ = Describe("Apply PDBs", func() {
 	var kv *v1.KubeVirt
 	var deployment *v12.Deployment
 	var mockPodDisruptionBudgetCacheStore *MockStore
-	var requiredPDB *v1beta1.PodDisruptionBudget
+	var requiredPDB *policyv1.PodDisruptionBudget
 	var r *Reconciler
 	var mockGeneration int64
 	var err error
 
-	getCachedPDB := func() *v1beta1.PodDisruptionBudget {
+	getCachedPDB := func() *policyv1.PodDisruptionBudget {
 		Expect(requiredPDB).ToNot(BeNil())
 
 		cachedPDB := requiredPDB.DeepCopy()
 		injectOperatorMetadata(kv, &cachedPDB.ObjectMeta, Version, Registry, Id, true)
 		err := stores.PodDisruptionBudgetCache.Add(cachedPDB)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		return cachedPDB
 	}
@@ -61,7 +63,7 @@ var _ = Describe("Apply PDBs", func() {
 
 		clientset = kubecli.NewMockKubevirtClient(ctrl)
 		clientset.EXPECT().KubeVirt(Namespace).Return(kvInterface).AnyTimes()
-		clientset.EXPECT().PolicyV1beta1().Return(pdbClient.PolicyV1beta1()).AnyTimes()
+		clientset.EXPECT().PolicyV1().Return(pdbClient.PolicyV1()).AnyTimes()
 		kv = &v1.KubeVirt{}
 
 		r = &Reconciler{
@@ -72,7 +74,11 @@ var _ = Describe("Apply PDBs", func() {
 			expectations:   expectations,
 		}
 
-		deployment, err = components.NewApiServerDeployment(Namespace, Registry, "", Version, "", "", "", corev1.PullIfNotPresent, "verbosity", map[string]string{})
+		virtApiConfig := &util.KubeVirtDeploymentConfig{
+			Registry:        Registry,
+			KubeVirtVersion: Version,
+		}
+		deployment, err = tests.GetDefaultVirtApiDeployment(Namespace, virtApiConfig)
 		Expect(err).ToNot(HaveOccurred())
 
 		kv.Status.TargetKubeVirtRegistry = Registry
@@ -93,10 +99,6 @@ var _ = Describe("Apply PDBs", func() {
 
 	})
 
-	AfterEach(func() {
-		ctrl.Finish()
-	})
-
 	Context("Reconciliation", func() {
 		It("should not patch PDB on sync when they are equal", func() {
 			cachedPDB := getCachedPDB()
@@ -108,7 +110,7 @@ var _ = Describe("Apply PDBs", func() {
 				return true, nil, nil
 			})
 
-			Expect(r.syncPodDisruptionBudgetForDeployment(deployment)).To(BeNil())
+			Expect(r.syncPodDisruptionBudgetForDeployment(deployment)).To(Succeed())
 		})
 
 		It("should patch PDB on sync when it is not equal to the required PDB", func() {
@@ -130,12 +132,12 @@ var _ = Describe("Apply PDBs", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				obj, err := json.Marshal(cachedPDB)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				obj, err = patch.Apply(obj)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
-				pdb := &v1beta1.PodDisruptionBudget{}
+				pdb := &policyv1.PodDisruptionBudget{}
 				Expect(json.Unmarshal(obj, pdb)).To(Succeed())
 				Expect(pdb.ObjectMeta.Annotations[versionAnnotation]).To(Equal(originalVersion))
 

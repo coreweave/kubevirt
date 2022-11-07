@@ -28,6 +28,7 @@ import (
 	virtv1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/util/status"
 )
@@ -47,7 +48,7 @@ var (
 	outdatedVirtualMachineInstanceWorkloads = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "kubevirt_vmi_outdated_count",
-			Help: "Indication for the number of VirtualMachineInstance workloads that are not running within the most up-to-date version of the virt-launcher environment.",
+			Help: "Indication for the total number of VirtualMachineInstance workloads that are not running within the most up-to-date version of the virt-launcher environment.",
 		},
 	)
 )
@@ -209,6 +210,7 @@ func (c *WorkloadUpdateController) enqueueKubeVirt(obj interface{}) {
 	key, err := controller.KeyFunc(kv)
 	if err != nil {
 		logger.Object(kv).Reason(err).Error("Failed to extract key from KubeVirt.")
+		return
 	}
 	c.queue.AddAfter(key, defaultThrottleIntervalSeconds)
 }
@@ -484,7 +486,7 @@ func (c *WorkloadUpdateController) sync(kv *virtv1.KubeVirt) error {
 				Spec: virtv1.VirtualMachineInstanceMigrationSpec{
 					VMIName: vmi.Name,
 				},
-			})
+			}, &metav1.CreateOptions{})
 			if err != nil {
 				log.Log.Object(vmi).Reason(err).Errorf("Failed to migrate vmi as part of workload update")
 				c.migrationExpectations.CreationObserved(key)
@@ -510,7 +512,7 @@ func (c *WorkloadUpdateController) sync(kv *virtv1.KubeVirt) error {
 				errChan <- err
 			}
 
-			err = c.clientset.CoreV1().Pods(vmi.Namespace).Evict(context.Background(),
+			err = c.clientset.CoreV1().Pods(vmi.Namespace).EvictV1beta1(context.Background(),
 				&policy.Eviction{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      pod.Name,
